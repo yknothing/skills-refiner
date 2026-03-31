@@ -25,7 +25,13 @@ A strong answer does not need to use the same wording as the golden notes. It do
 
 - `rubric.md` — scoring rubric and pass/fail signals
 - `cases/` — evaluation case inputs
+  - `case-01-stage1-single-skill.md` — Stage 1 only: analyze a single pasted skill file
+  - `case-02-stage1-partial-evidence.md` — Stage 1 only: analyze a repository from README-only evidence
+  - `case-03-stage2-with-target.md` — Stage 2 active: analyze a repository and integrate into a target
 - `golden/` — anchor judgments, expected strengths, expected failure modes
+  - `case-01-anchors.md` — anchors for case 01
+  - `case-02-anchors.md` — anchors for case 02
+  - `case-03-anchors.md` — anchors for case 03
 
 ## How to use
 
