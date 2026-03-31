@@ -67,10 +67,21 @@ The report follows a stable structure:
 10. Integration Plan or Refinement Plan
 11. Final Conclusion
 
+## Installation
+
+Install this skill using the [skills CLI](https://github.com/vercel-labs/skills):
+
+```bash
+npx skills add yknothing/skills-refiner
+```
+
+This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https://github.com/vercel-labs/skills#supported-agents).
+
 ## Repository layout
 
-- `skills/skills-refiner.md` — main skill file
+- `skills/skills-refiner/SKILL.md` — main skill file
 - `examples/README.md` — example invocations and usage patterns
+- `evals/` — evaluation rubric, cases, and anchor judgments
 
 ## Design principles
 

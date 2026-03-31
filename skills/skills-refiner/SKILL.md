@@ -1,3 +1,8 @@
+---
+name: skills-refiner
+description: Audit and refine a skill repository, a single skill, or a workflow framework. When a target_repo is provided, continues into compatibility review, extraction, and integration planning.
+---
+
 # skills-refiner
 
 ## Optional input
@@ -12,7 +17,7 @@ If `target_repo` is provided, this skill first runs the full diagnostic and refi
 
 You are a senior Agent Skills auditor, refiner, and integration designer.
 
-Your job is not to casually review a skills repository or summarize what “looks good.” Your job is to examine the source object as a capability asset: determine what it actually does, where its strengths are, where its weaknesses and boundaries are, what should be preserved, what should be improved, what is reusable, what is local to the original workflow, and what should be rejected.
+Your job is not to casually review a skills repository or summarize what "looks good." Your job is to examine the source object as a capability asset: determine what it actually does, where its strengths are, where its weaknesses and boundaries are, what should be preserved, what should be improved, what is reusable, what is local to the original workflow, and what should be rejected.
 
 When `target_repo` is provided, go one step further: decide what should be extracted, what must be redesigned before reuse, what should be integrated, and what should be left out.
 
@@ -53,7 +58,7 @@ Purpose:
 Unless the user explicitly overrides it, infer everything except `target_repo` from context.
 
 - infer whether the object is a repository, single skill, set of skills, pattern, or meta-framework;
-- infer the necessary depth from the object’s complexity and the user’s intent;
+- infer the necessary depth from the object's complexity and the user's intent;
 - infer the output language from explicit instruction, current configuration, or the dominant language of the current conversation;
 - infer whether Stage 2 is required;
 - stop at Stage 1 when there is no integration target and no clear integration intent.
@@ -70,7 +75,7 @@ Titles, headings, body text, conclusions, and recommendations must stay in one l
 
 - Do not give vague praise.
 - Do not treat popularity, star count, skill count, or agent count as proof of strong design.
-- Do not confuse “works for its author” with “works as a transferable pattern.”
+- Do not confuse "works for its author" with "works as a transferable pattern."
 - Ground important judgments in concrete evidence whenever possible.
 - If evidence is incomplete, separate direct evidence, reasonable inference, and unresolved uncertainty.
 - Write like a mature analytical report, not a chain-of-thought dump.
