@@ -40,6 +40,20 @@ The default artifact should be strong enough to publish directly or adapt into a
 
 ---
 
+## Language handling
+
+This skill supports both **Chinese and English**. Infer the output language from context unless the user explicitly specifies one.
+
+Output language priority:
+
+**explicit user instruction > current configuration > dominant language of the current prompt or conversation > default**
+
+If the user writes in Chinese, respond entirely in Chinese. If the user writes in English, respond entirely in English. Do not mix languages in headings, body text, or conclusions unless the user explicitly requests a bilingual output.
+
+This applies equally to the article title, section headings, analytical language, and design takeaways.
+
+---
+
 ## Core requirements
 
 - Do not give vague praise.

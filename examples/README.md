@@ -2,6 +2,8 @@
 
 These examples show the intended invocation style. The skill is designed to keep the explicit input surface small.
 
+Both Chinese and English invocations are supported. The skill infers the output language from the language you use.
+
 ## 1) Audit and refine the current repository
 
 Use `skills-refiner` on this repository.
@@ -38,9 +40,44 @@ Expected behavior:
 - emphasize refinement judgment and four-way extraction;
 - do not force integration planning unless the context clearly calls for it.
 
+---
+
+## 中文调用示例
+
+以下示例展示中文调用方式。使用中文提问时，`skills-refiner` 会全程以中文输出。
+
+### 5）审查并优化当前仓库
+
+用 `skills-refiner` 分析这个仓库。
+
+预期行为：
+- 从当前仓库页面或附加内容推断分析对象；
+- 仅执行第一阶段（审查与优化）；
+- 返回结构化报告和优化建议。
+
+### 6）审查一个 skill 文件
+
+用 `skills-refiner` 分析这个 skill。重点关注边界清晰度、可复用性、上下文工程质量和改进机会。
+
+预期行为：
+- 以当前 skill 文件或粘贴内容作为分析对象；
+- 判断其是否过于宽泛、模糊、平台绑定或难以维护；
+- 返回面向优化的分析报告。
+
+### 7）审查仓库并整合到目标仓库
+
+用 `skills-refiner` 分析这个仓库，目标仓库为 `yknothing/prodcraft`。
+
+预期行为：
+- 先完成第一阶段审查；
+- 再针对 `yknothing/prodcraft` 执行兼容性与整合分析；
+- 提供最小可行整合方案和高价值增强方案。
+
+---
+
 ## Notes
 
 - `target_repo` is optional.
 - If `target_repo` is not provided, the skill should stop after Stage 1 and return refinement actions.
 - If `target_repo` is provided or clearly implied, the skill should continue into Stage 2 automatically.
-- Output language should follow: explicit user instruction > current configuration > dominant conversation language > default.
+- Output language follows: explicit user instruction > current configuration > dominant conversation language > default.
