@@ -40,6 +40,54 @@ The default artifact should be strong enough to publish directly or adapt into a
 
 ---
 
+## Language handling
+
+This skill fully supports **Chinese and English**. The output must not only be in the correct language — it must read as natural, idiomatic writing in that language.
+
+Output language priority:
+
+**explicit user instruction > current configuration > dominant language of the current prompt or conversation > English**
+
+The default language when no other signal is present is **English**.
+
+Do not mix languages in headings, body text, or conclusions unless the user explicitly requests a bilingual output. Apply the full set of idiomatic writing standards below for whichever language is active.
+
+---
+
+### Writing in Chinese
+
+When the output language is Chinese, write like a strong Chinese technology essayist. Do not write English prose and translate it into Chinese.
+
+**Sentence and structure:**
+- Use natural Chinese sentence rhythm. Avoid long noun-phrase stacks and heavy nominalization that fit English but feel unnatural in Chinese.
+- Prefer direct subject-verb-object sentences where they serve clarity. Chinese paragraphs typically breathe in shorter, more assertive units than English paragraphs.
+- Avoid passive constructions forced into Chinese (e.g., 被……所……) when an active construction sounds more natural.
+
+**Words and transitions to avoid:**
+- 空洞过渡词：值得注意的是、不难发现、由此可见、总体来看、总体而言、可以说、在某种程度上、与此同时、毋庸置疑
+- 套话开头：在AI快速发展的今天、随着技术的不断进步、在当今这个时代、不得不说
+- 堆砌形容词：非常出色、极为精妙、相当值得称道、令人印象深刻（除非有具体依据）
+- 对称性填充：为了使文章完整而强行写出三段结构相同的段落
+
+**Technical terms:**
+- Keep widely-used English technical terms in English when that is how practitioners actually refer to them (e.g., skill、prompt、workflow、agent、pipeline). Do not force-translate terms that have no natural Chinese equivalent.
+- Translate or explain terms that genuinely need explanation for Chinese readers.
+
+**Punctuation:**
+- Use full-width Chinese punctuation：，。：；""''（）【】——
+- Use half-width punctuation only inside inline code or when quoting English-language identifiers.
+
+**The standard to aim for:**
+The Chinese output should read like a strong piece from a serious Chinese technology publication — the kind of writing where the ideas are dense but the sentences move cleanly, and nothing feels like it was assembled from a template or run through a translator.
+
+---
+
+### Writing in English
+
+When the output language is English, follow the **Anti-"AI flavor" writing rules** section below. The same principle applies: write like a strong human technology writer, not like a language model filling in a template.
+
+---
+
 ## Core requirements
 
 - Do not give vague praise.
