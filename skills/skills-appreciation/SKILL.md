@@ -99,6 +99,33 @@ When the output language is English, follow the **Anti-"AI flavor" writing rules
 - If the evidence is partial, separate direct evidence, reasonable inference, and unresolved uncertainty.
 - Optimize for both **technical rigor** and **human readability**.
 - Keep the prose low on obvious "AI flavor": no filler excitement, no hollow symmetry, no padded transitions, no empty grandstanding.
+- **Calibrate to the actual reader.** Before writing, decide who will read this article. If the reader is not an expert in the subject domain, translate every piece of domain-specific terminology at first use. Never assume the reader already knows what a "skill," "intake," "compound step," or any domain concept means.
+- **Concrete examples are required for abstract claims.** Every significant design claim must be supported by a specific, grounded example — not a feature name, but a description of what actually happens when that feature is used.
+
+---
+
+## Audience calibration (critical)
+
+The single most common failure mode for this skill is writing for an expert audience when the intended reader is a general or mixed audience.
+
+Before writing anything, decide:
+
+1. **Who is the primary reader?**
+   - Expert (deeply familiar with Agent Skills, prompt engineering, multi-agent systems)
+   - Practitioner (builds software, uses AI tools, but not focused on Skills design)
+   - General tech reader (curious about AI-assisted development, limited domain exposure)
+
+2. **What does the reader need explained vs. assumed?**
+   - For expert readers: mechanisms and design trade-offs can be discussed using domain vocabulary without explanation
+   - For practitioner readers: explain the domain concept at first use; use analogies to existing software engineering concepts
+   - For general readers: build from a concrete real-world problem; explain what "Agent Skills" means before discussing specific systems
+
+3. **What concrete experience can the reader map your analysis onto?**
+   - Every abstract design claim should be anchored to a situation the target reader has personally encountered
+
+If the user does not specify a reader, default to **practitioner-level calibration**: someone who writes software and uses AI tools but is not immersed in the Agent Skills ecosystem.
+
+Document your audience decision at the start of Step 1 and let it govern every subsequent word choice.
 
 ---
 
@@ -113,6 +140,22 @@ Judge the target according to what it is trying to do.
 - If the target mixes categories, explain the mix instead of forcing it into a single template.
 
 A strong appreciation piece makes the evaluation criteria explicit when they matter.
+
+---
+
+## Multi-target comparison (when appreciating several systems together)
+
+When the task involves comparing or appreciating multiple skills, repositories, or systems simultaneously, apply the following extensions:
+
+1. **Find the underlying question.** Multiple systems are worth comparing only when they represent different answers to the same underlying question. Identify that question first. "What does this skills system think is the hardest unsolved problem in AI-assisted development?" is usually the right question.
+
+2. **Resist feature-list comparison.** Do not compare systems by enumerating what each one has. Compare them by what each one treats as its center of gravity, and why.
+
+3. **Make the trade-offs visible.** Each system's strengths are inseparable from its costs. Describe both: what you gain from this approach, and what you sacrifice or make harder.
+
+4. **Separate what is transferable from what is author-specific.** Some design choices generalize; others are deeply tied to a specific context, team, or workflow. Make this distinction explicit.
+
+5. **Use a unified analytical lens.** Apply the same set of questions to each system so readers can compare your analyses directly, not just read four separate essays.
 
 ---
 
@@ -171,6 +214,15 @@ What is the next step required to surpass the original rather than merely imitat
 
 ## Workflow
 
+### Step 0 — Audience calibration
+Before doing anything else, decide:
+- Who is the primary reader?
+- What domain knowledge can be assumed?
+- What must be explained from scratch?
+- What concrete experiences can the reader map your analysis onto?
+
+Write one sentence summarizing your audience decision. Let it govern all subsequent choices.
+
 ### Step 1 — Identify the target
 State clearly:
 - what the target is;
@@ -197,12 +249,14 @@ At minimum, determine:
 - the most overrated impression;
 - the most useful reader takeaway.
 
+For each item on this list, identify a concrete example from the target material that makes the claim visible to a practitioner-level reader.
+
 ### Step 4 — Design the article structure
 Default progression:
-1. opening thesis paragraph;
-2. what this target really is;
-3. why its design works the way it does;
-4. the most important strengths;
+1. opening thesis paragraph (with concrete grounding — start with a problem, not a trend);
+2. what this target really is (defined in plain language, not just restated from its README);
+3. why its design works the way it does (mechanisms, not feature lists);
+4. the most important strengths (each anchored to a specific example);
 5. the most important weaknesses or limits;
 6. what designers should learn from it;
 7. what it would take to surpass it.
@@ -217,11 +271,14 @@ The article should combine:
 
 Prefer continuous prose. Use lists or tables only when they genuinely improve comparison, compression, or reader understanding.
 
+On the first use of any domain-specific term (e.g., "intake," "compound step," "subagent," "skill"), give a one-clause plain-language explanation unless you have established in Step 0 that your reader already knows this term.
+
 ### Step 6 — Editorial pass
 Before finalizing, check the draft against `references/editorial-checklist.md`.
 
 Especially verify:
-- the opening makes a real claim;
+- the opening makes a real claim grounded in a concrete scenario;
+- technical terms are explained at first use (unless expert audience was confirmed in Step 0);
 - the middle sections develop that claim instead of orbiting around it;
 - the article teaches something reusable;
 - the prose does not sound templated or padded;
@@ -257,7 +314,7 @@ If the user explicitly asks for a blog article, optimize the piece for publicati
 ## Output expectations
 
 A strong output should:
-- be understandable to a serious reader without dumbing things down;
+- be understandable to a practitioner-level reader without requiring prior domain expertise;
 - make key judgments visible early;
 - explain mechanisms, not just features;
 - leave the reader with sharper design instincts;
@@ -272,7 +329,9 @@ A strong output should:
 - forcing engineering criteria onto creative skills that should be judged differently;
 - explaining features without uncovering design logic;
 - writing a polished but empty article;
-- sounding obviously machine-generated.
+- sounding obviously machine-generated;
+- **writing for an expert audience when the actual reader is a practitioner or general reader** — this is the most common failure, and it produces articles that are technically accurate but practically useless to the people who most need them;
+- **listing feature names without explaining what they mean or what they do** — naming a command or skill without describing the mechanism it implements tells the reader nothing transferable.
 
 ---
 

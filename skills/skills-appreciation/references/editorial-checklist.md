@@ -4,9 +4,16 @@ Use this checklist to improve the final article before you present it.
 
 ## Thesis and framing
 
-- The opening paragraph makes a specific, non-generic claim.
+- The opening paragraph makes a specific, non-generic claim grounded in a concrete scenario (not a generic trend statement).
 - The article identifies what the target really is instead of repeating its self-description.
 - The article's main judgment is visible early rather than buried late.
+
+## Audience calibration
+
+- The audience was identified before writing (expert / practitioner / general reader).
+- Domain-specific terms are explained at first use unless an expert audience was confirmed.
+- Abstract design claims are each anchored to a concrete, specific example from the target.
+- A practitioner-level reader could finish this article with a real understanding of the subject — not just a list of feature names.
 
 ## Logic and structure
 
