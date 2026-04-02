@@ -62,6 +62,13 @@ Does the answer keep language, tone, and terminology under control?
 - **3**: mostly consistent, with some drift or stiffness
 - **1**: mixed-language headings, obvious prompt-speak, or repetitive AI-style transitions
 
+### 9. Collaboration awareness (when auditing skill-creator outputs)
+Does the answer correctly position itself relative to skill-creator?
+
+- **5**: focuses entirely on design-level concerns that assertion-based testing does not cover; frames refinement actions for skill-creator's iteration loop; does not duplicate functional testing
+- **3**: mostly correct positioning, but slips into functional-testing territory or gives actions that do not map cleanly to skill-creator's workflow
+- **1**: duplicates skill-creator's job (attempts to run tests, generate assertions, or optimize the description) or ignores the collaboration context entirely
+
 ## Quick pass/fail checks
 
 A run should be considered **failing** if any of the following happens:

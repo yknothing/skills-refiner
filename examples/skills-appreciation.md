@@ -105,3 +105,27 @@ Expected behavior:
 - If the evidence is partial, the skill should say so clearly and still produce the best local interpretation possible.
 - If the user explicitly wants a tighter teaching note or short appreciation, the skill should adapt without losing the core thesis.
 - If the user actually wants refinement, extraction, or integration planning, `skills-refiner` is usually the better fit.
+
+---
+
+## Collaboration with skill-creator
+
+### 10) Explain a skill we just built to the team
+
+We just finished building this skill with skill-creator and auditing it with skills-refiner. Use `skills-appreciation` to write an explanation that helps our team understand why it is designed this way and what they should know before using it.
+
+Expected behavior:
+- produce a team-readable explanation, not an audit report;
+- explain why the key design choices matter, not just what the skill does;
+- frame the output as onboarding material for people who will use the skill;
+- keep it clear enough that non-specialist team members can follow it.
+
+### 11) 为团队解读刚创建的 skill
+
+我们刚用 skill-creator 创建了这个 skill，也用 skills-refiner 做了审查。用 `skills-appreciation` 写一篇解读，帮助团队理解这个 skill 为什么被设计成这样，使用前需要知道什么。
+
+预期行为：
+- 输出团队可读的解读文章，不是审计报告；
+- 解释关键设计决策的原因，而不仅仅列出功能；
+- 作为使用这个 skill 的团队成员的入门资料；
+- 清晰到非技术背景的团队成员也能理解。

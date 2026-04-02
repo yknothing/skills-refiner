@@ -248,6 +248,7 @@ Infer from context unless the user overrides it.
 - **Teaching note** — more compact and more overtly pedagogical.
 - **Short appreciation** — shorter commentary when the user wants something brief but still insightful.
 - **Designer-focused interpretation** — emphasize design lessons, transferable methods, and next moves.
+- **Post-creation interpretation** — explain a skill that was just built or iterated (often with skill-creator) to help team members, users, or reviewers understand why it is designed the way it is, what it does well, and where its boundaries are. Optimize for clarity and onboarding value over publication polish.
 
 If the user explicitly asks for a blog article, optimize the piece for publication quality by default.
 
@@ -272,3 +273,27 @@ A strong output should:
 - explaining features without uncovering design logic;
 - writing a polished but empty article;
 - sounding obviously machine-generated.
+
+---
+
+## Collaboration with skill-creator and skills-refiner
+
+This skill can be used after `skill-creator` builds a skill or after `skills-refiner` audits one. Each tool occupies a different position in the skill lifecycle:
+
+- **skill-creator** creates, tests, iterates, and packages skills.
+- **skills-refiner** audits design quality, structure, and boundaries.
+- **skills-appreciation** explains why a skill works, what it teaches, and who should care.
+
+### When to use this skill in the collaboration flow
+
+- After a skill is finalized through skill-creator's iteration loop, write an interpretation piece that helps team members understand the skill's design rationale and usage boundaries.
+- After skills-refiner produces an audit report, translate the key findings into a readable explanation that non-specialist readers can act on.
+- When a new skill needs internal documentation that goes beyond a README — something that explains not just what it does but why it is designed this way.
+
+### What this skill does NOT do in collaboration mode
+
+- Does not run functional tests or generate assertions.
+- Does not produce a scorecard or structured audit report — that is skills-refiner's job.
+- Does not iterate on the skill itself — that is skill-creator's job.
+
+This skill's job is to make the design legible to a broader audience.

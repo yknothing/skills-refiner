@@ -1,6 +1,6 @@
 ---
 name: skills-refiner
-description: Audit and refine a skill repository, a single skill, or a workflow framework. When a target_repo is provided, continues into compatibility review, extraction, and integration planning.
+description: Audit and refine a skill repository, a single skill, a workflow framework, or an eval set. Covers design quality, context engineering, purpose fit, evidence discipline, and boundary clarity — the structural dimensions that assertion-based testing does not reach. When a target_repo is provided, continues into compatibility review, extraction, and integration planning. Complements skill-creator by providing deep design-level judgment after functional tests pass.
 ---
 
 # skills-refiner
@@ -246,3 +246,44 @@ If only a README, a single page, a partial repository snapshot, a single skill f
 - avoid overclaiming repository-wide certainty;
 - still provide the best local analysis possible;
 - clearly distinguish between direct evidence, reasonable inference, and unresolved uncertainty.
+
+---
+
+## Auditing eval sets
+
+When the source object is an eval set (test cases, assertions, benchmark configurations), apply the same analytical discipline but focus on different dimensions:
+
+- **Coverage**: does the eval set test the skill's actual risk surface, or only the happy path?
+- **Discrimination**: do the assertions distinguish a good output from a mediocre one, or would any reasonable response pass?
+- **Edge cases**: are boundary conditions, partial inputs, and failure modes covered?
+- **Balance**: is the test set weighted toward easy cases that inflate pass rates?
+- **Alignment**: do the evals test what the skill is supposed to do, or do they test surface features unrelated to the skill's core value?
+
+The output structure remains the same (Executive Summary through Final Conclusion), adapted to eval-set-specific concerns.
+
+---
+
+## Collaboration with skill-creator
+
+This skill is designed to complement `skill-creator`, the official Claude skill-creation and iteration tool. For the full collaboration model, see `references/skill-creator-collaboration.md`.
+
+The short version:
+
+- skill-creator owns the creation, testing, iteration, description optimization, and packaging loop.
+- skills-refiner owns the design-level audit that covers what assertion-based testing cannot: structural coherence, purpose fit, context engineering quality, boundary clarity, reuse potential, and long-term maintainability.
+
+When auditing a skill that was produced or iterated by skill-creator:
+
+1. Do not duplicate skill-creator's functional testing. Assume the skill already passes its assertion tests.
+2. Focus on what the tests do not cover: design coherence, scope fit, governance gaps, context engineering, edge-case fragility, and whether the skill's stated purpose matches its real center of gravity.
+3. Frame the top refinement actions so they are directly actionable in skill-creator's iteration loop — the user should be able to take the report and immediately start another improvement cycle.
+4. If the user provides the eval set alongside the skill, audit both: the skill's design quality and the eval set's coverage and discrimination quality.
+
+### What this skill does NOT do in collaboration mode
+
+- Does not run A/B tests or spawn subagent executions.
+- Does not optimize the skill's description for triggering accuracy.
+- Does not package or distribute skills.
+- Does not generate assertion-based evals from scratch.
+
+These are skill-creator's responsibilities. This skill focuses on the judgment layer that sits above functional testing.

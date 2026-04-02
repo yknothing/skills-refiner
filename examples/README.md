@@ -81,3 +81,34 @@ Expected behavior:
 - If `target_repo` is not provided, the skill should stop after Stage 1 and return refinement actions.
 - If `target_repo` is provided or clearly implied, the skill should continue into Stage 2 automatically.
 - Output language follows: explicit user instruction > current configuration > dominant conversation language > default.
+
+---
+
+## Collaboration with skill-creator
+
+### 8) Audit a skill just created by skill-creator
+
+I just finished creating this skill with skill-creator. All tests pass. Use `skills-refiner` to audit the design quality — focus on structure, boundaries, context engineering, and anything the tests might have missed.
+
+Expected behavior:
+- acknowledge that functional tests pass, then move past functional testing;
+- focus on design-level concerns: scope clarity, context engineering, edge cases, maintainability;
+- frame the top 3 refinement actions for direct use in skill-creator's next iteration.
+
+### 9) Audit both a skill and its eval set
+
+Use `skills-refiner` on this skill and its eval set. Are the tests covering the right risk surface?
+
+Expected behavior:
+- audit the skill's design quality as usual;
+- also audit the eval set: are the assertions discriminating, are edge cases covered, is the test set balanced?
+- return refinement actions for both the skill and its evals.
+
+### 10) 审查一个由 skill-creator 创建的 skill
+
+我刚用 skill-creator 创建了这个 skill，所有测试都通过了。用 `skills-refiner` 审查它的设计质量——重点关注结构、边界、上下文工程，以及测试可能遗漏的问题。
+
+预期行为：
+- 确认功能测试已通过，然后跳过功能测试层面；
+- 聚焦设计层面的问题：范围清晰度、上下文工程、边界情况、可维护性；
+- 将前 3 项优化建议格式化为可直接用于 skill-creator 下一轮迭代的行动项。

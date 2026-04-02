@@ -15,6 +15,7 @@ The evaluation set covers two skills and focuses on:
 4. **Judgment quality** — are the main strengths, weaknesses, and boundaries actually meaningful?
 5. **Transfer discipline** — does it separate direct reuse, redesign-required reuse, general patterns, and explicit rejections?
 6. **Evidence discipline** — when evidence is partial, does it avoid repository-wide overclaiming?
+7. **Collaboration awareness** — when auditing a skill-creator output, does it focus on design-level concerns rather than duplicating functional testing?
 
 **`skills-appreciation`**
 7. **Purpose fit** — does the skill judge the target using criteria that match its actual purpose?
@@ -40,6 +41,8 @@ A strong answer does not need to use the same wording as the golden notes. It do
   - `case-05-appreciation-creative-skill.md` — `skills-appreciation`: creative skill appreciation
   - `case-06-appreciation-partial-evidence.md` — `skills-appreciation`: appreciation under thin evidence
   - `case-07-appreciation-low-ai-flavor.md` — `skills-appreciation`: resisting the "correct but stiff" failure mode
+  - `case-08-skill-creator-audit.md` — `skills-refiner`: auditing a skill produced by skill-creator, focusing on design-level issues beyond assertion tests
+  - `case-09-post-creation-interpretation.md` — `skills-appreciation`: writing a team-facing interpretation of a skill after creation and audit
 - `golden/` — anchor judgments, expected strengths, expected failure modes
   - `case-01-anchors.md` — anchors for case 01
   - `case-02-anchors.md` — anchors for case 02
@@ -48,16 +51,18 @@ A strong answer does not need to use the same wording as the golden notes. It do
   - `case-05-appreciation-creative-skill-anchors.md` — anchors for case 05
   - `case-06-appreciation-partial-evidence-anchors.md` — anchors for case 06
   - `case-07-appreciation-low-ai-flavor-anchors.md` — anchors for case 07
+  - `case-08-skill-creator-audit-anchors.md` — anchors for case 08
+  - `case-09-post-creation-interpretation-anchors.md` — anchors for case 09
 
 ## How to use
 
-For `skills-refiner` cases (01–03), run `skills-refiner` on the case input, then compare the result against:
+For `skills-refiner` cases (01–03, 08), run `skills-refiner` on the case input, then compare the result against:
 
 1. `rubric.md`;
 2. the matching golden file;
 3. the intended stage behavior.
 
-For `skills-appreciation` cases (04–07), run `skills-appreciation` on the case input, then compare the result against:
+For `skills-appreciation` cases (04–07, 09), run `skills-appreciation` on the case input, then compare the result against:
 
 1. `skills-appreciation-rubric.md`;
 2. the matching golden file.
