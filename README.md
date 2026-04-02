@@ -24,6 +24,8 @@ This repository is meant to fix both problems.
 - `skills-refiner` treats a repository, skill pack, or framework as a capability asset under review.
 - `skills-appreciation` turns deep analysis into a readable, publishable, teaching-grade appreciation piece.
 
+Together with `skill-creator` (the official Claude skill-creation and iteration tool), they form a complete skill lifecycle: skill-creator handles creation, testing, iteration, and packaging; skills-refiner provides the design-level audit that assertion-based testing cannot reach; and skills-appreciation turns the results into explanations that teams and communities can learn from.
+
 ## The two skills
 
 ### 1) `skills-refiner`
@@ -80,11 +82,12 @@ This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](ht
 ## Repository layout
 
 - `skills/skills-refiner/SKILL.md` — audit / refine / extract / integrate skill
+- `skills/skills-refiner/references/skill-creator-collaboration.md` — how to use skills-refiner alongside skill-creator
 - `skills/skills-appreciation/SKILL.md` — teaching-grade appreciation / interpretation skill
 - `skills/skills-appreciation/references/editorial-checklist.md` — final-pass article quality checklist
-- `examples/README.md` — examples for `skills-refiner`
-- `examples/skills-appreciation.md` — examples for `skills-appreciation`
-- `evals/` — evaluation rubrics, cases, and anchor judgments
+- `examples/README.md` — examples for `skills-refiner` (including skill-creator collaboration)
+- `examples/skills-appreciation.md` — examples for `skills-appreciation` (including post-creation interpretation)
+- `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)
 
 ## Quick usage examples
 
@@ -104,12 +107,22 @@ This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](ht
 
 > Use `skills-appreciation` on this skill. I want to understand why it is designed this way and what skill designers should learn from it.
 
+### Audit a skill that was just created with skill-creator
+
+> I just finished creating this skill with skill-creator. Use `skills-refiner` to audit the design quality — focus on what the assertion tests might have missed.
+
+### Explain a newly built skill to the team
+
+> We just built this skill with skill-creator. Use `skills-appreciation` to write an explanation that helps our team understand the design.
+
 ## Evaluation
 
-The repository now contains two evaluation surfaces:
+The repository contains two evaluation surfaces:
 
-- `evals/` for `skills-refiner`
-- `evals/skills-appreciation-rubric.md` plus dedicated appreciation cases and golden anchors for `skills-appreciation`
+- `evals/` for `skills-refiner` (cases 01–03, 08)
+- `evals/skills-appreciation-rubric.md` plus dedicated appreciation cases and golden anchors for `skills-appreciation` (cases 04–07, 09)
+
+Cases 08 and 09 specifically test the collaboration scenario: auditing a skill-creator output (case 08) and writing a post-creation interpretation for a team (case 09).
 
 The goal is not to reward verbosity or pretty structure alone. The goal is stable, transferable judgment for `skills-refiner`, and publishable, teaching-grade interpretation for `skills-appreciation`.
 
