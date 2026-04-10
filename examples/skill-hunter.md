@@ -127,6 +127,7 @@ Expected behavior:
 - complete the hunt first, rather than jumping straight into integration advice;
 - classify serious candidates as upstream-linked, absorb-and-refine via `skills-refiner`, or reject;
 - avoid assuming a literal symlink is the right answer — optimize for provenance and update flow;
+- for upstream-linked picks, explain what can stay local-only (metadata, wrappers, notes) without turning the result into a hidden fork;
 - make the next handoff explicit.
 
 ---

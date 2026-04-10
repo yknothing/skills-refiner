@@ -150,6 +150,26 @@ linking method. Do **not** assume a literal filesystem symlink is the right
 default. Optimize for portability, update safety, provenance clarity, and easy
 rollback.
 
+When recommending this path, be explicit about **why** the skill should stay
+intact:
+- its quality comes from a cohesive design that should not be locally forked too early;
+- the upstream author is iterating in ways the target repository wants to keep receiving;
+- the target repository mostly needs access, discoverability, and governance around the skill — not redesign of the skill itself.
+
+Also be explicit about the operating boundary:
+- the source skill stays the source of truth;
+- the target repository may add thin local metadata, indexing, wrappers, or usage notes;
+- the target repository should not silently mutate the imported skill while still pretending it is upstream-linked.
+
+Before recommending this path, check for these risks:
+- update fragility — will the chosen mechanism make upstream refreshes painful or unsafe?
+- provenance blur — will users lose track of where the skill really comes from?
+- hidden local coupling — is the target repository depending on local assumptions that will break on upstream updates?
+- review burden — is the target team prepared to re-evaluate upstream changes before pulling them in?
+
+If these risks cannot be managed cleanly, upstream-linked adoption may be the
+wrong choice even for a strong skill.
+
 ### 2. Absorb-and-refine handoff
 Use this path when:
 - the skill needs modification to fit the target repository;
@@ -274,6 +294,13 @@ If the user wants these skills brought into a target repository, state:
 - which picks should be left out entirely;
 - the single safest next move.
 
+For every pick marked **upstream-linked**, also state:
+- **why it should stay intact**;
+- **who remains the source of truth**;
+- **what local changes are acceptable** (for example indexing, wrapper docs, metadata, invocation helpers);
+- **what local changes would violate the path** and should trigger absorb-and-refine instead;
+- **what update mechanism class fits best** (do not over-specify tooling when the environment is unknown).
+
 #### 6. What's Missing
 If nothing in the current ecosystem fully solves the need, say so. Describe the gap.
 
@@ -346,6 +373,11 @@ candidate as:
 
 Do not blur these paths together. The wrong integration route can destroy the
 very quality that made the skill worth finding.
+
+For upstream-linked candidates, also decide:
+- whether the target repository only needs a reference-preserving import layer;
+- whether a thin local wrapper is acceptable without creating a silent fork;
+- what condition would force the candidate to leave the upstream-linked path and move into absorb-and-refine.
 
 ### Step 7 — Identify gaps
 If the ecosystem does not fully serve the user's need, say so explicitly. Do not stretch mediocre skills to fill gaps that do not exist.

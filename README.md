@@ -121,6 +121,8 @@ This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](ht
 
 > Use `skill-hunter` to find the best research-synthesis skills for my skills repo. Treat `acme/team-skills` as `target_repo`. If a skill should stay intact and keep following upstream, say that. If it needs adaptation, route it to `skills-refiner`.
 
+For upstream-linked outcomes, the expectation is not "just symlink it." The expectation is a reference-preserving adoption path with clear source-of-truth, provenance, update, and wrapper boundaries.
+
 ### Discover hidden gems across the ecosystem
 
 > Use `skill-hunter` in open scout mode. What skills are genuinely excellent but underrated right now?

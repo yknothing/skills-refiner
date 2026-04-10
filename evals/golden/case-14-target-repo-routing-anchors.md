@@ -14,6 +14,7 @@
 - Explain why a strong intact skill should stay upstream-linked instead of being rewritten locally.
 - Explain why a promising but imperfect skill should go through `skills-refiner` rather than being imported verbatim.
 - Avoid treating "integration" as one undifferentiated bucket.
+- For upstream-linked picks, explain the boundary between acceptable local wrapping and a real local fork.
 
 ### Discovery discipline
 - Still perform a real targeted hunt: multiple relevant sources, quality filtering, shortlist, and a top pick.
@@ -30,6 +31,7 @@
   - absorb-and-refine via `skills-refiner`;
   - reject.
 - Explicitly note that a filesystem symlink is only one possible mechanism and should not be assumed by default.
+- Clarify that local metadata, wrappers, or usage notes may still be compatible with upstream-linked adoption, but silent source edits are not.
 - Give one clear next move for the user.
 
 ### A strong answer may also
