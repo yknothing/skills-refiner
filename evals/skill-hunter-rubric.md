@@ -16,7 +16,9 @@ Does the skill correctly understand what the user is actually looking for?
 ### 2. Source strategy
 Does the skill look in the right places?
 
-- **5**: demonstrates awareness of multiple source types, prioritizes high-signal sources such as major skill platforms/apps and X for discovery plus GitHub for verification, avoids low-signal noise
+- **5**: demonstrates awareness of multiple source types; uses major skill
+  platforms/apps and X for discovery; uses GitHub for verification; avoids
+  low-signal noise
 - **3**: uses reasonable sources but misses important channels such as X or mainstream platforms, or over-relies on a single channel
 - **1**: only searches the most obvious source or lists results without evidence of strategic sourcing
 

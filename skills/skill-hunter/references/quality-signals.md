@@ -22,7 +22,9 @@ This reference documents the concrete signals that separate genuinely excellent 
 - The output is immediately usable, not a raw dump that requires post-processing.
 - The gap between the demo and real-world usage is small.
 - The skill works in multiple agents or environments, not just one.
-- The skill is visible through the channels where serious practitioners actually discover things: major skill platforms, app-owned hubs, GitHub, and X.
+- Serious practitioners reference or reuse the skill in high-signal places such
+  as major skill platforms, app-owned hubs, GitHub, or X — but treat this as a
+  discovery clue to verify, not quality proof by itself.
 
 ### Author quality signals
 - The author has a track record of quality work (not just quantity).

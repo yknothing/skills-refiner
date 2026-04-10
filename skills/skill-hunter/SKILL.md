@@ -89,7 +89,11 @@ Output language priority:
 ## Where to hunt
 
 ### Primary sources
-- **Mainstream skill platforms and application-owned skill hubs** — start here for discovery speed. Treat major distribution surfaces such as Vercel's skills ecosystem, skills.sh-style leaderboards/directories, and strong application-owned hubs such as Remotion as first-class entry points because they cluster serious skills and make the search surface much smaller.
+- **Mainstream skill platforms and application-owned skill hubs** — start here for discovery speed.
+  Treat major distribution surfaces such as Vercel's skills ecosystem,
+  skills.sh-style leaderboards/directories, and strong application-owned hubs
+  such as Remotion as first-class entry points. They cluster serious skills and
+  make the search surface much smaller.
 - **X (Twitter)** — a top discovery channel, not a side channel. Serious builders often announce, compare, revise, or quietly share excellent skills on X before directories catch up. Use X to find emerging skills, practitioner judgment, linked demos, and real-world adoption signals.
 - **GitHub repositories** — the structural source of truth. Once a candidate is found on a platform or on X, inspect the repository itself: structure, commit history, documentation quality, examples, and actual skill content.
 - **Skill author repositories** — a strong author often has multiple strong skills. Follow the quality, not the brand.
@@ -104,7 +108,9 @@ Output language priority:
 ### How to use X well
 - Start with practitioners, builders, and repositories already known for strong work.
 - Search for public posts that contain demos, repository links, usage screenshots, or design discussion — not just launch announcements.
-- If direct X browsing is limited, use public search-engine indexing (`site:x.com`), embeds, RSS/mirror/front-end views, or other reliable public paths to inspect public posts and threads.
+- If direct X browsing is limited, use public search-engine indexing
+  (`site:x.com`), embeds, RSS/mirror/front-end views, or other reliable public
+  paths to inspect public posts and threads.
 - Track provenance carefully: if a claim comes from X, verify it against the linked repository or demo before upgrading confidence.
 
 ### What to ignore
