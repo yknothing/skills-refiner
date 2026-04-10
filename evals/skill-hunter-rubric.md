@@ -19,7 +19,9 @@ Does the skill look in the right places?
 - **5**: demonstrates awareness of multiple source types; uses major skill
   platforms/apps and X for discovery; uses GitHub for verification; avoids
   low-signal noise
-- **3**: uses reasonable sources but misses important channels such as X or mainstream platforms, or over-relies on a single channel
+- **3**: uses reasonable sources, but the source strategy is incomplete.
+  It may miss important channels such as X or mainstream platforms, or it may
+  over-rely on a single channel without enough cross-checking.
 - **1**: only searches the most obvious source or lists results without evidence of strategic sourcing
 
 ### 3. Quality judgment
