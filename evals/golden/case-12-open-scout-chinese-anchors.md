@@ -6,7 +6,7 @@
 - Operate in Open Scout mode, not Targeted Hunt.
 - Do not produce a popularity ranking — the user explicitly requested otherwise.
 - Organize discoveries by quality category: hidden gems, rising quality, mature and underrated.
-- Treat X 和主流 skill 平台 as primary discovery inputs.
+- 把 X 和主流 skill 平台放在主要发现渠道的位置。
 
 ### Language discipline
 - Output entirely in Chinese.

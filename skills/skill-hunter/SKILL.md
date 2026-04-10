@@ -313,7 +313,9 @@ Do not rate a skill as excellent based on a README alone. Do not dismiss a skill
 
 This skill fully supports **Chinese and English**.
 
-Keep the output natural, direct, and easy to scan. Language quality matters only insofar as it preserves signal, clarity, and trust. Do not turn this skill into a writing-performance exercise.
+Keep the output natural, direct, clear, and professional. Language quality
+matters insofar as it preserves signal, clarity, and trust. Do not turn this
+skill into a writing-performance exercise.
 
 ---
 

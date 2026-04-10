@@ -83,4 +83,6 @@ These are often misread as weaknesses:
 - **Single-purpose skill** — a skill that does one thing superbly is more valuable than a skill that does ten things adequately.
 - **No changelog** — some excellent authors iterate through commit history without maintaining a separate changelog.
 - **Opinionated constraints** — a skill that says "no" to many things often has a clearer design center than one that tries to accommodate everything.
-- **Early X-native visibility** — a skill showing up first in serious practitioner threads can be a positive discovery signal, but only after the linked repo or demo holds up.
+- **Early X-platform visibility** — a skill showing up first in serious
+  practitioner threads can be a positive discovery signal, but only after the
+  linked repo or demo holds up.
