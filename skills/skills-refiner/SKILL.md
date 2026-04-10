@@ -166,11 +166,14 @@ If Stage 2 is active, continue with:
 - direct imports;
 - redesign-required imports;
 - explicit rejections;
+- if upstream-linked is recommended: why the source should stay intact, who remains the source of truth, what thin local layer is acceptable, and what local edits would reclassify it as absorb-and-refine;
+- if upstream-linked is recommended: check update fragility, provenance blur, hidden local coupling, and review burden before endorsing it;
 - what parts of `target_repo` are most at risk if integration is done badly.
 
 ### Step 7 — Actionable Plan
 If Stage 2 is active, provide:
 - a Minimum Viable Integration Plan, or a clear upstream-link recommendation if absorption would be a mistake;
+- when upstream-linked is the right path: the source-of-truth boundary, acceptable local wrapper layer, update mechanism class, and the trigger that would force a move into absorb-and-refine;
 - a High-Leverage Enhancement Plan when absorb-and-refine is the right path;
 - the top 3 next actions.
 
@@ -229,6 +232,10 @@ State clearly:
 ### 8. Four-way Extraction
 
 ### 9. Compatibility and Integration Mode with `target_repo` (if applicable)
+- recommended mode: upstream-linked, absorb-and-refine, or reject;
+- if upstream-linked: why it should stay intact, who remains the source of truth, what local wrapper/metadata layer is acceptable, and what would make it a local fork instead;
+- if upstream-linked: key risks around updates, provenance, local coupling, and review burden;
+- if absorb-and-refine: what is worth extracting, what must be redesigned, and what should not carry over;
 
 ### 10. Integration Plan or Refinement Plan
 

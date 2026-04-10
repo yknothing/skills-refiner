@@ -159,7 +159,7 @@ intact:
 Also be explicit about the operating boundary:
 - the source skill stays the source of truth;
 - the target repository may add thin local metadata, indexing, wrappers, or usage notes;
-- the target repository should not silently mutate the imported skill while still pretending it is upstream-linked.
+- once the imported skill itself is locally edited beyond that thin layer, it is no longer upstream-linked — it has become a local fork and should be treated as absorb-and-refine instead.
 
 Before recommending this path, check for these risks:
 - update fragility — will the chosen mechanism make upstream refreshes painful or unsafe?

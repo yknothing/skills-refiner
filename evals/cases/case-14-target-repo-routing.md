@@ -23,6 +23,7 @@ Do not collapse these into one generic "integration" answer.
 - Identify a top pick and classify its path.
 - Avoid assuming that a literal symlink is the right default implementation.
 - For upstream-linked picks, state what local customization is still acceptable without turning the result into a hidden fork.
+- For upstream-linked picks, state who remains the source of truth and what condition would force the pick out of upstream-linked and into absorb-and-refine.
 - If nothing deserves either path, say so honestly.
 
 ## Dimensions primarily tested

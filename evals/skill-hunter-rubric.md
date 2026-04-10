@@ -41,7 +41,7 @@ Does the skill successfully resist popularity bias, marketing language, and surf
 ### 5. Curation quality
 Is the output a curated shortlist, not a dump?
 
-- **5**: small number of genuinely excellent recommendations, each with a clear reason for inclusion; when `target_repo` or adoption intent is present, clearly routes picks into upstream-linked vs absorb-and-refine paths; willing to say "nothing meets the bar" when appropriate
+- **5**: small number of genuinely excellent recommendations, each with a clear reason for inclusion; when `target_repo` or adoption intent is present, clearly routes picks into upstream-linked vs absorb-and-refine paths and defines the acceptable local boundary for upstream-linked picks; willing to say "nothing meets the bar" when appropriate
 - **3**: reasonable shortlist but includes some filler or fails to differentiate clearly between picks
 - **1**: long list with no meaningful curation, or a single recommendation without alternatives
 
