@@ -91,9 +91,9 @@ Output language priority:
 ### Primary sources
 - **Mainstream skill platforms and application-owned skill hubs** — start here for discovery speed.
   Treat major distribution surfaces such as Vercel's skills ecosystem,
-  skills.sh-style leaderboards/directories, and strong application-owned hubs
-  such as Remotion as first-class entry points. They cluster serious skills and
-  make the search surface much smaller.
+  skills.sh-style leaderboards/directories, and official app-owned skill repos
+  such as `remotion-dev/skills` as first-class entry points. They cluster
+  serious skills and make the search surface much smaller.
 - **X (Twitter)** — a top discovery channel, not a side channel. Serious builders often announce, compare, revise, or quietly share excellent skills on X before directories catch up. Use X to find emerging skills, practitioner judgment, linked demos, and real-world adoption signals.
 - **GitHub repositories** — the structural source of truth. Once a candidate is found on a platform or on X, inspect the repository itself: structure, commit history, documentation quality, examples, and actual skill content.
 - **Skill author repositories** — a strong author often has multiple strong skills. Follow the quality, not the brand.
