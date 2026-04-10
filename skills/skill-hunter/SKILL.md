@@ -112,6 +112,9 @@ Output language priority:
   (`site:x.com`), embeds, RSS/mirror/front-end views, or other reliable public
   paths to inspect public posts and threads.
 - Track provenance carefully: if a claim comes from X, verify it against the linked repository or demo before upgrading confidence.
+- If none of these public paths work, say that X evidence is currently
+  unavailable and continue with the remaining channels instead of pretending the
+  signal does not matter.
 
 ### What to ignore
 - Promotional announcements without substance.
