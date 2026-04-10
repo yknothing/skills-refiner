@@ -1,16 +1,18 @@
 # skills-refiner
 
-`skills-refiner` is now a small two-skill pack for analyzing, interpreting, and upgrading skills systems.
+`skills-refiner` is now a three-skill pack for discovering, analyzing, interpreting, and upgrading skills systems.
 
-It contains two closely related but deliberately different skills:
+It contains three closely related but deliberately different skills:
 
-1. **`skills-refiner`** — audit, refine, extract, and, when appropriate, integrate a skill repository, a single skill, or a workflow framework.
-2. **`skills-appreciation`** — interpret and explain a skill, a skills repository, or a skills system in a deep yet accessible teaching style, with output strong enough to serve as a high-quality technology blog article.
+1. **`skill-hunter`** — discover and identify the best Agent Skills across the ecosystem, cutting through noise and hype to surface genuinely excellent skills worth adopting.
+2. **`skills-refiner`** — audit, refine, extract, and, when appropriate, integrate a skill repository, a single skill, or a workflow framework.
+3. **`skills-appreciation`** — interpret and explain a skill, a skills repository, or a skills system in a deep yet accessible teaching style, with output strong enough to serve as a high-quality technology blog article.
 
-The first skill optimizes for **judgment**.
-The second optimizes for **understanding**.
+The first skill optimizes for **discovery**.
+The second optimizes for **judgment**.
+The third optimizes for **understanding**.
 
-Together, they help users not only decide what is strong, weak, reusable, or rejectable, but also understand *why* a skill or skills system works the way it does and what serious designers should learn from it.
+Together, they cover the full skill intelligence lifecycle: find the best skills, decide what is strong or weak about them, and understand *why* they work the way they do.
 
 ## Why this exists
 
@@ -19,16 +21,32 @@ Most skill-analysis prompts fail in one of two ways:
 - they stop at surface praise or criticism;
 - they produce decent analysis but weak writing, so readers do not actually learn much.
 
-This repository is meant to fix both problems.
+And most skill-discovery methods fail in one more way:
 
+- they rely on popularity signals that measure visibility, not quality.
+
+This repository is meant to fix all three problems.
+
+- `skill-hunter` finds the skills worth paying attention to — the ones with real quality, not just marketing.
 - `skills-refiner` treats a repository, skill pack, or framework as a capability asset under review.
 - `skills-appreciation` turns deep analysis into a readable, publishable, teaching-grade appreciation piece.
 
-Together with `skill-creator` (the official Claude skill-creation and iteration tool), they form a complete skill lifecycle: skill-creator handles creation, testing, iteration, and packaging; skills-refiner provides the design-level audit that assertion-based testing cannot reach; and skills-appreciation turns the results into explanations that teams and communities can learn from.
+Together with `skill-creator` (the official Claude skill-creation and iteration tool), they form a complete skill lifecycle: skill-hunter discovers the best skills in the ecosystem; skill-creator handles creation, testing, iteration, and packaging; skills-refiner provides the design-level audit that assertion-based testing cannot reach; and skills-appreciation turns the results into explanations that teams and communities can learn from.
 
-## The two skills
+## The three skills
 
-### 1) `skills-refiner`
+### 1) `skill-hunter`
+
+Use this when the main job is to:
+- find the best skills for a specific need or across the ecosystem;
+- cut through marketing noise and popularity bias to surface real quality;
+- evaluate whether a specific skill is genuinely worth adopting;
+- discover hidden gems and rising-quality skills that most people have not noticed;
+- compare candidates head-to-head with clear verdicts.
+
+This skill is discovery-oriented.
+
+### 2) `skills-refiner`
 
 Use this when the main job is to:
 - diagnose a repository, skill, or framework;
@@ -38,7 +56,7 @@ Use this when the main job is to:
 
 This skill is decision-oriented.
 
-### 2) `skills-appreciation`
+### 3) `skills-appreciation`
 
 Use this when the main job is to:
 - explain what a skill or skills system really is;
@@ -52,7 +70,7 @@ It does **not** force engineering-style criteria onto every target. A repository
 
 ## Design principles
 
-Across both skills:
+Across all three skills:
 
 - keep the input surface small;
 - infer mode and depth from context when possible;
@@ -81,15 +99,30 @@ This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](ht
 
 ## Repository layout
 
+- `skills/skill-hunter/SKILL.md` — discover and identify the best skills in the ecosystem
+- `skills/skill-hunter/references/quality-signals.md` — concrete quality signals for evaluating skill candidates
 - `skills/skills-refiner/SKILL.md` — audit / refine / extract / integrate skill
 - `skills/skills-refiner/references/skill-creator-collaboration.md` — how to use skills-refiner alongside skill-creator
 - `skills/skills-appreciation/SKILL.md` — teaching-grade appreciation / interpretation skill
 - `skills/skills-appreciation/references/editorial-checklist.md` — final-pass article quality checklist
 - `examples/README.md` — examples for `skills-refiner` (including skill-creator collaboration)
 - `examples/skills-appreciation.md` — examples for `skills-appreciation` (including post-creation interpretation)
-- `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)
+- `examples/skill-hunter.md` — examples for `skill-hunter`
+- `evals/` — evaluation rubrics, cases, and anchor judgments (12 cases, 3 rubrics)
 
 ## Quick usage examples
+
+### Find the best skills for a specific need
+
+> Use `skill-hunter` to find the best code review skills. I need something with real design quality, not just popularity.
+
+### Discover hidden gems across the ecosystem
+
+> Use `skill-hunter` in open scout mode. What skills are genuinely excellent but underrated right now?
+
+### Evaluate whether a specific skill is worth adopting
+
+> Use `skill-hunter` to evaluate this skill. Is it actually good, or just well-marketed?
 
 ### Audit a repository and decide what should carry over
 
@@ -117,14 +150,15 @@ This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](ht
 
 ## Evaluation
 
-The repository contains two evaluation surfaces:
+The repository contains three evaluation surfaces:
 
-- `evals/` for `skills-refiner` (cases 01–03, 08)
+- `evals/rubric.md` for `skills-refiner` (cases 01–03, 08)
 - `evals/skills-appreciation-rubric.md` plus dedicated appreciation cases and golden anchors for `skills-appreciation` (cases 04–07, 09)
+- `evals/skill-hunter-rubric.md` plus dedicated hunting cases and golden anchors for `skill-hunter` (cases 10–12)
 
-Cases 08 and 09 specifically test the collaboration scenario: auditing a skill-creator output (case 08) and writing a post-creation interpretation for a team (case 09).
+Cases 08 and 09 specifically test the collaboration scenario: auditing a skill-creator output (case 08) and writing a post-creation interpretation for a team (case 09). Cases 10–12 test skill-hunter's discovery quality, anti-noise discipline, and deep evaluation capabilities.
 
-The goal is not to reward verbosity or pretty structure alone. The goal is stable, transferable judgment for `skills-refiner`, and publishable, teaching-grade interpretation for `skills-appreciation`.
+The goal is not to reward verbosity or pretty structure alone. The goal is stable, transferable judgment for `skills-refiner`, sharp discovery taste for `skill-hunter`, and publishable, teaching-grade interpretation for `skills-appreciation`.
 
 ## License
 

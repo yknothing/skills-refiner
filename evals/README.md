@@ -1,12 +1,12 @@
 # Evaluations
 
-This directory contains the evaluation set for `skills-refiner` and `skills-appreciation`.
+This directory contains the evaluation set for `skills-refiner`, `skills-appreciation`, and `skill-hunter`.
 
 The purpose is not to check whether the model reproduces one exact output. That would be brittle and easy to game. The purpose is to check whether the skill produces the right kind of judgment, structure, boundary control, and integration logic.
 
 ## What is being evaluated
 
-The evaluation set covers two skills and focuses on:
+The evaluation set covers three skills and focuses on:
 
 **`skills-refiner`**
 1. **Object identification** — does the skill correctly identify whether the target is a repository, a single skill, a pattern, or a workflow framework?
@@ -18,10 +18,17 @@ The evaluation set covers two skills and focuses on:
 7. **Collaboration awareness** — when auditing a skill-creator output, does it focus on design-level concerns rather than duplicating functional testing?
 
 **`skills-appreciation`**
-7. **Purpose fit** — does the skill judge the target using criteria that match its actual purpose?
-8. **Writing quality and low "AI flavor"** — does the output read like a shaped article or like assembled template prose?
-9. **Mechanism explanation** — does the piece explain why design choices matter, not just what they are?
-10. **Evidence discipline under uncertainty** — when evidence is thin, does the skill still form a real thesis without overclaiming?
+8. **Purpose fit** — does the skill judge the target using criteria that match its actual purpose?
+9. **Writing quality and low "AI flavor"** — does the output read like a shaped article or like assembled template prose?
+10. **Mechanism explanation** — does the piece explain why design choices matter, not just what they are?
+11. **Evidence discipline under uncertainty** — when evidence is thin, does the skill still form a real thesis without overclaiming?
+
+**`skill-hunter`**
+12. **Need interpretation** — does the skill understand the real requirement behind the user's request?
+13. **Quality judgment** — does it assess skills based on structural quality rather than popularity signals?
+14. **Anti-noise discipline** — does it successfully resist popularity bias, marketing language, and surface impressions?
+15. **Curation quality** — does it produce a focused, high-signal shortlist rather than an unfiltered dump?
+16. **Gap identification** — does it honestly report when nothing meets the quality bar?
 
 ## Evaluation philosophy
 
@@ -33,6 +40,7 @@ A strong answer does not need to use the same wording as the golden notes. It do
 
 - `rubric.md` — scoring rubric for `skills-refiner`
 - `skills-appreciation-rubric.md` — scoring rubric for `skills-appreciation`
+- `skill-hunter-rubric.md` — scoring rubric for `skill-hunter`
 - `cases/` — evaluation case inputs
   - `case-01-stage1-single-skill.md` — Stage 1 only: analyze a single pasted skill file
   - `case-02-stage1-partial-evidence.md` — Stage 1 only: analyze a repository from README-only evidence
@@ -43,6 +51,9 @@ A strong answer does not need to use the same wording as the golden notes. It do
   - `case-07-appreciation-low-ai-flavor.md` — `skills-appreciation`: resisting the "correct but stiff" failure mode
   - `case-08-skill-creator-audit.md` — `skills-refiner`: auditing a skill produced by skill-creator, focusing on design-level issues beyond assertion tests
   - `case-09-post-creation-interpretation.md` — `skills-appreciation`: writing a team-facing interpretation of a skill after creation and audit
+  - `case-10-targeted-hunt.md` — `skill-hunter`: targeted hunt for the best skill to solve a specific need
+  - `case-11-anti-noise-evaluation.md` — `skill-hunter`: evaluating a hyped skill and resisting marketing noise
+  - `case-12-open-scout-chinese.md` — `skill-hunter`: open ecosystem scout with Chinese output
 - `golden/` — anchor judgments, expected strengths, expected failure modes
   - `case-01-anchors.md` — anchors for case 01
   - `case-02-anchors.md` — anchors for case 02
@@ -53,6 +64,9 @@ A strong answer does not need to use the same wording as the golden notes. It do
   - `case-07-appreciation-low-ai-flavor-anchors.md` — anchors for case 07
   - `case-08-skill-creator-audit-anchors.md` — anchors for case 08
   - `case-09-post-creation-interpretation-anchors.md` — anchors for case 09
+  - `case-10-targeted-hunt-anchors.md` — anchors for case 10
+  - `case-11-anti-noise-evaluation-anchors.md` — anchors for case 11
+  - `case-12-open-scout-chinese-anchors.md` — anchors for case 12
 
 ## How to use
 
@@ -67,6 +81,11 @@ For `skills-appreciation` cases (04–07, 09), run `skills-appreciation` on the 
 1. `skills-appreciation-rubric.md`;
 2. the matching golden file.
 
+For `skill-hunter` cases (10–12), run `skill-hunter` on the case input, then compare the result against:
+
+1. `skill-hunter-rubric.md`;
+2. the matching golden file.
+
 If an answer is insightful but structurally unstable, it should not get a high score. If an answer is well-structured but shallow or credulous, it should not get a high score either.
 
-The goal is not verbosity. The goal is stable, transferable judgment for `skills-refiner`, and publishable, teaching-grade interpretation for `skills-appreciation`.
+The goal is not verbosity. The goal is stable, transferable judgment for `skills-refiner`, sharp discovery taste for `skill-hunter`, and publishable, teaching-grade interpretation for `skills-appreciation`.
