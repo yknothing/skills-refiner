@@ -16,8 +16,8 @@ Does the skill correctly understand what the user is actually looking for?
 ### 2. Source strategy
 Does the skill look in the right places?
 
-- **5**: demonstrates awareness of multiple source types, prioritizes high-signal sources, avoids low-signal noise
-- **3**: uses reasonable sources but misses important ones or over-relies on a single channel
+- **5**: demonstrates awareness of multiple source types, prioritizes high-signal sources such as major skill platforms/apps and X for discovery plus GitHub for verification, avoids low-signal noise
+- **3**: uses reasonable sources but misses important channels such as X or mainstream platforms, or over-relies on a single channel
 - **1**: only searches the most obvious source or lists results without evidence of strategic sourcing
 
 ### 3. Quality judgment
@@ -74,6 +74,7 @@ Does the output language, tone, and terminology stay consistent and high-quality
 A run should be considered **failing** if any of the following happens:
 
 - it recommends skills primarily based on star count or download numbers;
+- it ignores major skill platforms/apps and X as discovery channels when they are clearly relevant;
 - it treats every candidate as roughly equal without meaningful differentiation;
 - it cannot identify a clear top pick when asked;
 - it overclaims quality from thin evidence (README-only);

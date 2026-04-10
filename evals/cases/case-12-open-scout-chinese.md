@@ -11,6 +11,7 @@
 - Operate in Open Scout mode (Mode 2).
 - Output in Chinese (the user's language).
 - Do not produce a popularity-based ranking.
+- Treat X and major skill platforms as key discovery surfaces.
 - Surface skills organized by why they matter: hidden gems, rising quality, mature and underrated.
 - Identify at least one overrated skill or pattern and explain why.
 - Describe emerging patterns or spaces where quality is likely to appear next.

@@ -10,7 +10,7 @@ Use `skill-hunter` to find the best skills for writing commit messages. I want s
 
 - Operate in Targeted Hunt mode (Mode 1).
 - Interpret the need precisely: the user wants a skill that reads diffs and generates meaningful, context-aware commit messages — not a skill that applies conventional-commit templates blindly.
-- Search across relevant sources (GitHub, skill registries, author repositories).
+- Search across relevant sources, with major skill platforms/apps and X as discovery channels, then GitHub/author repositories for verification.
 - Evaluate candidates using the quality framework, with emphasis on practical usefulness and context engineering.
 - Return a curated shortlist (typically 3–5) with clear quality assessments.
 - Identify a top pick with reasoning.

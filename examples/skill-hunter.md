@@ -12,7 +12,7 @@ Use `skill-hunter` to find the best code review skills. I need something with re
 
 Expected behavior:
 - interpret the need precisely;
-- search across relevant sources;
+- search across relevant sources, especially major skill platforms plus GitHub/X;
 - return a curated shortlist with quality assessments;
 - identify a top pick with clear reasoning;
 - flag popular but mediocre options if relevant.
@@ -23,6 +23,7 @@ Use `skill-hunter` in open scout mode. What skills are genuinely excellent but u
 
 Expected behavior:
 - scan the ecosystem broadly;
+- treat X and mainstream platforms as primary discovery surfaces, not side inputs;
 - surface hidden gems, rising quality, and mature underrated skills;
 - identify overrated patterns;
 - resist producing a popularity ranking.
@@ -81,6 +82,7 @@ Expected behavior:
 
 预期行为：
 - 扫描生态系统；
+- 把 X 和主流 skill 平台放在重要位置；
 - 按质量分类呈现：隐藏精品、品质上升中、成熟但被低估；
 - 识别被高估的 skills 或模式；
 - 拒绝生成热门排行榜。
@@ -124,4 +126,5 @@ Expected behavior:
 - The default output is a curated recommendation, not a search result list.
 - If nothing meets the quality bar, the skill should say so rather than stretching mediocre options.
 - Popularity signals (stars, downloads, trending) are noise until verified by structural quality.
+- Mainstream platforms and X are discovery accelerators; GitHub remains the structural verification layer.
 - Output language follows: explicit user instruction > current configuration > dominant conversation language > English.

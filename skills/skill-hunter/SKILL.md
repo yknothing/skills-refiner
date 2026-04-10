@@ -89,15 +89,23 @@ Output language priority:
 ## Where to hunt
 
 ### Primary sources
-- **GitHub repositories** — the raw source of truth. Structure, commit history, documentation quality, and actual code reveal more than any marketplace listing.
-- **Skills registries and marketplaces** — useful for breadth but unreliable for quality signals. Treat popularity metrics as noise until verified by structural inspection.
+- **Mainstream skill platforms and application-owned skill hubs** — start here for discovery speed. Treat major distribution surfaces such as Vercel's skills ecosystem, skills.sh-style leaderboards/directories, and strong application-owned hubs such as Remotion as first-class entry points because they cluster serious skills and make the search surface much smaller.
+- **X (Twitter)** — a top discovery channel, not a side channel. Serious builders often announce, compare, revise, or quietly share excellent skills on X before directories catch up. Use X to find emerging skills, practitioner judgment, linked demos, and real-world adoption signals.
+- **GitHub repositories** — the structural source of truth. Once a candidate is found on a platform or on X, inspect the repository itself: structure, commit history, documentation quality, examples, and actual skill content.
 - **Skill author repositories** — a strong author often has multiple strong skills. Follow the quality, not the brand.
-- **Community discussions and technical forums** — practitioners often surface quality that marketplaces miss. Pay attention to what experienced builders actually use, not what they talk about.
+- **Community discussions and technical forums** — practitioners often surface quality that registries and leaderboards miss. Pay attention to what experienced builders actually use, not what they merely praise.
 
 ### Secondary sources
 - **Technical blog posts and case studies** — when a skill is discussed with real usage context, not just announced.
 - **Adjacent tool ecosystems** — skills for Claude, Cursor, Codex, OpenCode, and other agents. Cross-pollination between ecosystems often produces underrated skills.
 - **Fork and derivative networks** — a skill that gets forked and improved by multiple authors may signal strong underlying design.
+- **Aggregators and registries** — useful for breadth, but never enough on their own. Treat them as candidate generators, then verify quality elsewhere.
+
+### How to use X well
+- Start with practitioners, builders, and repositories already known for strong work.
+- Search for public posts that contain demos, repository links, usage screenshots, or design discussion — not just launch announcements.
+- If direct X browsing is limited, use public search-engine indexing (`site:x.com`), embeds, RSS/mirror/front-end views, or other reliable public paths to inspect public posts and threads.
+- Track provenance carefully: if a claim comes from X, verify it against the linked repository or demo before upgrading confidence.
 
 ### What to ignore
 - Promotional announcements without substance.
@@ -285,12 +293,11 @@ Do not rate a skill as excellent based on a README alone. Do not dismiss a skill
 
 ---
 
-## Writing standards
+## Communication standards
 
-- Write like a sharp, opinionated scout briefing a busy principal.
+- Prioritize discovery quality over prose polish.
 - Be direct. Lead with judgments, follow with evidence.
 - Do not pad recommendations with generic praise.
-- Do not hedge every sentence with qualifiers.
 - Use concrete language: name the specific quality or flaw, do not gesture at it.
 - Keep the output tight. A hunter's report should be dense with signal, not words.
 
@@ -300,15 +307,7 @@ Do not rate a skill as excellent based on a README alone. Do not dismiss a skill
 
 This skill fully supports **Chinese and English**.
 
-When the output language is Chinese, write like a sharp Chinese technology commentator — direct, opinionated, precise. Do not produce translated English. Follow the same anti-AI-flavor standards as other skills in this repository:
-
-- 不用空洞过渡词和套话开头。
-- 不堆砌修饰词。
-- 保留常用英文技术术语（skill、prompt、workflow、agent）。
-- 使用全角中文标点。
-- 像一个有品味的人在和你说话，不像一篇机器翻译。
-
-When the output language is English, follow the same anti-AI-flavor rules: no hollow transitions, no inflated adjectives, no template prose.
+Keep the output natural, direct, and easy to scan. Language quality matters only insofar as it preserves signal, clarity, and trust. Do not turn this skill into a writing-performance exercise.
 
 ---
 

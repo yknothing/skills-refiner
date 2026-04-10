@@ -7,7 +7,8 @@
 - Restate the need as: a skill that reads diffs, understands the semantic meaning of changes, and generates commit messages that reflect what actually changed and why — not just a formatter.
 
 ### Source strategy
-- Demonstrate awareness of where commit-message skills are likely to live (GitHub, skill registries, individual author repos).
+- Demonstrate awareness of where commit-message skills are likely to surface first (major skill platforms/apps, X, GitHub, individual author repos).
+- Use faster discovery channels first, then verify structurally.
 - Not limit search to a single source.
 
 ### Quality assessment

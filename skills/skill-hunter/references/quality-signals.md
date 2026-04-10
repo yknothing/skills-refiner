@@ -22,6 +22,7 @@ This reference documents the concrete signals that separate genuinely excellent 
 - The output is immediately usable, not a raw dump that requires post-processing.
 - The gap between the demo and real-world usage is small.
 - The skill works in multiple agents or environments, not just one.
+- The skill is visible through the channels where serious practitioners actually discover things: major skill platforms, app-owned hubs, GitHub, and X.
 
 ### Author quality signals
 - The author has a track record of quality work (not just quantity).
@@ -50,6 +51,7 @@ This reference documents the concrete signals that separate genuinely excellent 
 - The README is polished but the skill itself is thin.
 - The repository has many skills but no coherent design philosophy connecting them.
 - Self-reported benchmarks with no reproducible methodology.
+- The skill appears everywhere in registries but is almost absent from serious builder discussion or real usage threads.
 
 ### Author red flags
 - The author ships many skills rapidly with no evidence of deep iteration on any of them.
@@ -68,6 +70,7 @@ These are traps that fool surface-level evaluation:
 - **Celebrity author** — famous people ship mediocre work too. Judge the skill, not the name.
 - **Beautiful README** — documentation quality matters, but a polished README with a thin skill behind it is a common pattern.
 - **"Works with everything"** — universal compatibility claims usually mean the skill is too generic to be excellent at anything.
+- **Leaderboard visibility** — being easy to find on a major platform helps discovery, but it is not proof of quality.
 
 ## Signals that look negative but are not
 
@@ -78,3 +81,4 @@ These are often misread as weaknesses:
 - **Single-purpose skill** — a skill that does one thing superbly is more valuable than a skill that does ten things adequately.
 - **No changelog** — some excellent authors iterate through commit history without maintaining a separate changelog.
 - **Opinionated constraints** — a skill that says "no" to many things often has a clearer design center than one that tries to accommodate everything.
+- **Early X-native visibility** — a skill showing up first in serious practitioner threads can be a positive discovery signal, but only after the linked repo or demo holds up.
