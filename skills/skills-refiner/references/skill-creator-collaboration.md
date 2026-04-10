@@ -19,7 +19,7 @@ This reference describes how `skills-refiner` and `skills-appreciation` work alo
 - Purpose-sensitive evaluation: judging engineering skills, creative skills, teaching skills, and research skills by criteria that actually fit their intent.
 - Evidence discipline: separating what is directly observable from inference and uncertainty.
 - Four-way extraction: classifying findings into directly adoptable, adoptable after redesign, valuable as pattern, and should-not-adopt.
-- Integration planning when a skill needs to fit into an existing repository or workflow.
+- Integration planning when a skill needs to fit into an existing repository or workflow, including deciding whether it should stay upstream-linked or be absorbed and redesigned.
 - 12-dimension scorecard covering positioning clarity, structural design, context engineering, reusability, composability, safety, maintainability, transferability, team-friendliness, and long-term evolution potential.
 
 ### skills-appreciation owns

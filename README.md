@@ -4,8 +4,8 @@
 
 It contains three closely related but deliberately different skills:
 
-1. **`skill-hunter`** — discover and identify the best Agent Skills across the ecosystem, cutting through noise and hype to surface genuinely excellent skills worth adopting.
-2. **`skills-refiner`** — audit, refine, extract, and, when appropriate, integrate a skill repository, a single skill, or a workflow framework.
+1. **`skill-hunter`** — discover and identify the best Agent Skills across the ecosystem, cutting through noise and hype to surface genuinely excellent skills worth adopting, and route adoption into a target skills repository when needed.
+2. **`skills-refiner`** — audit, refine, extract, and, when appropriate, decide whether a skill should stay upstream-linked or be absorbed into a target repository.
 3. **`skills-appreciation`** — interpret and explain a skill, a skills repository, or a skills system in a deep yet accessible teaching style, with output strong enough to serve as a high-quality technology blog article.
 
 The first skill optimizes for **discovery**.
@@ -42,7 +42,8 @@ Use this when the main job is to:
 - cut through marketing noise and popularity bias to surface real quality;
 - evaluate whether a specific skill is genuinely worth adopting;
 - discover hidden gems and rising-quality skills that most people have not noticed;
-- compare candidates head-to-head with clear verdicts.
+- compare candidates head-to-head with clear verdicts;
+- when `target_repo` context is present, classify whether a pick should stay upstream-linked or be handed to `skills-refiner` for absorb-and-refine work.
 
 This skill is discovery-oriented.
 
@@ -52,7 +53,7 @@ Use this when the main job is to:
 - diagnose a repository, skill, or framework;
 - judge strengths, weaknesses, structure, context engineering, reuse, safety, governance, and maturity;
 - separate what should be preserved, improved, simplified, removed, reused, redesigned, or rejected;
-- continue into compatibility review and integration planning when a destination repository is provided.
+- continue into compatibility review, integration-mode choice, and integration planning when a destination repository is provided.
 
 This skill is decision-oriented.
 
@@ -108,13 +109,17 @@ This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](ht
 - `examples/README.md` — examples for `skills-refiner` (including skill-creator collaboration)
 - `examples/skills-appreciation.md` — examples for `skills-appreciation` (including post-creation interpretation)
 - `examples/skill-hunter.md` — examples for `skill-hunter`
-- `evals/` — evaluation rubrics, cases, and anchor judgments (12 cases, 3 rubrics)
+- `evals/` — evaluation rubrics, cases, and anchor judgments (14 cases, 3 rubrics)
 
 ## Quick usage examples
 
 ### Find the best skills for a specific need
 
 > Use `skill-hunter` to find the best code review skills. I need something with real design quality, not just popularity.
+
+### Hunt and route the result into a target skills repository
+
+> Use `skill-hunter` to find the best research-synthesis skills for my skills repo. Treat `acme/team-skills` as `target_repo`. If a skill should stay intact and keep following upstream, say that. If it needs adaptation, route it to `skills-refiner`.
 
 ### Discover hidden gems across the ecosystem
 
@@ -154,9 +159,9 @@ The repository contains three evaluation surfaces:
 
 - `evals/rubric.md` for `skills-refiner` (cases 01–03, 08)
 - `evals/skills-appreciation-rubric.md` plus dedicated appreciation cases and golden anchors for `skills-appreciation` (cases 04–07, 09)
-- `evals/skill-hunter-rubric.md` plus dedicated hunting cases and golden anchors for `skill-hunter` (cases 10–12)
+- `evals/skill-hunter-rubric.md` plus dedicated hunting cases and golden anchors for `skill-hunter` (cases 10–14)
 
-Cases 08 and 09 specifically test the collaboration scenario: auditing a skill-creator output (case 08) and writing a post-creation interpretation for a team (case 09). Cases 10–12 test skill-hunter's discovery quality, anti-noise discipline, and deep evaluation capabilities.
+Cases 08 and 09 specifically test the collaboration scenario: auditing a skill-creator output (case 08) and writing a post-creation interpretation for a team (case 09). Cases 10–14 test skill-hunter's discovery quality, anti-noise discipline, deep evaluation capabilities, and adoption-routing judgment.
 
 The goal is not to reward verbosity or pretty structure alone. The goal is stable, transferable judgment for `skills-refiner`, sharp discovery taste for `skill-hunter`, and publishable, teaching-grade interpretation for `skills-appreciation`.
 

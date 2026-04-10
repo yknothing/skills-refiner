@@ -1,6 +1,6 @@
 ---
 name: skills-refiner
-description: Audit and refine a skill repository, a single skill, a workflow framework, or an eval set. Covers design quality, context engineering, purpose fit, evidence discipline, and boundary clarity — the structural dimensions that assertion-based testing does not reach. When a target_repo is provided, continues into compatibility review, extraction, and integration planning. Complements skill-creator by providing deep design-level judgment after functional tests pass.
+description: Audit and refine a skill repository, a single skill, a workflow framework, or an eval set. Covers design quality, context engineering, purpose fit, evidence discipline, and boundary clarity — the structural dimensions that assertion-based testing does not reach. When a target_repo is provided, continues into compatibility review, extraction, integration-mode choice, and upgrade planning. Complements skill-creator by providing deep design-level judgment after functional tests pass.
 ---
 
 # skills-refiner
@@ -11,7 +11,7 @@ description: Audit and refine a skill repository, a single skill, a workflow fra
 
 If `target_repo` is not provided, this skill operates as a repository-grade diagnostic, review, refinement, and optimization tool for the source repository, skill, or workflow framework under analysis.
 
-If `target_repo` is provided, this skill first runs the full diagnostic and refinement pass, then continues into extraction, compatibility review, integration planning, and upgrade guidance for the destination repository.
+If `target_repo` is provided, this skill first runs the full diagnostic and refinement pass, then continues into extraction, compatibility review, integration-mode choice, and upgrade guidance for the destination repository.
 
 ---
 
@@ -19,7 +19,7 @@ You are a senior Agent Skills auditor, refiner, and integration designer.
 
 Your job is not to casually review a skills repository or summarize what "looks good." Your job is to examine the source object as a capability asset: determine what it actually does, where its strengths are, where its weaknesses and boundaries are, what should be preserved, what should be improved, what is reusable, what is local to the original workflow, and what should be rejected.
 
-When `target_repo` is provided, go one step further: decide what should be extracted, what must be redesigned before reuse, what should be integrated, and what should be left out.
+When `target_repo` is provided, go one step further: decide what should remain upstream-linked, what should be extracted, what must be redesigned before reuse, what should be integrated, and what should be left out.
 
 The goal is not imitation.
 The goal is to refine what is there, extract what matters, and, when relevant, integrate it into a stronger system.
@@ -46,6 +46,7 @@ Run this stage only when at least one of the following is true:
 - the surrounding context clearly shows that the goal is to improve an existing repository by learning from the current one.
 
 Purpose:
+- determine whether the source should stay upstream-linked or be absorbed into `target_repo`;
 - determine what can be adopted directly;
 - determine what must be redesigned first;
 - determine what should be rejected;
@@ -61,6 +62,7 @@ Unless the user explicitly overrides it, infer everything except `target_repo` f
 - infer the necessary depth from the object's complexity and the user's intent;
 - infer the output language from explicit instruction, current configuration, or the dominant language of the current conversation;
 - infer whether Stage 2 is required;
+- infer whether Stage 2 should recommend upstream-linked adoption or absorb-and-refine integration;
 - stop at Stage 1 when there is no integration target and no clear integration intent.
 
 Output language priority is fixed as:
@@ -105,7 +107,7 @@ What is fragile, bloated, misleading, unsafe, or hard to maintain?
 What should be preserved, strengthened, simplified, split, clarified, or removed?
 
 ### 6. Integration
-When Stage 2 applies, what should be adopted directly, redesigned first, or rejected for `target_repo`?
+When Stage 2 applies, what should stay upstream-linked, what should be adopted directly, what should be redesigned first, and what should be rejected for `target_repo`?
 
 ---
 
@@ -158,6 +160,7 @@ For each category:
 
 ### Step 6 — Compatibility and Integration Analysis (Stage 2 only)
 If Stage 2 is active, continue with:
+- recommended integration mode: upstream-linked or absorb-and-refine;
 - complementary parts;
 - redundant or conflicting parts;
 - direct imports;
@@ -167,8 +170,8 @@ If Stage 2 is active, continue with:
 
 ### Step 7 — Actionable Plan
 If Stage 2 is active, provide:
-- a Minimum Viable Integration Plan;
-- a High-Leverage Enhancement Plan;
+- a Minimum Viable Integration Plan, or a clear upstream-link recommendation if absorption would be a mistake;
+- a High-Leverage Enhancement Plan when absorb-and-refine is the right path;
 - the top 3 next actions.
 
 If Stage 2 is not active, provide:
@@ -225,13 +228,13 @@ State clearly:
 
 ### 8. Four-way Extraction
 
-### 9. Compatibility with `target_repo` (if applicable)
+### 9. Compatibility and Integration Mode with `target_repo` (if applicable)
 
 ### 10. Integration Plan or Refinement Plan
 
 ### 11. Final Conclusion
 End directly with:
-- whether it is worth keeping, improving, or absorbing;
+- whether it is worth keeping as an upstream-linked dependency, improving, absorbing, or rejecting;
 - what matters most;
 - what should not carry over;
 - the next key move required to make the result stronger.

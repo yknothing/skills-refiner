@@ -35,6 +35,7 @@ Your instincts must be sharp enough to:
 - `need`: what the user needs, in their own words. Can be a problem description, a domain, a workflow gap, or a vague intent.
 - `scope`: how broad or narrow to hunt. Defaults to a focused, curated shortlist.
 - `sources`: where to look. If not provided, infer from the need and use the default source strategy.
+- `target_repo`: the destination skills repository if the user wants the discovered skill or skills routed into an existing system.
 
 If none of these are provided, operate as a general-purpose scout: surface the most noteworthy recent skills across the ecosystem based on your quality criteria.
 
@@ -78,6 +79,7 @@ Unless the user explicitly overrides:
 - infer `need` from the user's question, current project, or conversation;
 - infer `scope` from the specificity of the request;
 - infer `sources` from the domain and need;
+- infer whether the user wants pure discovery or discovery plus adoption routing for a `target_repo`;
 - infer output language from the user's language.
 
 Output language priority:
@@ -122,6 +124,49 @@ Output language priority:
 - Skills with high download numbers but no meaningful documentation or structure.
 - "Awesome lists" that add everything without judgment.
 - Self-reported benchmarks without reproducible evidence.
+
+---
+
+## When the user wants adoption into a target skills repository
+
+If `target_repo` is provided, or the user clearly asks how the discovered skill
+should enter an existing skills repository, do **not** stop at "here are the
+best options."
+
+Still do the hunt first. Then classify each serious candidate into one of these
+paths:
+
+### 1. Upstream-linked adoption
+Use this path when:
+- the source skill is already excellent as-is;
+- modifying it would likely dilute or damage the design;
+- the user wants to keep benefiting from upstream improvements;
+- provenance and update flow matter more than local customization.
+
+In this path, recommend a **reference-preserving** adoption model. The exact
+mechanism can vary by environment — submodule, subtree, registry pointer,
+external-source sync, mirrored import with provenance, or another upstream-aware
+linking method. Do **not** assume a literal filesystem symlink is the right
+default. Optimize for portability, update safety, provenance clarity, and easy
+rollback.
+
+### 2. Absorb-and-refine handoff
+Use this path when:
+- the skill needs modification to fit the target repository;
+- only part of the source skill is worth keeping;
+- the source contains strong ideas but weak packaging;
+- the target repository needs a redesigned version rather than a pristine import.
+
+In this path, `skill-hunter` should identify the promising candidate and explain
+why it is worth absorbing, then hand off to `skills-refiner` for extraction,
+redesign, and integration planning.
+
+### Routing rule
+- Prefer **upstream-linked adoption** when the source skill's value is tied to
+  staying intact and current.
+- Prefer **absorb-and-refine handoff** when real integration requires edits,
+  recomposition, localization, or selective extraction.
+- If neither path is good enough, say so directly instead of forcing adoption.
 
 ---
 
@@ -215,13 +260,21 @@ For each recommended skill (typically 3–5):
 - **What it does** — one sentence, precise.
 - **Why it stands out** — the specific quality that earned it a spot on this list.
 - **Quality snapshot** — brief assessment against the quality framework (not a full scorecard, but the 2–3 most relevant dimensions).
+- **Adoption path** — if `target_repo` or adoption intent is present: upstream-linked, absorb-and-refine via `skills-refiner`, or skip.
 - **Watch out for** — the main limitation or risk.
 - **Verdict** — one sentence: adopt, watch, or skip.
 
 #### 4. The One to Start With
 If the user must pick one, which one and why.
 
-#### 5. What's Missing
+#### 5. Adoption path for `target_repo` (only when applicable)
+If the user wants these skills brought into a target repository, state:
+- which picks should stay upstream-linked;
+- which picks should be handed to `skills-refiner` for absorb-and-refine work;
+- which picks should be left out entirely;
+- the single safest next move.
+
+#### 6. What's Missing
 If nothing in the current ecosystem fully solves the need, say so. Describe the gap.
 
 ### For Open Scout (Mode 2)
@@ -284,7 +337,17 @@ Select only the skills that genuinely deserve recommendation. A list of 3 excell
 ### Step 5 — Write the recommendation
 Present findings clearly, with visible judgment. Every recommendation must have a reason. Every exclusion must be defensible.
 
-### Step 6 — Identify gaps
+### Step 6 — Route the adoption path when needed
+If the user wants the result brought into a `target_repo`, classify each serious
+candidate as:
+- upstream-linked;
+- absorb-and-refine via `skills-refiner`;
+- or reject.
+
+Do not blur these paths together. The wrong integration route can destroy the
+very quality that made the skill worth finding.
+
+### Step 7 — Identify gaps
 If the ecosystem does not fully serve the user's need, say so explicitly. Do not stretch mediocre skills to fill gaps that do not exist.
 
 ---
@@ -333,7 +396,9 @@ This skill occupies a distinct position in the skill lifecycle:
 ### Handoff patterns
 
 - After skill-hunter surfaces a promising skill → skills-refiner can run a deep design audit.
-- After skill-hunter recommends a skill for adoption → skills-refiner can run compatibility and integration analysis against `target_repo`.
+- After skill-hunter recommends a skill for adoption into `target_repo` → choose one of two paths:
+  - keep the source skill upstream-linked when preserving upstream identity and updates matters most;
+  - hand the skill to skills-refiner when extraction, redesign, or selective absorption is required.
 - After skills-refiner audits a skill-hunter recommendation → skills-appreciation can write an interpretation for the team.
 
 ### What this skill does NOT do
@@ -342,6 +407,7 @@ This skill occupies a distinct position in the skill lifecycle:
 - Does not write appreciation articles — that is skills-appreciation's job.
 - Does not create or iterate on skills — that is skill-creator's job.
 - Does not run functional tests or generate assertions.
+- Does not itself execute repository linking, syncing, or absorb-and-rewrite work — it routes that decision and the next handoff.
 
 This skill's job is discovery and initial quality assessment. It finds the signal in the noise.
 

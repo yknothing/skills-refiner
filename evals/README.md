@@ -55,6 +55,7 @@ A strong answer does not need to use the same wording as the golden notes. It do
   - `case-11-anti-noise-evaluation.md` — `skill-hunter`: evaluating a hyped skill and resisting marketing noise
   - `case-12-open-scout-chinese.md` — `skill-hunter`: open ecosystem scout with Chinese output
   - `case-13-social-card-hunt-chinese.md` — `skill-hunter`: targeted hunt in Chinese for multi-card social-media share skills
+  - `case-14-target-repo-routing.md` — `skill-hunter`: targeted hunt with target-repo routing between upstream-linked adoption and absorb-and-refine handoff
 - `golden/` — anchor judgments, expected strengths, expected failure modes
   - `case-01-anchors.md` — anchors for case 01
   - `case-02-anchors.md` — anchors for case 02
@@ -69,6 +70,7 @@ A strong answer does not need to use the same wording as the golden notes. It do
   - `case-11-anti-noise-evaluation-anchors.md` — anchors for case 11
   - `case-12-open-scout-chinese-anchors.md` — anchors for case 12
   - `case-13-social-card-hunt-chinese-anchors.md` — anchors for case 13
+  - `case-14-target-repo-routing-anchors.md` — anchors for case 14
 
 ## How to use
 
@@ -83,7 +85,7 @@ For `skills-appreciation` cases (04–07, 09), run `skills-appreciation` on the 
 1. `skills-appreciation-rubric.md`;
 2. the matching golden file.
 
-For `skill-hunter` cases (10–13), run `skill-hunter` on the case input, then compare the result against:
+For `skill-hunter` cases (10–14), run `skill-hunter` on the case input, then compare the result against:
 
 1. `skill-hunter-rubric.md`;
 2. the matching golden file.

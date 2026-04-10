@@ -119,6 +119,16 @@ Expected behavior:
 - provide enough context about each pick so the user can decide which to explain;
 - do not write the appreciation article — that is skills-appreciation's job.
 
+### 11) Hunt and route into a target skills repository
+
+Use `skill-hunter` to find the best research-synthesis skills for my team skills repo. Treat `acme/team-skills` as `target_repo`. If a skill is already excellent and should keep tracking upstream, say that. If it needs adaptation or I only want the best parts, route it to `skills-refiner` for absorb-and-refine work.
+
+Expected behavior:
+- complete the hunt first, rather than jumping straight into integration advice;
+- classify serious candidates as upstream-linked, absorb-and-refine via `skills-refiner`, or reject;
+- avoid assuming a literal symlink is the right answer — optimize for provenance and update flow;
+- make the next handoff explicit.
+
 ---
 
 ## Notes

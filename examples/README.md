@@ -73,6 +73,16 @@ Expected behavior:
 - 再针对 `yknothing/prodcraft` 执行兼容性与整合分析；
 - 提供最小可行整合方案和高价值增强方案。
 
+### 8）判断应该保留上游引用，还是吸收融合进目标仓库
+
+用 `skills-refiner` 分析这个 skill，目标仓库为 `acme/team-skills`。如果这个 skill 本身已经足够优秀，而且我希望持续跟随上游更新，就不要建议吸收改写；如果必须改造或我只想吸收精华，再给我吸收融合方案。
+
+预期行为：
+- 先完成第一阶段审查；
+- 第二阶段明确判断更适合“保留上游链接”还是“吸收融合”；
+- 如果保留上游链接更合理，要说明为什么不该本地改写；
+- 如果吸收融合更合理，要给出面向目标仓库的提炼与改造方案。
+
 ---
 
 ## Notes
@@ -80,13 +90,14 @@ Expected behavior:
 - `target_repo` is optional.
 - If `target_repo` is not provided, the skill should stop after Stage 1 and return refinement actions.
 - If `target_repo` is provided or clearly implied, the skill should continue into Stage 2 automatically.
+- Stage 2 may conclude that the best move is to keep a source skill upstream-linked rather than absorb it locally.
 - Output language follows: explicit user instruction > current configuration > dominant conversation language > default.
 
 ---
 
 ## Collaboration with skill-creator
 
-### 8) Audit a skill just created by skill-creator
+### 9) Audit a skill just created by skill-creator
 
 I just finished creating this skill with skill-creator. All tests pass. Use `skills-refiner` to audit the design quality — focus on structure, boundaries, context engineering, and anything the tests might have missed.
 
@@ -95,7 +106,7 @@ Expected behavior:
 - focus on design-level concerns: scope clarity, context engineering, edge cases, maintainability;
 - frame the top 3 refinement actions for direct use in skill-creator's next iteration.
 
-### 9) Audit both a skill and its eval set
+### 10) Audit both a skill and its eval set
 
 Use `skills-refiner` on this skill and its eval set. Are the tests covering the right risk surface?
 
@@ -104,7 +115,7 @@ Expected behavior:
 - also audit the eval set: are the assertions discriminating, are edge cases covered, is the test set balanced?
 - return refinement actions for both the skill and its evals.
 
-### 10) 审查一个由 skill-creator 创建的 skill
+### 11) 审查一个由 skill-creator 创建的 skill
 
 我刚用 skill-creator 创建了这个 skill，所有测试都通过了。用 `skills-refiner` 审查它的设计质量——重点关注结构、边界、上下文工程，以及测试可能遗漏的问题。
 

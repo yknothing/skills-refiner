@@ -41,7 +41,7 @@ Does the skill successfully resist popularity bias, marketing language, and surf
 ### 5. Curation quality
 Is the output a curated shortlist, not a dump?
 
-- **5**: small number of genuinely excellent recommendations, each with a clear reason for inclusion; willing to say "nothing meets the bar" when appropriate
+- **5**: small number of genuinely excellent recommendations, each with a clear reason for inclusion; when `target_repo` or adoption intent is present, clearly routes picks into upstream-linked vs absorb-and-refine paths; willing to say "nothing meets the bar" when appropriate
 - **3**: reasonable shortlist but includes some filler or fails to differentiate clearly between picks
 - **1**: long list with no meaningful curation, or a single recommendation without alternatives
 
@@ -81,6 +81,7 @@ A run should be considered **failing** if any of the following happens:
 - it ignores major skill platforms/apps and X as discovery channels when they are clearly relevant;
 - it treats every candidate as roughly equal without meaningful differentiation;
 - it cannot identify a clear top pick when asked;
+- when the user wants adoption into a target repository, it blurs together upstream-linked and absorb-and-refine paths;
 - it overclaims quality from thin evidence (README-only);
 - it produces a long list without curation;
 - it uses inflated language ("game-changing", "revolutionary") without irony.
