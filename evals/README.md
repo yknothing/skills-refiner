@@ -43,6 +43,7 @@ A strong answer does not need to use the same wording as the golden notes. It do
   - `case-07-appreciation-low-ai-flavor.md` — `skills-appreciation`: resisting the "correct but stiff" failure mode
   - `case-08-skill-creator-audit.md` — `skills-refiner`: auditing a skill produced by skill-creator, focusing on design-level issues beyond assertion tests
   - `case-09-post-creation-interpretation.md` — `skills-appreciation`: writing a team-facing interpretation of a skill after creation and audit
+  - `case-10-awesome-skills-repo.md` — `skills-refiner`: Stage 1 audit of an awesome-list-style skills repository with a dual identity (discovery index + meta-skills layer)
 - `golden/` — anchor judgments, expected strengths, expected failure modes
   - `case-01-anchors.md` — anchors for case 01
   - `case-02-anchors.md` — anchors for case 02
@@ -53,10 +54,11 @@ A strong answer does not need to use the same wording as the golden notes. It do
   - `case-07-appreciation-low-ai-flavor-anchors.md` — anchors for case 07
   - `case-08-skill-creator-audit-anchors.md` — anchors for case 08
   - `case-09-post-creation-interpretation-anchors.md` — anchors for case 09
+  - `case-10-awesome-skills-repo-anchors.md` — anchors for case 10
 
 ## How to use
 
-For `skills-refiner` cases (01–03, 08), run `skills-refiner` on the case input, then compare the result against:
+For `skills-refiner` cases (01–03, 08, 10), run `skills-refiner` on the case input, then compare the result against:
 
 1. `rubric.md`;
 2. the matching golden file;
