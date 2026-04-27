@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+*/.DS_Store
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Debug & runtime artifacts
+.agents/debug/
+skills-report/
+
+# Node (if npx/npm tooling is used)
+node_modules/
+package-lock.json
+
+# Temp files
+*.tmp
+*.bak
