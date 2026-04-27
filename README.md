@@ -1,16 +1,19 @@
 # skills-refiner
 
-`skills-refiner` is now a small two-skill pack for analyzing, interpreting, and upgrading skills systems.
+A skill governance toolkit for analyzing, interpreting, evaluating, and debugging agent skills systems.
 
-It contains two closely related but deliberately different skills:
+It contains four skills across two layers:
 
+**Analysis & Interpretation:**
 1. **`skills-refiner`** — audit, refine, extract, and, when appropriate, integrate a skill repository, a single skill, or a workflow framework.
-2. **`skills-appreciation`** — interpret and explain a skill, a skills repository, or a skills system in a deep yet accessible teaching style, with output strong enough to serve as a high-quality technology blog article.
+2. **`skills-appreciation`** — interpret and explain a skill or skills system in a deep yet accessible teaching style, producing publishable-quality articles.
 
-The first skill optimizes for **judgment**.
-The second optimizes for **understanding**.
+**Governance & Observability:**
+3. **`skill-hygiene`** — evaluate the health, quality, and topology of installed agent skills. AI judges; shell scripts collect structured facts.
+4. **`skill-debug`** — three-layer observability: discovery diagnostics, activation tracing, and effectiveness dashboards for installed skills.
 
-Together, they help users not only decide what is strong, weak, reusable, or rejectable, but also understand *why* a skill or skills system works the way it does and what serious designers should learn from it.
+The first two skills optimize for **judgment** and **understanding**.
+The latter two optimize for **governance** and **observability**.
 
 ## Why this exists
 
@@ -81,12 +84,24 @@ This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](ht
 
 ## Repository layout
 
+**Analysis & Interpretation skills:**
 - `skills/skills-refiner/SKILL.md` — audit / refine / extract / integrate skill
 - `skills/skills-refiner/references/skill-creator-collaboration.md` — how to use skills-refiner alongside skill-creator
 - `skills/skills-appreciation/SKILL.md` — teaching-grade appreciation / interpretation skill
 - `skills/skills-appreciation/references/editorial-checklist.md` — final-pass article quality checklist
-- `examples/README.md` — examples for `skills-refiner` (including skill-creator collaboration)
-- `examples/skills-appreciation.md` — examples for `skills-appreciation` (including post-creation interpretation)
+
+**Governance & Observability skills:**
+- `skills/skill-hygiene/SKILL.md` — AI-driven skill evaluation and cleanup framework
+- `skills/skill-hygiene/bin/skill-scan.sh` — automated fact collector (topology, symlinks, flags)
+- `skills/skill-hygiene/tests/test-scan.sh` — 17 integration tests
+- `skills/skill-debug/SKILL.md` — three-layer skill observability
+- `skills/skill-debug/bin/skill-probe.sh` — discovery diagnostics
+- `skills/skill-debug/bin/skill-trace.sh` — activation trace injection/removal
+- `skills/skill-debug/bin/skill-dashboard.sh` — effectiveness dashboard
+- `skills/skill-debug/tests/test-trace.sh` — 8 integration tests
+
+**Supporting materials:**
+- `examples/` — usage examples for skills-refiner and skills-appreciation
 - `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)
 
 ## Quick usage examples
