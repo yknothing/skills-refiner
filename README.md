@@ -2,144 +2,179 @@
 
 A skill governance toolkit for analyzing, interpreting, evaluating, and debugging agent skills systems.
 
-It contains four skills across two layers:
+Four skills across two layers:
 
-**Analysis & Interpretation:**
-1. **`skills-refiner`** — audit, refine, extract, and, when appropriate, integrate a skill repository, a single skill, or a workflow framework.
-2. **`skills-appreciation`** — interpret and explain a skill or skills system in a deep yet accessible teaching style, producing publishable-quality articles.
+**Analysis & Interpretation** — judgment and understanding:
+1. **`skills-refiner`** — audit, refine, extract, and integrate a skill repository, single skill, or workflow framework
+2. **`skills-appreciation`** — interpret and explain a skill or skills system in a deep, teaching-grade style
 
-**Governance & Observability:**
-3. **`skill-hygiene`** — evaluate the health, quality, and topology of installed agent skills. AI judges; shell scripts collect structured facts.
-4. **`skill-debug`** — three-layer observability: discovery diagnostics, activation tracing, and effectiveness dashboards for installed skills.
-
-The first two skills optimize for **judgment** and **understanding**.
-The latter two optimize for **governance** and **observability**.
+**Governance & Observability** — health and visibility:
+3. **`skill-hygiene`** — evaluate health, quality, and topology of installed skills (AI judges; shell scripts collect facts)
+4. **`skill-debug`** — three-layer observability: discovery diagnostics, activation tracing, effectiveness dashboards
 
 ## Why this exists
 
-Most skill-analysis prompts fail in one of two ways:
+Agent skills grow fast and degrade silently. Most skill ecosystems face two intertwined problems:
 
-- they stop at surface praise or criticism;
-- they produce decent analysis but weak writing, so readers do not actually learn much.
+1. **No deep design review.** Skills pass assertion tests but suffer from scope creep, poor context engineering, or hidden fragility. Surface-level praise or criticism does not help.
+2. **No operational visibility.** Users install dozens of skills across multiple agent directories and have no way to tell which are discovered, activated, effective, stale, or broken.
 
-This repository is meant to fix both problems.
+This repository addresses both:
 
-- `skills-refiner` treats a repository, skill pack, or framework as a capability asset under review.
-- `skills-appreciation` turns deep analysis into a readable, publishable, teaching-grade appreciation piece.
+- `skills-refiner` and `skills-appreciation` handle the **analysis** problem — deep design audit and publishable interpretation.
+- `skill-hygiene` and `skill-debug` handle the **governance** problem — topology scanning, fact collection, activation tracing, and usage analytics.
 
-Together with `skill-creator` (the official Claude skill-creation and iteration tool), they form a complete skill lifecycle: skill-creator handles creation, testing, iteration, and packaging; skills-refiner provides the design-level audit that assertion-based testing cannot reach; and skills-appreciation turns the results into explanations that teams and communities can learn from.
+Together with `skill-creator` (the official Claude skill-creation tool), they form a complete skill lifecycle: creation → testing → design audit → governance → observability → interpretation.
 
-## The two skills
+## The four skills
 
-### 1) `skills-refiner`
+### 1) `skills-refiner` — design-level audit
 
-Use this when the main job is to:
+Use when the main job is to:
 - diagnose a repository, skill, or framework;
 - judge strengths, weaknesses, structure, context engineering, reuse, safety, governance, and maturity;
-- separate what should be preserved, improved, simplified, removed, reused, redesigned, or rejected;
+- separate what should be preserved, improved, simplified, removed, or rejected;
 - continue into compatibility review and integration planning when a destination repository is provided.
 
-This skill is decision-oriented.
+This skill is decision-oriented. It complements `skill-creator` by covering what assertion-based testing cannot reach.
 
-### 2) `skills-appreciation`
+### 2) `skills-appreciation` — teaching-grade interpretation
 
-Use this when the main job is to:
+Use when the main job is to:
 - explain what a skill or skills system really is;
 - unpack why its design works or fails;
 - teach readers what is genuinely worth learning;
-- write a strong appreciation article with clear structure, technical depth, readability, and low obvious "AI flavor".
+- produce a publishable appreciation article with clear structure, technical depth, and low "AI flavor".
 
-This skill is interpretation-oriented.
+This skill is interpretation-oriented. It does **not** force engineering-style criteria onto every target — a creative skill is judged differently from an infrastructure skill.
 
-It does **not** force engineering-style criteria onto every target. A repository-grade workflow skill should be judged differently from a creative writing skill, a teaching skill, or a research-analysis skill.
+### 3) `skill-hygiene` — installed skill evaluation
+
+Use when you need to:
+- audit the health and quality of installed skills across all agent directories;
+- identify broken symlinks, backup remnants, security indicators, stale or stub skills;
+- understand the skill topology: canonical sources, symlinked distributions, native agent skills;
+- get a structured inventory for governance review.
+
+This skill follows the "AI judges, scripts collect" philosophy. The shell script (`bin/skill-scan.sh`) gathers structured facts; the AI applies expert judgment. It respects the standard skill installation model: skills installed to `~/.agents/skills/` and symlinked to agent directories are distribution links, not duplicates.
+
+### 4) `skill-debug` — skill observability
+
+Use when you cannot tell whether a skill was discovered, loaded, or followed by the agent. Three layers:
+
+- **Discovery diagnostics** (`skill-probe`) — what skills can the agent see from the current working directory?
+- **Activation tracing** (`skill-trace`) — inject/remove lightweight canary blocks to track when skills are actually used.
+- **Effectiveness dashboard** (`skill-dashboard`) — usage frequency, zombie detection, context distribution, active rate.
+
+Combine with `skill-hygiene` for a full governance workflow: probe discovery → check usage → evaluate quality → triage.
 
 ## Design principles
 
-Across both skills:
+Across all four skills:
 
-- keep the input surface small;
-- infer mode and depth from context when possible;
-- ground judgment in evidence;
-- distinguish direct evidence, inference, and uncertainty;
-- avoid generic praise and inflated claims;
-- prefer visible reasoning structure over shapeless analysis;
-- optimize for transfer value, not just clever observations.
+- **AI judges, scripts collect.** Shell scripts gather structured data without making decisions. The AI interprets evidence using expertise and context. Scripts must not strip AI's judgment capability.
+- **Conservative by default.** If evidence is unclear, flag observations — do not recommend removal or action. Only act when evidence is unambiguous.
+- **Respect the topology.** The standard model is: canonical skills in `~/.agents/skills/`, symlinked to agent directories (`.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, etc.). Symlinks are distribution links, not duplicates. Standalone project repos are not broken global skills.
+- **Ground judgment in evidence.** Distinguish direct evidence, inference, and uncertainty. Avoid generic praise, inflated claims, or rote rules.
+- **Keep the input surface small.** Infer mode, depth, and language from context when possible.
+- **Optimize for transfer value.** The goal is not clever observations but actionable insight.
 
-### Additional principle for `skills-appreciation`
+### Additional principles by layer
 
-A strong appreciation piece must combine:
-- the rigor of a serious technical blog;
-- the clarity of a teaching text;
-- the readability of a publishable article.
+**Analysis & Interpretation:**
+- Prefer visible reasoning structure over shapeless analysis.
+- A strong appreciation piece must combine the rigor of a technical blog, the clarity of a teaching text, and the readability of a publishable article.
+
+**Governance & Observability:**
+- No false alarms. A skill with zero activations may simply not have been needed — "zombie" is an observation, not a verdict.
+- All operations are reversible. Trace injection can be stripped. Scans are read-only. Dashboard never modifies skill files.
+- All data stays local. No data is sent externally.
 
 ## Installation
 
-Install the repository using the [skills CLI](https://github.com/vercel-labs/skills):
+Install with the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
 npx skills add yknothing/skills-refiner
 ```
 
-This works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https://github.com/vercel-labs/skills#supported-agents).
+Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https://github.com/vercel-labs/skills#supported-agents).
 
 ## Repository layout
 
-**Analysis & Interpretation skills:**
-- `skills/skills-refiner/SKILL.md` — audit / refine / extract / integrate skill
-- `skills/skills-refiner/references/skill-creator-collaboration.md` — how to use skills-refiner alongside skill-creator
-- `skills/skills-appreciation/SKILL.md` — teaching-grade appreciation / interpretation skill
-- `skills/skills-appreciation/references/editorial-checklist.md` — final-pass article quality checklist
+**Analysis & Interpretation:**
+- `skills/skills-refiner/SKILL.md` — audit / refine / extract / integrate
+- `skills/skills-refiner/references/skill-creator-collaboration.md` — collaboration model with skill-creator
+- `skills/skills-appreciation/SKILL.md` — teaching-grade appreciation / interpretation
+- `skills/skills-appreciation/references/editorial-checklist.md` — article quality checklist
 
-**Governance & Observability skills:**
-- `skills/skill-hygiene/SKILL.md` — AI-driven skill evaluation and cleanup framework
-- `skills/skill-hygiene/bin/skill-scan.sh` — automated fact collector (topology, symlinks, flags)
-- `skills/skill-hygiene/tests/test-scan.sh` — 17 integration tests
-- `skills/skill-debug/SKILL.md` — three-layer skill observability
+**Governance & Observability:**
+- `skills/skill-hygiene/SKILL.md` — AI-driven skill evaluation framework
+- `skills/skill-hygiene/bin/skill-scan.sh` — topology and fact collector
+- `skills/skill-hygiene/tests/test-scan.sh` — integration tests (17 cases)
+- `skills/skill-debug/SKILL.md` — three-layer observability
 - `skills/skill-debug/bin/skill-probe.sh` — discovery diagnostics
 - `skills/skill-debug/bin/skill-trace.sh` — activation trace injection/removal
 - `skills/skill-debug/bin/skill-dashboard.sh` — effectiveness dashboard
-- `skills/skill-debug/tests/test-trace.sh` — 8 integration tests
+- `skills/skill-debug/tests/test-trace.sh` — integration tests (8 cases)
+- `skills/skill-debug/tests/test-probe.sh` — integration tests for discovery probe
+- `skills/skill-debug/tests/test-dashboard.sh` — integration tests for dashboard
 
 **Supporting materials:**
-- `examples/` — usage examples for skills-refiner and skills-appreciation
+- `examples/` — usage examples for all four skills
 - `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)
 
 ## Quick usage examples
 
-### Audit a repository and decide what should carry over
+### Analysis & Interpretation
 
-> Use `skills-refiner` on this repository.
+```text
+# Audit a repository
+Use skills-refiner on this repository.
 
-### Audit and integrate into a destination repository
+# Audit and integrate into another repo
+Use skills-refiner, and treat yknothing/prodcraft as target_repo.
 
-> Use `skills-refiner`, and treat `yknothing/prodcraft` as `target_repo`.
+# Write an appreciation article
+Use skills-appreciation on this repository. Write a deep but readable article.
 
-### Write a publishable appreciation article for a skills system
+# Explain a single skill
+Use skills-appreciation on this skill. I want to understand why it is designed this way.
+```
 
-> Use `skills-appreciation` on this repository. Write a deep but readable appreciation article for serious AI tooling readers.
+### Governance & Observability
 
-### Explain a single skill in a teaching style
+```bash
+# Scan installed skills for health issues
+bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 
-> Use `skills-appreciation` on this skill. I want to understand why it is designed this way and what skill designers should learn from it.
+# What skills can the agent see from here?
+bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 
-### Audit a skill that was just created with skill-creator
+# Inject activation tracing into all skills
+bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --inject-dir ~/.agents/skills/
 
-> I just finished creating this skill with skill-creator. Use `skills-refiner` to audit the design quality — focus on what the assertion tests might have missed.
+# View usage dashboard (last 30 days)
+bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh
 
-### Explain a newly built skill to the team
-
-> We just built this skill with skill-creator. Use `skills-appreciation` to write an explanation that helps our team understand the design.
+# Combined health check
+bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
+```
 
 ## Evaluation
 
-The repository contains two evaluation surfaces:
+The `evals/` directory contains anchor-based evaluations for the analysis skills:
 
-- `evals/` for `skills-refiner` (cases 01–03, 08)
-- `evals/skills-appreciation-rubric.md` plus dedicated appreciation cases and golden anchors for `skills-appreciation` (cases 04–07, 09)
+- `skills-refiner` (cases 01–03, 08) — object identification, stage control, judgment quality, evidence discipline
+- `skills-appreciation` (cases 04–07, 09) — thesis clarity, mechanism explanation, writing quality, low "AI flavor"
 
-Cases 08 and 09 specifically test the collaboration scenario: auditing a skill-creator output (case 08) and writing a post-creation interpretation for a team (case 09).
+Cases 08–09 test the collaboration scenario with skill-creator.
 
-The goal is not to reward verbosity or pretty structure alone. The goal is stable, transferable judgment for `skills-refiner`, and publishable, teaching-grade interpretation for `skills-appreciation`.
+The governance skills (`skill-hygiene`, `skill-debug`) are validated through integration tests that create sandboxed skill topologies and verify scanner/tracer correctness.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
 ## License
 

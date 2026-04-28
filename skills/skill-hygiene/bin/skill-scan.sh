@@ -13,7 +13,7 @@
 set -o pipefail
 
 # ── Config ────────────────────────────────────────────────────────────
-HOME_DIR="${HOME:-/Users/$(whoami)}"
+HOME_DIR="${HOME:-$(eval echo ~$(whoami))}"
 REPORT_DIR="$HOME_DIR/.agents/skills-report"
 TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
 REPORT_JSON="$REPORT_DIR/scan-$TIMESTAMP.json"
@@ -45,10 +45,25 @@ AGENT_DIRS=(
 )
 
 # ── Parse Args ────────────────────────────────────────────────────────
+show_help() {
+    echo "skill-scan.sh — Agent Skills fact collector for AI-driven hygiene analysis"
+    echo ""
+    echo "Usage:"
+    echo "  bash skill-scan.sh                    # Full scan, table + JSON output"
+    echo "  bash skill-scan.sh --stale-days 365   # Custom staleness threshold"
+    echo "  bash skill-scan.sh --json             # JSON only (for AI consumption)"
+    echo ""
+    echo "Options:"
+    echo "  --stale-days N   Override stale threshold (default: 180 days)"
+    echo "  --json           Output JSON only (for programmatic use)"
+    echo "  --help           Show this help message"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --stale-days) STALE_DAYS="$2"; shift 2 ;;
         --json) JSON_ONLY=true; shift ;;
+        --help|-h) show_help; exit 0 ;;
         *) shift ;;
     esac
 done

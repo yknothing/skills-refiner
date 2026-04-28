@@ -112,3 +112,99 @@ Expected behavior:
 - 确认功能测试已通过，然后跳过功能测试层面；
 - 聚焦设计层面的问题：范围清晰度、上下文工程、边界情况、可维护性；
 - 将前 3 项优化建议格式化为可直接用于 skill-creator 下一轮迭代的行动项。
+
+---
+
+## Governance & Observability examples
+
+These examples demonstrate the `skill-hygiene` and `skill-debug` skills.
+
+### 11) Scan installed skills for health issues
+
+```bash
+bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
+```
+
+Expected behavior:
+- scans all agent skill directories (`~/.agents/skills/`, `~/.claude/skills/`, etc.);
+- reports topology: native skills, symlinks, broken symlinks per directory;
+- flags issues: missing frontmatter, backup remnants, security indicators, stale or stub skills;
+- outputs both terminal-friendly table and JSON report.
+
+### 12) Scan with custom staleness threshold
+
+```bash
+bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --stale-days 365
+```
+
+### 13) JSON-only output for AI consumption
+
+```bash
+bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --json
+```
+
+Feed the JSON to an AI advisor for expert judgment on the scan results.
+
+### 14) Discover what skills are visible from a project directory
+
+```bash
+bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --cwd ~/projects/my-app
+```
+
+Expected behavior:
+- finds project-level skills (cwd → repo root);
+- finds global skills (`~/.*agent*/skills/`);
+- detects name conflicts (same skill name in multiple locations);
+- validates frontmatter.
+
+### 15) Inject activation tracing to track skill usage
+
+```bash
+# Inject into all global skills
+bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --inject-dir ~/.agents/skills/
+
+# Check which skills have traces
+bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --status
+
+# Remove traces when done
+bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --strip-dir ~/.agents/skills/
+```
+
+### 16) View the effectiveness dashboard
+
+```bash
+# Last 30 days (default)
+bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh
+
+# Last 7 days
+bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh --days 7
+
+# JSON output
+bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh --json --all
+```
+
+Expected output: hot skills ranking, zombie skills (installed but never activated), active rate, context distribution.
+
+### 17) Combined health check
+
+```bash
+bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
+```
+
+Combines discovery probe with activation log analysis and hygiene scan cross-reference.
+
+### 18) Full governance workflow
+
+```text
+# Step 1: What skills can the agent see?
+bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
+
+# Step 2: Which are actually being used?
+bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh
+
+# Step 3: What is the overall health?
+bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
+
+# Step 4: Ask AI to interpret and recommend
+Use skill-hygiene to evaluate the scan results and recommend improvements.
+```

@@ -10,7 +10,7 @@
 
 set -o pipefail
 
-HOME_DIR="${HOME:-/Users/$(whoami)}"
+HOME_DIR="${HOME:-$(eval echo ~$(whoami))}"
 DEBUG_DIR="$HOME_DIR/.agents/debug"
 LOG_FILE="$DEBUG_DIR/activation.jsonl"
 DAYS=30
@@ -115,13 +115,18 @@ main() {
     if $JSON_MODE; then
         # JSON output
         local freq_json
-        freq_json=$(echo "$freq" | awk '{print "{\"skill\":\"" $2 "\",\"count\":" $1 "}"}' | jq -s '.')
+        if [ -n "$freq" ]; then
+            freq_json=$(echo "$freq" | awk 'NF>=2{print "{\"skill\":\"" $2 "\",\"count\":" $1 "}"}' | jq -s '.')
+        else
+            freq_json='[]'
+        fi
 
         local zombie_json
-        zombie_json=$(comm -23 <(echo "$installed" | sort) <(echo "$active_skills" | sort) | jq -R . | jq -s '.')
+        zombie_json=$(comm -23 <(echo "$installed" | sort) <(echo "$active_skills" | sort) | jq -R 'select(length > 0)' | jq -s '.')
+        [ -z "$zombie_json" ] && zombie_json='[]'
 
         local context_json
-        context_json=$(echo "$filtered_log" | jq -r '[.cwd] | group_by(.) | map({cwd: .[0], count: length}) | sort_by(-.count)' 2>/dev/null || echo '[]')
+        context_json=$(echo "$filtered_log" | jq -s '[.[].cwd] | group_by(.) | map({cwd: .[0], count: length}) | sort_by(-.count)' 2>/dev/null || echo '[]')
 
         jq -n \
             --argjson total_events "$total_events" \

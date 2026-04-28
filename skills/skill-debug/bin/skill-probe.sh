@@ -12,7 +12,7 @@
 set -o pipefail
 
 # ── Config ────────────────────────────────────────────────────────────
-HOME_DIR="${HOME:-/Users/$(whoami)}"
+HOME_DIR="${HOME:-$(eval echo ~$(whoami))}"
 TARGET_CWD="${PWD}"
 VERBOSE=false
 DOCTOR=false

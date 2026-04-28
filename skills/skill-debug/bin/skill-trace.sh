@@ -11,7 +11,7 @@
 
 set -o pipefail
 
-HOME_DIR="${HOME:-/Users/$(whoami)}"
+HOME_DIR="${HOME:-$(eval echo ~$(whoami))}"
 DEBUG_DIR="$HOME_DIR/.agents/debug"
 LOG_FILE="$DEBUG_DIR/activation.jsonl"
 
