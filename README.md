@@ -1,5 +1,7 @@
 # skills-refiner
 
+[中文说明](README.zh.md)
+
 A skill governance toolkit for analyzing, interpreting, evaluating, and debugging agent skills systems.
 
 Four skills across two layers:
