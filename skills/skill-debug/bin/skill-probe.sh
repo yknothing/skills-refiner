@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # skill-probe.sh — Skill discovery diagnostics
-# Simulates Warp's skill discovery logic to show what skills
-# an agent CAN see from the current working directory.
+# Shows what skills an agent can see from the current working directory.
 #
 # Usage:
 #   bash skill-probe.sh                    # Probe from current cwd
@@ -26,41 +25,62 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Warp-supported skill directories (in priority order)
+# Agent-recognized skill directories, in discovery priority order used by this diagnostic.
 SKILL_DIRS=(".warp/skills" ".agents/skills" ".claude/skills" ".codex/skills"
             ".cursor/skills" ".gemini/skills" ".copilot/skills" ".factory/skills"
             ".github/skills" ".opencode/skills")
 
 # ── Parse Args ────────────────────────────────────────────────────────
+show_help() {
+    echo "skill-probe.sh — Skill discovery diagnostics"
+    echo ""
+    echo "Usage:"
+    echo "  bash skill-probe.sh"
+    echo "  bash skill-probe.sh --cwd /path/to/project"
+    echo "  bash skill-probe.sh --verbose"
+    echo "  bash skill-probe.sh --doctor"
+    echo ""
+    echo "Options:"
+    echo "  --cwd PATH     Probe discovery from PATH instead of current directory"
+    echo "  --verbose      Show paths, descriptions, and frontmatter validation"
+    echo "  --doctor       Include activation-log and hygiene-scan cross-checks"
+    echo "  --help, -h     Show this help message"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --cwd) TARGET_CWD="$2"; shift 2 ;;
         --verbose) VERBOSE=true; shift ;;
         --doctor) DOCTOR=true; shift ;;
-        *) shift ;;
+        --help|-h) show_help; exit 0 ;;
+        *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
     esac
 done
 
 # ── Helpers ───────────────────────────────────────────────────────────
 get_frontmatter() {
     local file="$1" key="$2"
-    sed -n '/^---$/,/^---$/p' "$file" 2>/dev/null | grep "^${key}:" | head -1 | sed "s/^${key}:[[:space:]]*//" | sed 's/^["'"'"']//' | sed 's/["'"'"']$//'
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && index($0, key ":") == 1 {
+            sub("^" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null
 }
 
 validate_frontmatter() {
     local file="$1"
-    local has_start has_end
-    has_start=$(head -1 "$file" 2>/dev/null)
-    has_end=$(sed -n '2,/^---$/p' "$file" 2>/dev/null | tail -1)
-    if [[ "$has_start" == "---" ]] && [[ "$has_end" == "---" ]]; then
-        return 0
-    fi
-    return 1
+    awk '
+        NR == 1 && $0 == "---" { start=1; next }
+        start && $0 == "---" { end=1; exit }
+        END { exit !(start && end) }
+    ' "$file" 2>/dev/null
 }
 
-# ── Discovery Logic ──────────────────────────────────────────────────
-
-# Find git root from a path
 find_git_root() {
     local dir="$1"
     while [ "$dir" != "/" ] && [ "$dir" != "$HOME_DIR" ]; do
@@ -73,51 +93,50 @@ find_git_root() {
     echo ""
 }
 
-# Discover project-level skills (cwd → repo root)
-discover_project_skills() {
-    local cwd="$1"
-    local git_root
-    git_root=$(find_git_root "$cwd")
-    local search_root="${git_root:-$cwd}"
+emit_skills_from_base() {
+    local scope="$1" dir_name="$2" skill_base="$3"
+    [ ! -d "$skill_base" ] && return
 
-    for dir_name in "${SKILL_DIRS[@]}"; do
-        local skill_base="$search_root/$dir_name"
-        if [ -d "$skill_base" ]; then
-            find "$skill_base" -maxdepth 2 -name "SKILL.md" -type f 2>/dev/null | while IFS= read -r f; do
-                local name
-                name=$(get_frontmatter "$f" "name")
-                local desc
-                desc=$(get_frontmatter "$f" "description")
-                local dir_n
-                dir_n=$(basename "$(dirname "$f")")
-                echo "project|$dir_name|${name:-$dir_n}|$f|${desc:0:80}"
-            done
-        fi
+    for entry in "$skill_base"/*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        [ -d "$entry" ] || [ -L "$entry" ] || continue
+
+        local skill_file="$entry/SKILL.md"
+        [ ! -f "$skill_file" ] && continue
+
+        local name desc dir_n entry_type
+        name=$(get_frontmatter "$skill_file" "name")
+        desc=$(get_frontmatter "$skill_file" "description")
+        dir_n=$(basename "$(dirname "$skill_file")")
+        entry_type="directory"
+        [ -L "$entry" ] && entry_type="symlink"
+
+        echo "$scope|$dir_name|${name:-$dir_n}|$skill_file|${desc:0:80}|$entry_type"
     done
 }
 
-# Discover global skills (~/...)
+# ── Discovery Logic ──────────────────────────────────────────────────
+discover_project_skills() {
+    local cwd="$1"
+    local git_root search_root
+    git_root=$(find_git_root "$cwd")
+    search_root="${git_root:-$cwd}"
+
+    for dir_name in "${SKILL_DIRS[@]}"; do
+        emit_skills_from_base "project" "$dir_name" "$search_root/$dir_name"
+    done
+}
+
 discover_global_skills() {
     for dir_name in "${SKILL_DIRS[@]}"; do
-        local skill_base="$HOME_DIR/$dir_name"
-        if [ -d "$skill_base" ]; then
-            find "$skill_base" -maxdepth 2 -name "SKILL.md" -type f 2>/dev/null | while IFS= read -r f; do
-                local name
-                name=$(get_frontmatter "$f" "name")
-                local desc
-                desc=$(get_frontmatter "$f" "description")
-                local dir_n
-                dir_n=$(basename "$(dirname "$f")")
-                echo "global|$dir_name|${name:-$dir_n}|$f|${desc:0:80}"
-            done
-        fi
+        emit_skills_from_base "global" "$dir_name" "$HOME_DIR/$dir_name"
     done
 }
 
 # ── Main Report ──────────────────────────────────────────────────────
 main() {
     echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║       Skill Discovery Probe v1.0         ║${NC}"
+    echo -e "${BOLD}║       Skill Discovery Probe v1.1         ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  ${DIM}CWD:${NC} $TARGET_CWD"
@@ -131,27 +150,26 @@ main() {
     fi
     echo ""
 
-    # Collect all discoverable skills
-    local all_skills=()
     local skill_names=()
 
     echo -e "${BOLD}── Project-Level Skills ──${NC}"
     local project_count=0
-    while IFS='|' read -r scope source name path desc; do
+    while IFS='|' read -r scope source name path desc entry_type; do
         [ -z "$scope" ] && continue
         project_count=$((project_count + 1))
-        all_skills+=("$name")
-        skill_names+=("$name|$path|project|$source")
+        skill_names+=("$name|$path|project|$source|$entry_type")
 
         local valid_fm="✓"
         if ! validate_frontmatter "$path"; then valid_fm="${RED}✗${NC}"; fi
+        local type_label=""
+        [ "$entry_type" = "symlink" ] && type_label=" ${DIM}(symlink)${NC}"
 
         if $VERBOSE; then
-            echo -e "  ${GREEN}●${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC} fm:$valid_fm"
+            echo -e "  ${GREEN}●${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC}$type_label fm:$valid_fm"
             echo -e "    ${DIM}$path${NC}"
             [ -n "$desc" ] && echo -e "    ${DIM}$desc${NC}"
         else
-            echo -e "  ${GREEN}●${NC} $name ${DIM}[$source]${NC}"
+            echo -e "  ${GREEN}●${NC} $name ${DIM}[$source]${NC}$type_label"
         fi
     done < <(discover_project_skills "$TARGET_CWD")
 
@@ -163,21 +181,22 @@ main() {
 
     echo -e "${BOLD}── Global Skills ──${NC}"
     local global_count=0
-    while IFS='|' read -r scope source name path desc; do
+    while IFS='|' read -r scope source name path desc entry_type; do
         [ -z "$scope" ] && continue
         global_count=$((global_count + 1))
-        all_skills+=("$name")
-        skill_names+=("$name|$path|global|$source")
+        skill_names+=("$name|$path|global|$source|$entry_type")
 
         local valid_fm="✓"
         if ! validate_frontmatter "$path"; then valid_fm="${RED}✗${NC}"; fi
+        local type_label=""
+        [ "$entry_type" = "symlink" ] && type_label=" ${DIM}(symlink)${NC}"
 
         if $VERBOSE; then
-            echo -e "  ${CYAN}●${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC} fm:$valid_fm"
+            echo -e "  ${CYAN}●${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC}$type_label fm:$valid_fm"
             echo -e "    ${DIM}$path${NC}"
             [ -n "$desc" ] && echo -e "    ${DIM}$desc${NC}"
         else
-            echo -e "  ${CYAN}●${NC} $name ${DIM}[$source]${NC}"
+            echo -e "  ${CYAN}●${NC} $name ${DIM}[$source]${NC}$type_label"
         fi
     done < <(discover_global_skills)
 
@@ -187,7 +206,6 @@ main() {
     echo -e "  ${DIM}Total: $global_count${NC}"
     echo ""
 
-    # Detect name conflicts
     echo -e "${BOLD}── Name Conflicts ──${NC}"
     local conflict_found=false
     local seen_names=()
@@ -203,9 +221,9 @@ main() {
         while IFS= read -r dup_name; do
             echo -e "  ${YELLOW}⚠${NC} ${BOLD}$dup_name${NC} — found in multiple locations:"
             for entry in "${skill_names[@]}"; do
-                IFS='|' read -r name path scope source <<< "$entry"
+                IFS='|' read -r name path scope source entry_type <<< "$entry"
                 if [ "$name" = "$dup_name" ]; then
-                    echo -e "    ${DIM}[$scope/$source]${NC} $path"
+                    echo -e "    ${DIM}[$scope/$source/$entry_type]${NC} $path"
                 fi
             done
         done <<< "$sorted_names"
@@ -216,46 +234,38 @@ main() {
     fi
     echo ""
 
-    # Summary
     local total=$((project_count + global_count))
     echo -e "${BOLD}── Summary ──${NC}"
-    echo -e "  Discoverable skills: ${BOLD}$total${NC} (project: $project_count, global: $global_count)"
+    echo -e "  Discoverable skill entries: ${BOLD}$total${NC} (project: $project_count, global: $global_count)"
     echo -e "  Scanned directories: ${#SKILL_DIRS[@]} patterns × 2 scopes"
     if $conflict_found; then
-        echo -e "  ${YELLOW}⚠ Name conflicts detected — agent may pick unexpected version${NC}"
+        echo -e "  ${YELLOW}⚠ Name conflicts detected — agent may pick an unexpected version depending on discovery priority${NC}"
     fi
     echo ""
 
-    # Doctor mode
     if $DOCTOR; then
         echo -e "${BOLD}── Doctor Mode ──${NC}"
         echo ""
 
-        # Check activation logs
         local log_file="$HOME_DIR/.agents/debug/activation.jsonl"
         if [ -f "$log_file" ]; then
-            local log_count
+            local log_count activated_skills installed_names active_names zombies zombie_count
             log_count=$(wc -l < "$log_file" | tr -d ' ')
-            local activated_skills
             activated_skills=$(jq -r '.skill' "$log_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
             echo -e "  Activation log: ${GREEN}$log_count${NC} events, ${GREEN}$activated_skills${NC} unique skills"
 
-            # Find zombies
-            local installed_names
             installed_names=$(printf '%s\n' "${seen_names[@]}" | sort -u)
-            local active_names
             active_names=$(jq -r '.skill' "$log_file" 2>/dev/null | sort -u)
-            local zombies
             zombies=$(comm -23 <(echo "$installed_names") <(echo "$active_names"))
-            local zombie_count
             zombie_count=$(echo "$zombies" | grep -c . 2>/dev/null || echo 0)
 
             if [ "$zombie_count" -gt 0 ]; then
-                echo -e "  ${YELLOW}Zombie skills (installed but never activated):${NC} $zombie_count"
+                echo -e "  ${YELLOW}Installed but not observed activated:${NC} $zombie_count"
                 echo "$zombies" | head -10 | sed 's/^/    - /'
                 [ "$zombie_count" -gt 10 ] && echo "    ... and $((zombie_count - 10)) more"
+                echo -e "  ${DIM}Observation only: lack of activation is not a removal verdict.${NC}"
             else
-                echo -e "  ${GREEN}✓${NC} All installed skills have been activated at least once"
+                echo -e "  ${GREEN}✓${NC} All installed skills have been observed at least once"
             fi
         else
             echo -e "  ${DIM}No activation log found. Inject traces with:${NC}"
@@ -263,7 +273,6 @@ main() {
         fi
         echo ""
 
-        # Check hygiene report
         local latest_report
         latest_report=$(ls -t "$HOME_DIR/.agents/skills-report"/scan-*.json 2>/dev/null | head -1)
         if [ -n "$latest_report" ]; then
