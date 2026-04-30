@@ -8,7 +8,6 @@
 #   bash skill-scan.sh                    # Full scan, table + JSON output
 #   bash skill-scan.sh --stale-days 365   # Custom staleness threshold
 #   bash skill-scan.sh --json             # JSON only (for AI consumption)
-#   bash skill-scan.sh --scope all        # Include non-global directories
 
 set -o pipefail
 
@@ -29,7 +28,8 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Agent directories to scan (these are the ACTIVE directories)
+# Agent-recognized directories to scan. These are active consumption surfaces,
+# not arbitrary workspace/project directories.
 AGENT_DIRS=(
     "$HOME_DIR/.agents/skills"
     "$HOME_DIR/.claude/skills"
@@ -51,48 +51,82 @@ show_help() {
     echo "Usage:"
     echo "  bash skill-scan.sh                    # Full scan, table + JSON output"
     echo "  bash skill-scan.sh --stale-days 365   # Custom staleness threshold"
-    echo "  bash skill-scan.sh --json             # JSON only (for AI consumption)"
+    echo "  bash skill-scan.sh --json             # JSON only (for programmatic use)"
     echo ""
     echo "Options:"
     echo "  --stale-days N   Override stale threshold (default: 180 days)"
     echo "  --json           Output JSON only (for programmatic use)"
-    echo "  --help           Show this help message"
+    echo "  --help, -h       Show this help message"
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --stale-days) STALE_DAYS="$2"; shift 2 ;;
+        --stale-days)
+            if [ -z "${2:-}" ] || ! echo "$2" | grep -Eq '^[0-9]+$'; then
+                echo "[ERROR] --stale-days requires a non-negative integer" >&2
+                exit 2
+            fi
+            STALE_DAYS="$2"
+            shift 2
+            ;;
         --json) JSON_ONLY=true; shift ;;
         --help|-h) show_help; exit 0 ;;
-        *) shift ;;
+        *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
     esac
 done
 
 # ── Helpers ───────────────────────────────────────────────────────────
 mkdir -p "$REPORT_DIR"
 
+if ! command -v jq >/dev/null 2>&1; then
+    echo "[ERROR] jq is required for JSON output and aggregation. Install jq and retry." >&2
+    exit 127
+fi
+
 get_frontmatter() {
     local file="$1" key="$2"
-    sed -n '/^---$/,/^---$/p' "$file" 2>/dev/null | grep "^${key}:" | head -1 | sed "s/^${key}:[[:space:]]*//" | sed 's/^["'"'"']//' | sed 's/["'"'"']$//' | head -c 300
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && index($0, key ":") == 1 {
+            sub("^" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null | head -c 300
 }
 
 count_content_words() {
-    sed '1,/^---$/d; 1,/^---$/d' "$1" 2>/dev/null | wc -w | tr -d ' '
+    awk '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { in_fm=0; next }
+        !in_fm { print }
+    ' "$1" 2>/dev/null | wc -w | tr -d ' '
 }
 
 get_mtime() {
     stat -f "%m" "$1" 2>/dev/null || stat -c "%Y" "$1" 2>/dev/null || echo 0
 }
 
-# Resolve symlink chain and classify entry type
+resolve_symlink_target() {
+    local path="$1" target="$2"
+    local base_dir target_dir target_name resolved_dir
+    base_dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd) || return 1
+    target_dir=$(dirname "$target")
+    target_name=$(basename "$target")
+    resolved_dir=$(cd "$base_dir/$target_dir" 2>/dev/null && pwd) || return 1
+    printf '%s/%s\n' "$resolved_dir" "$target_name"
+}
+
+# Resolve symlink chain and classify entry type.
 classify_entry() {
     local path="$1"
     if [ -L "$path" ]; then
-        local target
+        local target resolved
         target=$(readlink "$path" 2>/dev/null)
-        local resolved
-        resolved=$(cd "$(dirname "$path")" && cd "$(dirname "$target")" 2>/dev/null && pwd)/$(basename "$target")
-        if [ -d "$resolved" ] || [ -d "$path" ]; then
+        resolved=$(resolve_symlink_target "$path" "$target" 2>/dev/null || true)
+        if [ -n "$resolved" ] && [ -d "$resolved" ]; then
             echo "symlink|$target"
         else
             echo "broken_symlink|$target"
@@ -112,28 +146,23 @@ scan_directory() {
 
     [ ! -d "$dir" ] && echo "$results" && return
 
-    # List all entries (including broken symlinks) using a single pass
     local _seen=""
     for entry_path in "$dir"/*; do
         [ -e "$entry_path" ] || [ -L "$entry_path" ] || continue
-        # Only process directories and symlinks (skip regular files)
         [ -d "$entry_path" ] || [ -L "$entry_path" ] || continue
         local entry_name
         entry_name=$(basename "$entry_path")
-        # Dedup (in case glob expands same entry twice)
         echo "$_seen" | grep -qx "$entry_name" && continue
         _seen="${_seen}${entry_name}
 "
 
-        # Skip hidden entries
         [[ "$entry_name" == .* ]] && continue
 
-        local classification
+        local classification entry_type link_target
         classification=$(classify_entry "$entry_path")
-        local entry_type="${classification%%|*}"
-        local link_target="${classification#*|}"
+        entry_type="${classification%%|*}"
+        link_target="${classification#*|}"
 
-        # For broken symlinks, record and skip (no SKILL.md to read)
         if [ "$entry_type" = "broken_symlink" ]; then
             local entry_json
             entry_json=$(jq -n \
@@ -147,55 +176,42 @@ scan_directory() {
             continue
         fi
 
-        local entry="${entry_path%/}/"
-        local skill_file="$entry/SKILL.md"
-        [ -f "${entry_path}/SKILL.md" ] && skill_file="${entry_path}/SKILL.md"
+        local skill_file="$entry_path/SKILL.md"
         [ ! -f "$skill_file" ] && continue
 
-        local name
+        local name desc word_count mtime now age_days
         name=$(get_frontmatter "$skill_file" "name")
-        local desc
         desc=$(get_frontmatter "$skill_file" "description")
-        local word_count
         word_count=$(count_content_words "$skill_file")
-        local mtime
         mtime=$(get_mtime "$skill_file")
-        local now
         now=$(date +%s)
-        local age_days=$(( (now - mtime) / 86400 ))
+        age_days=$(( (now - mtime) / 86400 ))
 
-        # Detect known patterns
         local flags=()
 
-        # Backup/archive remnant
         if echo "$entry_name" | grep -qE '\.backup\.|\.disabled|\.tmp|\.old'; then
             flags+=("backup_remnant")
         fi
 
-        # Check frontmatter
         [ -z "$name" ] && flags+=("no_name")
         [ -z "$desc" ] && flags+=("no_description")
 
-        # Size flags (informational only)
         [ "$word_count" -lt 30 ] && flags+=("very_small")
         [ "$word_count" -gt 5000 ] && flags+=("very_large")
-
-        # Age flag
         [ "$age_days" -gt "$STALE_DAYS" ] && flags+=("stale_${age_days}d")
 
-        # Security quick-check (informational flags)
         local content
         content=$(cat "$skill_file" 2>/dev/null)
-        echo "$content" | grep -qE 'curl.*\| ?bash|wget.*\| ?sh' && flags+=("pipe_to_shell")
-        echo "$content" | grep -qE 'rm -rf /|sudo ' && flags+=("dangerous_cmd")
-        echo "$content" | grep -qE 'API_KEY=|TOKEN=|SECRET=' && flags+=("possible_secret")
+        echo "$content" | grep -qE 'curl[[:space:][:graph:]]*\|[[:space:]]*(bash|sh)|wget[[:space:][:graph:]]*\|[[:space:]]*(bash|sh)' && flags+=("pipe_to_shell")
+        echo "$content" | grep -qE 'rm[[:space:]]+-rf[[:space:]]+/|sudo[[:space:]]+' && flags+=("dangerous_cmd")
+        echo "$content" | grep -qE '(API_KEY|TOKEN|SECRET)[[:space:]]*=' && flags+=("possible_secret")
 
-        # Broken internal references
         local broken_refs=()
         local refs
-        refs=$(grep -oE '@[a-zA-Z0-9_.-]+\.(md|sh|py|js)' "$skill_file" 2>/dev/null)
+        refs=$(grep -oE '@[a-zA-Z0-9_./-]+\.(md|sh|py|js)' "$skill_file" 2>/dev/null || true)
         if [ -n "$refs" ]; then
             while IFS= read -r ref; do
+                [ -z "$ref" ] && continue
                 local ref_path="$(dirname "$skill_file")/${ref#@}"
                 [ ! -f "$ref_path" ] && broken_refs+=("$ref")
             done <<< "$refs"
@@ -206,7 +222,7 @@ scan_directory() {
         if [ ${#flags[@]} -eq 0 ]; then
             flags_json='[]'
         else
-            flags_json=$(printf '%s\n' "${flags[@]}" | jq -R . 2>/dev/null | jq -s . 2>/dev/null || echo '[]')
+            flags_json=$(printf '%s\n' "${flags[@]}" | jq -R . | jq -s .)
         fi
 
         local entry_json
@@ -221,9 +237,14 @@ scan_directory() {
             --argjson age "$age_days" \
             --argjson flags "$flags_json" \
             '{
-                name: $name, dir_name: $dir_name, location: $location,
-                type: $entry_type, link_target: $link_target,
-                description: $desc, word_count: $words, age_days: $age,
+                name: $name,
+                dir_name: $dir_name,
+                location: $location,
+                type: $entry_type,
+                link_target: $link_target,
+                description: $desc,
+                word_count: $words,
+                age_days: $age,
                 flags: $flags
             }')
 
@@ -244,26 +265,19 @@ main() {
         echo ""
     fi
 
-    # ── Collect data from each directory ──
-    local all_data='{"topology":{},"skills":[],"broken_symlinks":[]}'
+    local all_data
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" '{metadata:{scanned_at:$scanned_at, stale_days:$stale_days, scope:"agent-recognized-directories"}, topology:{}, skills:[], broken_symlinks:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
         local label="${dir#$HOME_DIR/}"
-        local dir_data
+        local dir_data total symlinks native broken
         dir_data=$(scan_directory "$dir" "$label")
-
-        # Count entries by type
-        local total
         total=$(echo "$dir_data" | jq 'length')
-        local symlinks
         symlinks=$(echo "$dir_data" | jq '[.[] | select(.type == "symlink")] | length')
-        local native
         native=$(echo "$dir_data" | jq '[.[] | select(.type == "directory")] | length')
-        local broken
         broken=$(echo "$dir_data" | jq '[.[] | select(.type == "broken_symlink")] | length')
 
-        # Add to topology
         all_data=$(echo "$all_data" | jq \
             --arg label "$label" \
             --argjson total "$total" \
@@ -272,14 +286,12 @@ main() {
             --argjson broken "$broken" \
             '.topology[$label] = {total: $total, symlinks: $symlinks, native: $native, broken_symlinks: $broken}')
 
-        # Add skills (only canonical + native, skip symlinks to avoid double-counting)
         all_data=$(echo "$all_data" | jq --argjson d "$dir_data" '
-            .skills += [$d[] | select(.type != "symlink")] |
+            .skills += [$d[] | select(.type == "directory")] |
             .broken_symlinks += [$d[] | select(.type == "broken_symlink")]
         ')
     done
 
-    # Save JSON
     echo "$all_data" | jq '.' > "$REPORT_JSON"
 
     if $JSON_ONLY; then
@@ -287,9 +299,6 @@ main() {
         return
     fi
 
-    # ── Terminal Output ──
-
-    # Topology map
     echo -e "${BOLD}── Topology Map ──${NC}"
     echo "$all_data" | jq -r '.topology | to_entries[] | "\(.key)|\(.value.total)|\(.value.native)|\(.value.symlinks)|\(.value.broken_symlinks)"' | while IFS='|' read -r loc total native sym broken; do
         printf "  %-30s %3d total  (%d native, %d symlinks" "$loc" "$total" "$native" "$sym"
@@ -300,21 +309,17 @@ main() {
     done
     echo ""
 
-    # Canonical skills summary
-    local canonical_count
+    local canonical_count total_skills
     canonical_count=$(echo "$all_data" | jq '[.skills[] | select(.location == ".agents/skills")] | length')
-    local total_skills
     total_skills=$(echo "$all_data" | jq '.skills | length')
     echo -e "${BOLD}── Skill Inventory ──${NC}"
     echo -e "  Canonical skills (in .agents/skills): ${BOLD}$canonical_count${NC}"
     echo -e "  Native agent-specific skills:         ${BOLD}$((total_skills - canonical_count))${NC}"
-    echo -e "  Total unique skills:                  ${BOLD}$total_skills${NC}"
+    echo -e "  Total unique real-directory skills:   ${BOLD}$total_skills${NC}"
     echo ""
 
-    # Findings table — flags
-    local flagged
+    local flagged flagged_count
     flagged=$(echo "$all_data" | jq '[.skills[] | select(.flags | length > 0)]')
-    local flagged_count
     flagged_count=$(echo "$flagged" | jq 'length')
 
     if [ "$flagged_count" -gt 0 ]; then
@@ -322,16 +327,13 @@ main() {
         printf "  ${DIM}%-30s %-20s %-8s %s${NC}\n" "NAME" "LOCATION" "WORDS" "FLAGS"
         printf "  ${DIM}%-30s %-20s %-8s %s${NC}\n" "----" "--------" "-----" "-----"
         echo "$flagged" | jq -r '.[] | "\(.name)|\(.location)|\(.word_count)|\(.flags | join(", "))"' | while IFS='|' read -r name loc words flags; do
-            # Color based on severity
             local color="$YELLOW"
-            echo "$flags" | grep -qE 'broken_|dangerous_|pipe_to_shell|possible_secret' && color="$RED"
-            echo "$flags" | grep -qE 'backup_remnant' && color="$YELLOW"
+            echo "$flags" | grep -qE 'dangerous_|pipe_to_shell|possible_secret' && color="$RED"
             printf "  ${color}%-30s${NC} %-20s %-8s %s\n" "${name:0:30}" "${loc:0:20}" "$words" "$flags"
         done
         echo ""
     fi
 
-    # Broken symlinks
     local broken_count
     broken_count=$(echo "$all_data" | jq '.broken_symlinks | length')
     if [ "$broken_count" -gt 0 ]; then
@@ -340,52 +342,42 @@ main() {
         echo ""
     fi
 
-    # Backup remnants
     local backups
-    backups=$(echo "$all_data" | jq -r '[.skills[] | select(.flags[] | startswith("backup"))] | .[] | "  \(.dir_name) in \(.location) (\(.age_days)d old, \(.word_count)w)"')
+    backups=$(echo "$all_data" | jq -r '[.skills[] | select(any(.flags[]?; startswith("backup")))] | .[] | "  \(.dir_name) in \(.location) (\(.age_days)d old, \(.word_count)w)"')
     if [ -n "$backups" ]; then
         echo -e "${YELLOW}${BOLD}── Backup/Archive Remnants ──${NC}"
         echo "$backups"
         echo ""
     fi
 
-    # Size distribution
     echo -e "${BOLD}── Size Distribution ──${NC}"
-    local tiny
+    local tiny small medium large xlarge
     tiny=$(echo "$all_data" | jq '[.skills[] | select(.word_count < 30)] | length')
-    local small
     small=$(echo "$all_data" | jq '[.skills[] | select(.word_count >= 30 and .word_count < 200)] | length')
-    local medium
     medium=$(echo "$all_data" | jq '[.skills[] | select(.word_count >= 200 and .word_count < 1000)] | length')
-    local large
     large=$(echo "$all_data" | jq '[.skills[] | select(.word_count >= 1000 and .word_count < 5000)] | length')
-    local xlarge
     xlarge=$(echo "$all_data" | jq '[.skills[] | select(.word_count >= 5000)] | length')
-    echo "  <30w (stub?):     $tiny"
-    echo "  30-200w (compact): $small"
+    echo "  <30w (possible stub): $tiny"
+    echo "  30-200w (compact):   $small"
     echo "  200-1000w (typical): $medium"
     echo "  1000-5000w (large):  $large"
     echo "  >5000w (very large): $xlarge"
     echo ""
 
-    # Age distribution
     echo -e "${BOLD}── Age Distribution ──${NC}"
-    local fresh
-    fresh=$(echo "$all_data" | jq --argjson s "$STALE_DAYS" '[.skills[] | select(.age_days <= 30)] | length')
-    local recent
+    local fresh recent mature stale
+    fresh=$(echo "$all_data" | jq '[.skills[] | select(.age_days <= 30)] | length')
     recent=$(echo "$all_data" | jq '[.skills[] | select(.age_days > 30 and .age_days <= 90)] | length')
-    local mature
     mature=$(echo "$all_data" | jq --argjson s "$STALE_DAYS" '[.skills[] | select(.age_days > 90 and .age_days <= $s)] | length')
-    local stale
     stale=$(echo "$all_data" | jq --argjson s "$STALE_DAYS" '[.skills[] | select(.age_days > $s)] | length')
-    echo "  ≤30 days (fresh):   $fresh"
-    echo "  31-90 days:         $recent"
-    echo "  91-${STALE_DAYS} days:       $mature"
-    echo "  >${STALE_DAYS} days (stale):  $stale"
+    echo "  ≤30 days (fresh):      $fresh"
+    echo "  31-90 days:            $recent"
+    echo "  91-${STALE_DAYS} days:          $mature"
+    echo "  >${STALE_DAYS} days (stale):     $stale"
     echo ""
 
     echo -e "${GREEN}[OK]${NC} Scan complete. JSON: ${CYAN}$REPORT_JSON${NC}"
-    echo -e "${DIM}Feed this JSON to the AI for expert analysis.${NC}"
+    echo -e "${DIM}Feed this JSON to the AI for expert analysis. Findings are signals, not verdicts.${NC}"
 }
 
 main "$@"
