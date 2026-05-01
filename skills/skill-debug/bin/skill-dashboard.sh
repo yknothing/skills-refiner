@@ -33,25 +33,52 @@ SKILL_DIRS=(".warp/skills" ".agents/skills" ".claude/skills" ".codex/skills"
 # ── Parse Args ────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --days) DAYS="$2"; shift 2 ;;
+        --days)
+            if [ -z "${2:-}" ] || ! echo "$2" | grep -Eq '^[0-9]+$'; then
+                echo "[ERROR] --days requires a non-negative integer" >&2
+                exit 2
+            fi
+            DAYS="$2"
+            shift 2
+            ;;
         --json) JSON_MODE=true; shift ;;
         --all) DAYS=99999; shift ;;
-        *) shift ;;
+        --help|-h)
+            echo "skill-dashboard.sh — Skill activation observation dashboard"
+            echo ""
+            echo "Usage:"
+            echo "  bash skill-dashboard.sh              # Default 30-day report"
+            echo "  bash skill-dashboard.sh --days 7     # Last 7 days"
+            echo "  bash skill-dashboard.sh --json       # JSON output"
+            echo "  bash skill-dashboard.sh --all        # All time"
+            exit 0
+            ;;
+        *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
     esac
 done
 
 # ── Collect Installed Skills ──────────────────────────────────────────
+get_skill_name() {
+    local file="$1"
+    local name
+    name=$(sed -n '/^---$/,/^---$/p' "$file" 2>/dev/null | grep "^name:" | head -1 | sed 's/^name:[[:space:]]*//')
+    [ -z "$name" ] && name=$(basename "$(dirname "$file")")
+    echo "$name"
+}
+
 get_installed_skills() {
     for dir_name in "${SKILL_DIRS[@]}"; do
         local skill_base="$HOME_DIR/$dir_name"
-        if [ -d "$skill_base" ]; then
-            find "$skill_base" -maxdepth 2 -name "SKILL.md" -type f 2>/dev/null | while IFS= read -r f; do
-                local name
-                name=$(sed -n '/^---$/,/^---$/p' "$f" 2>/dev/null | grep "^name:" | head -1 | sed 's/^name:[[:space:]]*//')
-                [ -z "$name" ] && name=$(basename "$(dirname "$f")")
-                echo "$name"
-            done
-        fi
+        [ -d "$skill_base" ] || continue
+
+        for entry in "$skill_base"/*; do
+            [ -e "$entry" ] || [ -L "$entry" ] || continue
+            [ -d "$entry" ] || [ -L "$entry" ] || continue
+
+            local skill_file="$entry/SKILL.md"
+            [ -f "$skill_file" ] || continue
+            get_skill_name "$skill_file"
+        done
     done | sort -u
 }
 
@@ -59,7 +86,7 @@ get_installed_skills() {
 main() {
     if ! $JSON_MODE; then
         echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-        echo -e "${BOLD}║      Skill Effectiveness Dashboard       ║${NC}"
+        echo -e "${BOLD}║   Skill Activation Observation Dashboard ║${NC}"
         echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
         echo ""
     fi
@@ -121,9 +148,9 @@ main() {
             freq_json='[]'
         fi
 
-        local zombie_json
-        zombie_json=$(comm -23 <(echo "$installed" | sort) <(echo "$active_skills" | sort) | jq -R 'select(length > 0)' | jq -s '.')
-        [ -z "$zombie_json" ] && zombie_json='[]'
+        local observation_json
+        observation_json=$(comm -23 <(echo "$installed" | sort) <(echo "$active_skills" | sort) | jq -R 'select(length > 0)' | jq -s '.')
+        [ -z "$observation_json" ] && observation_json='[]'
 
         local context_json
         context_json=$(echo "$filtered_log" | jq -s '[.[].cwd] | group_by(.) | map({cwd: .[0], count: length}) | sort_by(-.count)' 2>/dev/null || echo '[]')
@@ -135,7 +162,7 @@ main() {
             --argjson active_rate "$active_rate" \
             --argjson days "$DAYS" \
             --argjson frequency "$freq_json" \
-            --argjson zombies "$zombie_json" \
+            --argjson observations "$observation_json" \
             --argjson contexts "$context_json" \
             '{
                 period_days: $days,
@@ -144,16 +171,23 @@ main() {
                 active_skills: $active_count,
                 active_rate_pct: $active_rate,
                 frequency: $frequency,
-                zombie_skills: $zombies,
-                context_distribution: $contexts
+                not_observed_skills: $observations,
+                zombie_skills: $observations,
+                context_distribution: $contexts,
+                note: "Not observed is an observation, not a removal verdict. Cross-reference user workflow and hygiene scan before recommending action."
             }'
         return
     fi
 
     # Terminal output
-    local period_label
-    if [ "$DAYS" -ge 99999 ]; then period_label="all time"
-    else period_label="last ${DAYS} days"; fi
+    local period_label observation_title
+    if [ "$DAYS" -ge 99999 ]; then
+        period_label="all time"
+        observation_title="Not Observed Skills (No Recorded Activation)"
+    else
+        period_label="last ${DAYS} days"
+        observation_title="Not Observed Skills (No Activation in Period)"
+    fi
 
     echo -e "  ${DIM}Period: $period_label${NC}"
     echo -e "  ${DIM}Log: $LOG_FILE${NC}"
@@ -165,13 +199,13 @@ main() {
     echo -e "  Installed skills:  $installed_count"
     echo -e "  Active skills:     $active_count"
 
-    # Active rate with color coding
+    # Active rate with conservative interpretation
     if [ "$active_rate" -ge 60 ]; then
         echo -e "  Active rate:       ${GREEN}${active_rate}%${NC}"
     elif [ "$active_rate" -ge 30 ]; then
         echo -e "  Active rate:       ${YELLOW}${active_rate}%${NC}"
     else
-        echo -e "  Active rate:       ${RED}${active_rate}%${NC} (consider cleanup)"
+        echo -e "  Active rate:       ${YELLOW}${active_rate}%${NC} (low observed usage; review context before acting)"
     fi
     echo ""
 
@@ -180,8 +214,11 @@ main() {
     if [ -n "$freq" ]; then
         echo "$freq" | head -10 | while read -r count name; do
             # Bar chart
-            local bar_len=$((count * 30 / $(echo "$freq" | head -1 | awk '{print $1}')))
-            local bar
+            local top_count bar_len bar
+            top_count=$(echo "$freq" | head -1 | awk '{print $1}')
+            [ -z "$top_count" ] || [ "$top_count" -eq 0 ] && top_count=1
+            bar_len=$((count * 30 / top_count))
+            [ "$bar_len" -lt 1 ] && bar_len=1
             bar=$(printf '█%.0s' $(seq 1 "$bar_len") 2>/dev/null || echo "█")
             printf "  %-25s %4d ${GREEN}%s${NC}\n" "$name" "$count" "$bar"
         done
@@ -190,20 +227,21 @@ main() {
     fi
     echo ""
 
-    # Zombie skills
-    local zombies
-    zombies=$(comm -23 <(echo "$installed" | sort) <(echo "$active_skills" | sort))
-    local zombie_count
-    zombie_count=$(echo "$zombies" | grep -c . 2>/dev/null || echo 0)
+    # Not observed skills
+    local observations
+    observations=$(comm -23 <(echo "$installed" | sort) <(echo "$active_skills" | sort))
+    local observation_count
+    observation_count=$(echo "$observations" | grep -c . 2>/dev/null || echo 0)
 
-    echo -e "${BOLD}── Zombie Skills (Never Activated) ──${NC}"
-    if [ "$zombie_count" -gt 0 ]; then
-        echo -e "  ${RED}$zombie_count skills${NC} installed but never triggered:"
-        echo "$zombies" | head -15 | sed "s/^/  ${DIM}○ /"
+    echo -e "${BOLD}── $observation_title ──${NC}"
+    if [ "$observation_count" -gt 0 ]; then
+        echo -e "  ${YELLOW}$observation_count skills${NC} installed but not observed activated:"
+        echo "$observations" | head -15 | sed "s/^/  ${DIM}○ /"
         echo -e "${NC}"
-        [ "$zombie_count" -gt 15 ] && echo -e "  ${DIM}... and $((zombie_count - 15)) more${NC}"
+        [ "$observation_count" -gt 15 ] && echo -e "  ${DIM}... and $((observation_count - 15)) more${NC}"
+        echo -e "  ${DIM}Observation only: lack of activation is not a removal verdict.${NC}"
     else
-        echo -e "  ${GREEN}✓${NC} All installed skills have been activated"
+        echo -e "  ${GREEN}✓${NC} All installed skills have observed activations in this period"
     fi
     echo ""
 
