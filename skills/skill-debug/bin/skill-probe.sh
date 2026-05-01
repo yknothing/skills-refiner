@@ -49,7 +49,14 @@ show_help() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --cwd) TARGET_CWD="$2"; shift 2 ;;
+        --cwd)
+            if [ -z "${2:-}" ]; then
+                echo "[ERROR] --cwd requires a path" >&2
+                exit 2
+            fi
+            TARGET_CWD="$2"
+            shift 2
+            ;;
         --verbose) VERBOSE=true; shift ;;
         --doctor) DOCTOR=true; shift ;;
         --help|-h) show_help; exit 0 ;;
@@ -81,6 +88,15 @@ validate_frontmatter() {
     ' "$file" 2>/dev/null
 }
 
+canonical_file() {
+    local file="$1"
+    local dir base resolved_dir
+    dir=$(dirname "$file")
+    base=$(basename "$file")
+    resolved_dir=$(cd -P "$dir" 2>/dev/null && pwd) || return 1
+    printf '%s/%s\n' "$resolved_dir" "$base"
+}
+
 find_git_root() {
     local dir="$1"
     while [ "$dir" != "/" ] && [ "$dir" != "$HOME_DIR" ]; do
@@ -104,14 +120,15 @@ emit_skills_from_base() {
         local skill_file="$entry/SKILL.md"
         [ ! -f "$skill_file" ] && continue
 
-        local name desc dir_n entry_type
+        local name desc dir_n entry_type canon
         name=$(get_frontmatter "$skill_file" "name")
         desc=$(get_frontmatter "$skill_file" "description")
-        dir_n=$(basename "$(dirname "$skill_file")")
+        dir_n=$(basename "$entry")
         entry_type="directory"
         [ -L "$entry" ] && entry_type="symlink"
+        canon=$(canonical_file "$skill_file" 2>/dev/null || echo "$skill_file")
 
-        echo "$scope|$dir_name|${name:-$dir_n}|$skill_file|${desc:0:80}|$entry_type"
+        echo "$scope|$dir_name|${name:-$dir_n}|$skill_file|${desc:0:80}|$entry_type|$canon"
     done
 }
 
@@ -136,7 +153,7 @@ discover_global_skills() {
 # ── Main Report ──────────────────────────────────────────────────────
 main() {
     echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║       Skill Discovery Probe v1.1         ║${NC}"
+    echo -e "${BOLD}║       Skill Discovery Probe v1.2         ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  ${DIM}CWD:${NC} $TARGET_CWD"
@@ -150,23 +167,26 @@ main() {
     fi
     echo ""
 
-    local skill_names=()
+    local skill_entries=()
+    local symlink_distribution_count=0
 
     echo -e "${BOLD}── Project-Level Skills ──${NC}"
     local project_count=0
-    while IFS='|' read -r scope source name path desc entry_type; do
+    while IFS='|' read -r scope source name path desc entry_type canonical_path; do
         [ -z "$scope" ] && continue
         project_count=$((project_count + 1))
-        skill_names+=("$name|$path|project|$source|$entry_type")
+        [ "$entry_type" = "symlink" ] && symlink_distribution_count=$((symlink_distribution_count + 1))
+        skill_entries+=("$name|$path|project|$source|$entry_type|$canonical_path")
 
         local valid_fm="✓"
         if ! validate_frontmatter "$path"; then valid_fm="${RED}✗${NC}"; fi
         local type_label=""
-        [ "$entry_type" = "symlink" ] && type_label=" ${DIM}(symlink)${NC}"
+        [ "$entry_type" = "symlink" ] && type_label=" ${DIM}(symlink distribution)${NC}"
 
         if $VERBOSE; then
             echo -e "  ${GREEN}●${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC}$type_label fm:$valid_fm"
             echo -e "    ${DIM}$path${NC}"
+            [ "$path" != "$canonical_path" ] && echo -e "    ${DIM}canonical: $canonical_path${NC}"
             [ -n "$desc" ] && echo -e "    ${DIM}$desc${NC}"
         else
             echo -e "  ${GREEN}●${NC} $name ${DIM}[$source]${NC}$type_label"
@@ -181,19 +201,21 @@ main() {
 
     echo -e "${BOLD}── Global Skills ──${NC}"
     local global_count=0
-    while IFS='|' read -r scope source name path desc entry_type; do
+    while IFS='|' read -r scope source name path desc entry_type canonical_path; do
         [ -z "$scope" ] && continue
         global_count=$((global_count + 1))
-        skill_names+=("$name|$path|global|$source|$entry_type")
+        [ "$entry_type" = "symlink" ] && symlink_distribution_count=$((symlink_distribution_count + 1))
+        skill_entries+=("$name|$path|global|$source|$entry_type|$canonical_path")
 
         local valid_fm="✓"
         if ! validate_frontmatter "$path"; then valid_fm="${RED}✗${NC}"; fi
         local type_label=""
-        [ "$entry_type" = "symlink" ] && type_label=" ${DIM}(symlink)${NC}"
+        [ "$entry_type" = "symlink" ] && type_label=" ${DIM}(symlink distribution)${NC}"
 
         if $VERBOSE; then
             echo -e "  ${CYAN}●${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC}$type_label fm:$valid_fm"
             echo -e "    ${DIM}$path${NC}"
+            [ "$path" != "$canonical_path" ] && echo -e "    ${DIM}canonical: $canonical_path${NC}"
             [ -n "$desc" ] && echo -e "    ${DIM}$desc${NC}"
         else
             echo -e "  ${CYAN}●${NC} $name ${DIM}[$source]${NC}$type_label"
@@ -209,24 +231,40 @@ main() {
     echo -e "${BOLD}── Name Conflicts ──${NC}"
     local conflict_found=false
     local seen_names=()
-    for entry in "${skill_names[@]}"; do
+    local entry
+    for entry in "${skill_entries[@]}"; do
         local name="${entry%%|*}"
         seen_names+=("$name")
     done
 
-    local sorted_names
-    sorted_names=$(printf '%s\n' "${seen_names[@]}" | sort | uniq -d)
-    if [ -n "$sorted_names" ]; then
-        conflict_found=true
+    local duplicate_names
+    duplicate_names=$(printf '%s\n' "${seen_names[@]}" | sort | uniq -d)
+    if [ -n "$duplicate_names" ]; then
         while IFS= read -r dup_name; do
-            echo -e "  ${YELLOW}⚠${NC} ${BOLD}$dup_name${NC} — found in multiple locations:"
-            for entry in "${skill_names[@]}"; do
-                IFS='|' read -r name path scope source entry_type <<< "$entry"
+            [ -z "$dup_name" ] && continue
+            local canonical_paths canonical_count
+            canonical_paths=$(for entry in "${skill_entries[@]}"; do
+                IFS='|' read -r name path scope source entry_type canonical_path <<< "$entry"
                 if [ "$name" = "$dup_name" ]; then
-                    echo -e "    ${DIM}[$scope/$source/$entry_type]${NC} $path"
+                    echo "$canonical_path"
                 fi
-            done
-        done <<< "$sorted_names"
+            done | sort -u)
+            canonical_count=$(echo "$canonical_paths" | grep -c . 2>/dev/null || echo 0)
+
+            if [ "$canonical_count" -gt 1 ]; then
+                conflict_found=true
+                echo -e "  ${YELLOW}⚠${NC} ${BOLD}$dup_name${NC} — same skill name resolves to different canonical sources:"
+                for entry in "${skill_entries[@]}"; do
+                    IFS='|' read -r name path scope source entry_type canonical_path <<< "$entry"
+                    if [ "$name" = "$dup_name" ]; then
+                        echo -e "    ${DIM}[$scope/$source/$entry_type]${NC} $path"
+                        echo -e "      ${DIM}canonical: $canonical_path${NC}"
+                    fi
+                done
+            elif $VERBOSE; then
+                echo -e "  ${GREEN}✓${NC} ${BOLD}$dup_name${NC} appears in multiple locations but resolves to one canonical source"
+            fi
+        done <<< "$duplicate_names"
     fi
 
     if ! $conflict_found; then
@@ -237,6 +275,7 @@ main() {
     local total=$((project_count + global_count))
     echo -e "${BOLD}── Summary ──${NC}"
     echo -e "  Discoverable skill entries: ${BOLD}$total${NC} (project: $project_count, global: $global_count)"
+    echo -e "  Symlink distribution entries: ${BOLD}$symlink_distribution_count${NC}"
     echo -e "  Scanned directories: ${#SKILL_DIRS[@]} patterns × 2 scopes"
     if $conflict_found; then
         echo -e "  ${YELLOW}⚠ Name conflicts detected — agent may pick an unexpected version depending on discovery priority${NC}"
