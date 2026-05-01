@@ -106,7 +106,8 @@ count_content_words() {
 }
 
 get_mtime() {
-    stat -f "%m" "$1" 2>/dev/null || stat -c "%Y" "$1" 2>/dev/null || echo 0
+    # GNU stat first, then BSD/macOS stat.
+    stat -c "%Y" "$1" 2>/dev/null || stat -f "%m" "$1" 2>/dev/null || echo 0
 }
 
 resolve_symlink_target() {
@@ -117,6 +118,15 @@ resolve_symlink_target() {
     target_name=$(basename "$target")
     resolved_dir=$(cd "$base_dir/$target_dir" 2>/dev/null && pwd) || return 1
     printf '%s/%s\n' "$resolved_dir" "$target_name"
+}
+
+canonical_dir_for_entry() {
+    local path="$1" entry_type="$2" link_target="$3"
+    if [ "$entry_type" = "symlink" ]; then
+        resolve_symlink_target "$path" "$link_target" 2>/dev/null || return 1
+    else
+        cd "$path" 2>/dev/null && pwd
+    fi
 }
 
 # Resolve symlink chain and classify entry type.
@@ -176,7 +186,13 @@ scan_directory() {
             continue
         fi
 
-        local skill_file="$entry_path/SKILL.md"
+        local canonical_dir skill_file source_skill_file canonical_skill_file
+        canonical_dir=$(canonical_dir_for_entry "$entry_path" "$entry_type" "$link_target" 2>/dev/null || true)
+        [ -z "$canonical_dir" ] && continue
+
+        skill_file="$canonical_dir/SKILL.md"
+        source_skill_file="$entry_path/SKILL.md"
+        canonical_skill_file="$skill_file"
         [ ! -f "$skill_file" ] && continue
 
         local name desc word_count mtime now age_days
@@ -232,6 +248,8 @@ scan_directory() {
             --arg location "$dir_label" \
             --arg entry_type "$entry_type" \
             --arg link_target "$link_target" \
+            --arg source_skill_file "$source_skill_file" \
+            --arg canonical_skill_file "$canonical_skill_file" \
             --arg desc "${desc:0:200}" \
             --argjson words "$word_count" \
             --argjson age "$age_days" \
@@ -242,6 +260,8 @@ scan_directory() {
                 location: $location,
                 type: $entry_type,
                 link_target: $link_target,
+                source_skill_file: $source_skill_file,
+                canonical_skill_file: $canonical_skill_file,
                 description: $desc,
                 word_count: $words,
                 age_days: $age,
@@ -266,7 +286,7 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" '{metadata:{scanned_at:$scanned_at, stale_days:$stale_days, scope:"agent-recognized-directories"}, topology:{}, skills:[], broken_symlinks:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" '{metadata:{scanned_at:$scanned_at, stale_days:$stale_days, scope:"agent-recognized-directories"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
@@ -288,6 +308,7 @@ main() {
 
         all_data=$(echo "$all_data" | jq --argjson d "$dir_data" '
             .skills += [$d[] | select(.type == "directory")] |
+            .skill_links += [$d[] | select(.type == "symlink")] |
             .broken_symlinks += [$d[] | select(.type == "broken_symlink")]
         ')
     done
@@ -309,13 +330,15 @@ main() {
     done
     echo ""
 
-    local canonical_count total_skills
+    local canonical_count total_skills link_count
     canonical_count=$(echo "$all_data" | jq '[.skills[] | select(.location == ".agents/skills")] | length')
     total_skills=$(echo "$all_data" | jq '.skills | length')
+    link_count=$(echo "$all_data" | jq '.skill_links | length')
     echo -e "${BOLD}── Skill Inventory ──${NC}"
     echo -e "  Canonical skills (in .agents/skills): ${BOLD}$canonical_count${NC}"
     echo -e "  Native agent-specific skills:         ${BOLD}$((total_skills - canonical_count))${NC}"
     echo -e "  Total unique real-directory skills:   ${BOLD}$total_skills${NC}"
+    echo -e "  Symlink distribution links:           ${BOLD}$link_count${NC}"
     echo ""
 
     local flagged flagged_count
