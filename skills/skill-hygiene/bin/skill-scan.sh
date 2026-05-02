@@ -97,6 +97,30 @@ get_frontmatter() {
     ' "$file" 2>/dev/null | head -c 300
 }
 
+get_frontmatter_text() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && $0 ~ "^[A-Za-z0-9_-]+:" {
+            if (capture) { exit }
+            if (index($0, key ":") == 1) {
+                value=$0
+                sub("^" key ":[[:space:]]*", "", value)
+                gsub(/^['\''\"]|['\''\"]$/, "", value)
+                if (value == "|" || value == ">") { capture=1; next }
+                print value
+                exit
+            }
+        }
+        capture {
+            line=$0
+            sub(/^[[:space:]]+/, "", line)
+            print line
+        }
+    ' "$file" 2>/dev/null | head -c 1000
+}
+
 get_metadata_value() {
     local file="$1" key="$2"
     awk -v key="$key" '
@@ -106,6 +130,81 @@ get_metadata_value() {
         in_meta && $0 ~ /^[^[:space:]]/ { exit }
         in_meta && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
             sub("^[[:space:]]+" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null | head -c 300
+}
+
+frontmatter_keys_json() {
+    local file="$1"
+    awk '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && $0 ~ /^[A-Za-z0-9_-]+:/ {
+            key=$0
+            sub(/:.*/, "", key)
+            print key
+        }
+    ' "$file" 2>/dev/null | jq -R 'select(length > 0)' | jq -s .
+}
+
+frontmatter_list_json() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && $0 ~ "^[A-Za-z0-9_-]+:" {
+            if (capture) { exit }
+            if (index($0, key ":") == 1) {
+                value=$0
+                sub("^" key ":[[:space:]]*", "", value)
+                gsub(/^\[/, "", value)
+                gsub(/\]$/, "", value)
+                gsub(/,/, " ", value)
+                gsub(/^['\''\"]|['\''\"]$/, "", value)
+                if (value != "") {
+                    n=split(value, items, /[[:space:]]+/)
+                    for (i=1; i<=n; i++) if (items[i] != "") print items[i]
+                    exit
+                }
+                capture=1
+                next
+            }
+        }
+        capture && $0 ~ /^[[:space:]]*-[[:space:]]*/ {
+            item=$0
+            sub(/^[[:space:]]*-[[:space:]]*/, "", item)
+            gsub(/^['\''\"]|['\''\"]$/, "", item)
+            if (item != "") print item
+            next
+        }
+        capture && $0 ~ /^[^[:space:]]/ { exit }
+    ' "$file" 2>/dev/null | jq -R 'select(length > 0)' | jq -s .
+}
+
+hook_events_json() {
+    local file="$1"
+    awk '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && $0 == "hooks:" { in_hooks=1; next }
+        in_hooks && $0 ~ /^[^[:space:]]/ { exit }
+        in_hooks && $0 ~ /^[[:space:]]{2}[A-Za-z0-9_-]+:/ {
+            event=$0
+            sub(/^[[:space:]]+/, "", event)
+            sub(/:.*/, "", event)
+            print event
+        }
+    ' "$file" 2>/dev/null | jq -R 'select(length > 0)' | jq -s 'unique'
+}
+
+yaml_scalar() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+            sub("^[[:space:]]*" key ":[[:space:]]*", "")
             gsub(/^['\''\"]|['\''\"]$/, "")
             print
             exit
@@ -256,11 +355,10 @@ scan_directory() {
         canonical_skill_file="$skill_file"
         [ ! -f "$skill_file" ] && continue
 
-        local name desc license compatibility top_version metadata_version declared_version word_count mtime mtime_iso now age_days
+        local name desc_full desc top_version metadata_version declared_version word_count mtime mtime_iso now age_days
         name=$(get_frontmatter "$skill_file" "name")
-        desc=$(get_frontmatter "$skill_file" "description")
-        license=$(get_frontmatter "$skill_file" "license")
-        compatibility=$(get_frontmatter "$skill_file" "compatibility")
+        desc_full=$(get_frontmatter_text "$skill_file" "description")
+        desc="${desc_full:0:200}"
         top_version=$(get_frontmatter "$skill_file" "version")
         metadata_version=$(get_metadata_value "$skill_file" "version")
         declared_version="${metadata_version:-$top_version}"
@@ -318,6 +416,61 @@ scan_directory() {
         git_branch=$(git_branch_for_root "$git_root")
         source_kind=$(source_kind_for_entry "$dir_label" "$entry_type")
 
+        local when_to_use when_to_use_preview disable_model_invocation user_invocable model effort context agent shell_value
+        local allowed_tools_json paths_json hook_events_json_value has_hooks extra_keys_json fm_keys_json openai_yaml openai_yaml_exists
+        local display_name short_description default_prompt icon_path icon_paths_exist default_prompt_mentions_skill
+        local desc_length desc_truncated when_to_use_length when_to_use_truncated allowed_tools_count paths_count
+
+        when_to_use=$(get_frontmatter_text "$skill_file" "when_to_use")
+        when_to_use_preview="${when_to_use:0:200}"
+        disable_model_invocation=$(get_frontmatter "$skill_file" "disable-model-invocation")
+        user_invocable=$(get_frontmatter "$skill_file" "user-invocable")
+        model=$(get_frontmatter "$skill_file" "model")
+        effort=$(get_frontmatter "$skill_file" "effort")
+        context=$(get_frontmatter "$skill_file" "context")
+        agent=$(get_frontmatter "$skill_file" "agent")
+        shell_value=$(get_frontmatter "$skill_file" "shell")
+        allowed_tools_json=$(frontmatter_list_json "$skill_file" "allowed-tools")
+        paths_json=$(frontmatter_list_json "$skill_file" "paths")
+        hook_events_json_value=$(hook_events_json "$skill_file")
+        has_hooks=false
+        [ "$(echo "$hook_events_json_value" | jq 'length')" -gt 0 ] && has_hooks=true
+        fm_keys_json=$(frontmatter_keys_json "$skill_file")
+        extra_keys_json=$(echo "$fm_keys_json" | jq 'map(. as $key | select((["name","description","when_to_use","disable-model-invocation","user-invocable","allowed-tools","model","effort","context","agent","paths","shell","hooks"] | index($key)) | not))')
+
+        desc_length=${#desc_full}
+        desc_truncated=false
+        [ "$desc_length" -gt 200 ] && desc_truncated=true
+        when_to_use_length=${#when_to_use}
+        when_to_use_truncated=false
+        [ "$when_to_use_length" -gt 200 ] && when_to_use_truncated=true
+        allowed_tools_count=$(echo "$allowed_tools_json" | jq 'length')
+        paths_count=$(echo "$paths_json" | jq 'length')
+
+        openai_yaml="$canonical_dir/agents/openai.yaml"
+        openai_yaml_exists=false
+        display_name=""
+        short_description=""
+        default_prompt=""
+        icon_path=""
+        icon_paths_exist=null
+        default_prompt_mentions_skill=false
+        if [ -f "$openai_yaml" ]; then
+            openai_yaml_exists=true
+            display_name=$(yaml_scalar "$openai_yaml" "display_name")
+            short_description=$(yaml_scalar "$openai_yaml" "short_description")
+            default_prompt=$(yaml_scalar "$openai_yaml" "default_prompt")
+            icon_path=$(yaml_scalar "$openai_yaml" "icon_path")
+            [ -z "$icon_path" ] && icon_path=$(yaml_scalar "$openai_yaml" "icon")
+            if [ -n "$default_prompt" ] && [ -n "$name" ] && printf '%s' "$default_prompt" | grep -q "$name"; then
+                default_prompt_mentions_skill=true
+            fi
+            if [ -n "$icon_path" ]; then
+                icon_paths_exist=false
+                [ -f "$canonical_dir/$icon_path" ] || [ -f "$canonical_dir/agents/$icon_path" ] && icon_paths_exist=true
+            fi
+        fi
+
         local entry_json
         entry_json=$(jq -n \
             --arg name "${name:-$entry_name}" \
@@ -329,8 +482,6 @@ scan_directory() {
             --arg canonical_skill_file "$canonical_skill_file" \
             --arg canonical_dir "$canonical_dir" \
             --arg desc "${desc:0:200}" \
-            --arg license "$license" \
-            --arg compatibility "$compatibility" \
             --arg declared_version "$declared_version" \
             --arg metadata_version "$metadata_version" \
             --arg content_sha256 "$content_sha256" \
@@ -339,10 +490,34 @@ scan_directory() {
             --arg git_root "$git_root" \
             --arg git_remote "$git_remote" \
             --arg git_branch "$git_branch" \
+            --arg when_to_use_preview "$when_to_use_preview" \
+            --arg disable_model_invocation "$disable_model_invocation" \
+            --arg user_invocable "$user_invocable" \
+            --arg model "$model" \
+            --arg effort "$effort" \
+            --arg context "$context" \
+            --arg agent "$agent" \
+            --arg shell "$shell_value" \
+            --arg display_name "$display_name" \
+            --arg short_description "$short_description" \
             --argjson words "$word_count" \
             --argjson mtime "$mtime" \
             --argjson age "$age_days" \
             --argjson stale_days "$STALE_DAYS" \
+            --argjson desc_length "$desc_length" \
+            --argjson desc_truncated "$desc_truncated" \
+            --argjson when_to_use_length "$when_to_use_length" \
+            --argjson when_to_use_truncated "$when_to_use_truncated" \
+            --argjson allowed_tools "$allowed_tools_json" \
+            --argjson allowed_tools_count "$allowed_tools_count" \
+            --argjson paths "$paths_json" \
+            --argjson paths_count "$paths_count" \
+            --argjson has_hooks "$has_hooks" \
+            --argjson hook_events "$hook_events_json_value" \
+            --argjson extra_keys "$extra_keys_json" \
+            --argjson openai_yaml_exists "$openai_yaml_exists" \
+            --argjson default_prompt_mentions_skill "$default_prompt_mentions_skill" \
+            --argjson icon_paths_exist "$icon_paths_exist" \
             --argjson flags "$flags_json" \
             --argjson risks "$risk_json" \
             '{
@@ -356,14 +531,41 @@ scan_directory() {
                 canonical_dir: $canonical_dir,
                 description: $desc,
                 frontmatter: {
+                    contract: "name_description_only",
                     name: $name,
                     description: $desc,
-                    license: $license,
-                    compatibility: $compatibility,
-                    declared_version: $declared_version,
-                    metadata_version: $metadata_version
+                    description_length: $desc_length,
+                    description_truncated: $desc_truncated
                 },
+                claude_code: {
+                    when_to_use_length: $when_to_use_length,
+                    when_to_use_preview: $when_to_use_preview,
+                    when_to_use_truncated: $when_to_use_truncated,
+                    disable_model_invocation: $disable_model_invocation,
+                    user_invocable: $user_invocable,
+                    allowed_tools_count: $allowed_tools_count,
+                    allowed_tools_preview: ($allowed_tools[:5]),
+                    model: $model,
+                    effort: $effort,
+                    context: $context,
+                    agent: $agent,
+                    paths_count: $paths_count,
+                    paths_preview: ($paths[:5]),
+                    shell: $shell,
+                    has_hooks: $has_hooks,
+                    hook_events: $hook_events
+                },
+                openai: {
+                    skill_md_contract: "name_description_only",
+                    openai_yaml_exists: $openai_yaml_exists,
+                    display_name: $display_name,
+                    short_description: $short_description,
+                    default_prompt_mentions_skill: $default_prompt_mentions_skill,
+                    icon_paths_exist: $icon_paths_exist
+                },
+                extra_frontmatter_keys: $extra_keys,
                 declared_version: $declared_version,
+                metadata_version: $metadata_version,
                 content_sha256: $content_sha256,
                 word_count: $words,
                 age_days: $age,

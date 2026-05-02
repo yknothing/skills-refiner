@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# skill-dashboard.sh — Skill effectiveness dashboard
-# Reads activation logs and produces usage analytics.
+# skill-dashboard.sh — Skill canary observation dashboard
+# Reads activation-canary logs and produces identity-aware observation analytics.
 #
 # Usage:
 #   bash skill-dashboard.sh              # Default 30-day report
@@ -66,7 +66,80 @@ get_skill_name() {
     echo "$name"
 }
 
-get_installed_skills() {
+get_frontmatter() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && index($0, key ":") == 1 {
+            sub("^" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null | head -c 300
+}
+
+get_metadata_value() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && $0 == "metadata:" { in_meta=1; next }
+        in_meta && $0 ~ /^[^[:space:]]/ { exit }
+        in_meta && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
+            sub("^[[:space:]]+" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null | head -c 300
+}
+
+hash_string() {
+    local value="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$value" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
+    else
+        printf '%s' "$value" | cksum | awk '{print $1}'
+    fi
+}
+
+hash_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+canonical_file() {
+    local file="$1"
+    local dir base resolved_dir
+    dir=$(dirname "$file")
+    base=$(basename "$file")
+    resolved_dir=$(cd -P "$dir" 2>/dev/null && pwd) || return 1
+    printf '%s/%s\n' "$resolved_dir" "$base"
+}
+
+source_kind_for_entry() {
+    local dir_name="$1" entry_type="$2"
+    if [ "$entry_type" = "symlink" ]; then
+        echo "symlink_distribution"
+    elif [ "$dir_name" = ".agents/skills" ]; then
+        echo "canonical_global"
+    else
+        echo "native_agent"
+    fi
+}
+
+get_installed_identities() {
+    local rows="[]"
     for dir_name in "${SKILL_DIRS[@]}"; do
         local skill_base="$HOME_DIR/$dir_name"
         [ -d "$skill_base" ] || continue
@@ -77,9 +150,37 @@ get_installed_skills() {
 
             local skill_file="$entry/SKILL.md"
             [ -f "$skill_file" ] || continue
-            get_skill_name "$skill_file"
+
+            local name canonical_skill_file canonical_dir content_sha256 identity_key entry_type top_version metadata_version declared_version provenance_kind row_json
+            name=$(get_skill_name "$skill_file")
+            canonical_skill_file=$(canonical_file "$skill_file" 2>/dev/null || echo "$skill_file")
+            canonical_dir=$(dirname "$canonical_skill_file")
+            content_sha256=$(hash_file "$canonical_skill_file")
+            identity_key=$(hash_string "$canonical_skill_file|$content_sha256")
+            entry_type="directory"
+            [ -L "$entry" ] && entry_type="symlink"
+            top_version=$(get_frontmatter "$canonical_skill_file" "version")
+            metadata_version=$(get_metadata_value "$canonical_skill_file" "version")
+            declared_version="${metadata_version:-$top_version}"
+            provenance_kind=$(source_kind_for_entry "$dir_name" "$entry_type")
+
+            row_json=$(jq -n \
+                --arg identity_key "$identity_key" \
+                --arg name "$name" \
+                --arg location "$dir_name" \
+                --arg entry_type "$entry_type" \
+                --arg source_skill_file "$skill_file" \
+                --arg canonical_skill_file "$canonical_skill_file" \
+                --arg canonical_dir "$canonical_dir" \
+                --arg content_sha256 "$content_sha256" \
+                --arg declared_version "$declared_version" \
+                --arg provenance_kind "$provenance_kind" \
+                '{identity_key:$identity_key, name:$name, location:$location, type:$entry_type, source_skill_file:$source_skill_file, canonical_skill_file:$canonical_skill_file, canonical_dir:$canonical_dir, content_sha256:$content_sha256, declared_version:$declared_version, provenance_kind:$provenance_kind}')
+            rows=$(echo "$rows" | jq --argjson row "$row_json" '. + [$row]')
         done
-    done | sort -u
+    done
+
+    echo "$rows" | jq 'group_by(.identity_key) | map(.[0]) | sort_by(.name, .canonical_skill_file)'
 }
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -94,7 +195,7 @@ main() {
     # Check log exists
     if [ ! -f "$LOG_FILE" ]; then
         if $JSON_MODE; then
-            echo '{"error": "no_activation_log", "message": "No activation data found. Inject traces first."}'
+            echo '{"error": "no_activation_log", "message": "No canary observation data found. Inject traces first."}'
         else
             echo -e "  ${YELLOW}No activation log found.${NC}"
             echo -e "  ${DIM}Inject traces first:${NC}"
@@ -111,69 +212,94 @@ main() {
         cutoff_ts="2000-01-01T00:00:00Z"
     fi
 
-    # Gather installed skills
+    # Gather installed skill identities. Symlink distributions collapse to the
+    # same identity as their canonical source.
     local installed
-    installed=$(get_installed_skills)
+    installed=$(get_installed_identities)
     local installed_count
-    installed_count=$(echo "$installed" | grep -c . 2>/dev/null || echo 0)
+    installed_count=$(echo "$installed" | jq 'length')
 
     # Filter log by time window
     local filtered_log
-    filtered_log=$(jq -r --arg cutoff "$cutoff_ts" 'select(.ts >= $cutoff)' "$LOG_FILE" 2>/dev/null)
+    filtered_log=$(jq --arg cutoff "$cutoff_ts" 'select(.ts >= $cutoff)' "$LOG_FILE" 2>/dev/null)
 
     local total_events
-    total_events=$(echo "$filtered_log" | jq -r '.skill' 2>/dev/null | grep -c . 2>/dev/null || echo 0)
+    total_events=$(echo "$filtered_log" | jq -r '.skill // .skill_name // empty' 2>/dev/null | grep -c . 2>/dev/null || echo 0)
 
-    # Activation frequency
-    local freq
-    freq=$(echo "$filtered_log" | jq -r '.skill' 2>/dev/null | sort | uniq -c | sort -rn)
+    local filtered_json observed_identities active_count active_rate frequency_json context_json not_observed_json legacy_ambiguous_json
+    filtered_json=$(echo "$filtered_log" | jq -s '.')
+    observed_identities=$(jq -n --argjson installed "$installed" --argjson events "$filtered_json" '
+        def name_counts:
+            $installed | group_by(.name) | map({key: .[0].name, value: length}) | from_entries;
+        def legacy_names:
+            [$events[] | select((.identity_key // "") == "" and (.skill // .skill_name // "") != "") | (.skill // .skill_name)] | unique;
+        def active_ids:
+            [$events[] | select((.identity_key // "") != "") | .identity_key] | unique;
+        (name_counts) as $counts |
+        (legacy_names) as $legacy |
+        (active_ids) as $ids |
+        $installed
+        | map(. as $skill | $skill + {
+            observed: ((($ids | index($skill.identity_key)) != null) or ((($legacy | index($skill.name)) != null) and (($counts[$skill.name] // 0) == 1))),
+            observation_source: (
+                if (($ids | index($skill.identity_key)) != null) then "identity"
+                elif ((($legacy | index($skill.name)) != null) and (($counts[$skill.name] // 0) == 1)) then "legacy_name"
+                else "none" end
+            )
+        })
+    ')
+    active_count=$(echo "$observed_identities" | jq '[.[] | select(.observed)] | length')
 
-    local active_skills
-    active_skills=$(echo "$filtered_log" | jq -r '.skill' 2>/dev/null | sort -u)
-    local active_count
-    active_count=$(echo "$active_skills" | grep -c . 2>/dev/null || echo 0)
-
-    # Calculate active rate
-    local active_rate=0
+    active_rate=0
     if [ "$installed_count" -gt 0 ]; then
         active_rate=$((active_count * 100 / installed_count))
     fi
 
+    frequency_json=$(jq -n --argjson events "$filtered_json" '
+        [$events[] | select((.skill // .skill_name // "") != "") | {
+            identity_key: (.identity_key // ""),
+            skill: (.skill // .skill_name),
+            canonical_skill_file: (.canonical_skill_file // ""),
+            count_key: (if (.identity_key // "") != "" then .identity_key else "legacy:" + (.skill // .skill_name) end)
+        }]
+        | group_by(.count_key)
+        | map({identity_key: .[0].identity_key, skill: .[0].skill, canonical_skill_file: .[0].canonical_skill_file, count: length, legacy: (.[0].identity_key == "")})
+        | sort_by(-.count, .skill)
+    ')
+    [ -z "$frequency_json" ] && frequency_json='[]'
+
+    not_observed_json=$(echo "$observed_identities" | jq '[.[] | select(.observed | not)]')
+    legacy_ambiguous_json=$(jq -n --argjson installed "$installed" --argjson events "$filtered_json" '
+        ($installed | group_by(.name) | map(select(length > 1) | .[0].name)) as $ambiguous_names |
+        [$events[] | select((.identity_key // "") == "" and ((.skill // .skill_name // "") as $n | $ambiguous_names | index($n) != null)) | (.skill // .skill_name)] | unique
+    ')
+    context_json=$(echo "$filtered_log" | jq -s '[.[].cwd] | group_by(.) | map({cwd: .[0], count: length}) | sort_by(-.count)' 2>/dev/null || echo '[]')
+
     if $JSON_MODE; then
-        # JSON output
-        local freq_json
-        if [ -n "$freq" ]; then
-            freq_json=$(echo "$freq" | awk 'NF>=2{print "{\"skill\":\"" $2 "\",\"count\":" $1 "}"}' | jq -s '.')
-        else
-            freq_json='[]'
-        fi
-
-        local observation_json
-        observation_json=$(comm -23 <(echo "$installed" | sort) <(echo "$active_skills" | sort) | jq -R 'select(length > 0)' | jq -s '.')
-        [ -z "$observation_json" ] && observation_json='[]'
-
-        local context_json
-        context_json=$(echo "$filtered_log" | jq -s '[.[].cwd] | group_by(.) | map({cwd: .[0], count: length}) | sort_by(-.count)' 2>/dev/null || echo '[]')
-
         jq -n \
             --argjson total_events "$total_events" \
             --argjson installed_count "$installed_count" \
             --argjson active_count "$active_count" \
             --argjson active_rate "$active_rate" \
             --argjson days "$DAYS" \
-            --argjson frequency "$freq_json" \
-            --argjson observations "$observation_json" \
+            --argjson installed "$observed_identities" \
+            --argjson frequency "$frequency_json" \
+            --argjson observations "$not_observed_json" \
             --argjson contexts "$context_json" \
+            --argjson legacy_ambiguous "$legacy_ambiguous_json" \
             '{
+                schema_version: "skill-dashboard.identity.v1",
                 period_days: $days,
                 total_events: $total_events,
                 installed_skills: $installed_count,
                 active_skills: $active_count,
                 active_rate_pct: $active_rate,
+                installed_identities: $installed,
                 frequency: $frequency,
                 not_observed_skills: $observations,
+                legacy_ambiguous_observations: $legacy_ambiguous,
                 context_distribution: $contexts,
-                note: "Not observed is an observation, not a removal verdict. Cross-reference user workflow and hygiene scan before recommending action."
+                note: "Not observed is an observation, not a removal verdict. Identity-aware canary events are stronger than legacy name-only events."
             }'
         return
     fi
@@ -182,10 +308,10 @@ main() {
     local period_label observation_title
     if [ "$DAYS" -ge 99999 ]; then
         period_label="all time"
-        observation_title="Not Observed Skills (No Recorded Activation)"
+        observation_title="Not Observed Skills (No Recorded Canary)"
     else
         period_label="last ${DAYS} days"
-        observation_title="Not Observed Skills (No Activation in Period)"
+        observation_title="Not Observed Skills (No Canary in Period)"
     fi
 
     echo -e "  ${DIM}Period: $period_label${NC}"
@@ -194,53 +320,57 @@ main() {
 
     # Overview
     echo -e "${BOLD}── Overview ──${NC}"
-    echo -e "  Total activations: ${BOLD}$total_events${NC}"
-    echo -e "  Installed skills:  $installed_count"
-    echo -e "  Active skills:     $active_count"
+    echo -e "  Total canary events: ${BOLD}$total_events${NC}"
+    echo -e "  Installed skill identities:  $installed_count"
+    echo -e "  Observed skill identities:   $active_count"
 
     # Active rate with conservative interpretation
     if [ "$active_rate" -ge 60 ]; then
-        echo -e "  Active rate:       ${GREEN}${active_rate}%${NC}"
+        echo -e "  Observed rate:     ${GREEN}${active_rate}%${NC}"
     elif [ "$active_rate" -ge 30 ]; then
-        echo -e "  Active rate:       ${YELLOW}${active_rate}%${NC}"
+        echo -e "  Observed rate:     ${YELLOW}${active_rate}%${NC}"
     else
-        echo -e "  Active rate:       ${YELLOW}${active_rate}%${NC} (low observed usage; review context before acting)"
+        echo -e "  Observed rate:     ${YELLOW}${active_rate}%${NC} (low canary observation; review context before acting)"
     fi
     echo ""
 
-    # Hot skills (top 10)
-    echo -e "${BOLD}── Hot Skills (Top 10) ──${NC}"
-    if [ -n "$freq" ]; then
-        echo "$freq" | head -10 | while read -r count name; do
-            # Bar chart
+    echo -e "${BOLD}── Most Observed Canary Events (Top 10) ──${NC}"
+    if [ "$(echo "$frequency_json" | jq 'length')" -gt 0 ]; then
+        echo "$frequency_json" | jq -r '.[:10][] | "\(.count)|\(.skill)|\(.identity_key)|\(.legacy)"' | while IFS='|' read -r count name identity legacy; do
             local top_count bar_len bar
-            top_count=$(echo "$freq" | head -1 | awk '{print $1}')
+            top_count=$(echo "$frequency_json" | jq '.[0].count')
             [ -z "$top_count" ] || [ "$top_count" -eq 0 ] && top_count=1
             bar_len=$((count * 30 / top_count))
             [ "$bar_len" -lt 1 ] && bar_len=1
             bar=$(printf '█%.0s' $(seq 1 "$bar_len") 2>/dev/null || echo "█")
-            printf "  %-25s %4d ${GREEN}%s${NC}\n" "$name" "$count" "$bar"
+            local suffix=""
+            [ "$legacy" = "true" ] && suffix=" ${DIM}(legacy name-only)${NC}"
+            [ -n "$identity" ] && suffix=" ${DIM}(${identity:0:8})${NC}"
+            printf "  %-25s %4d ${GREEN}%s${NC}%b\n" "$name" "$count" "$bar" "$suffix"
         done
     else
-        echo -e "  ${DIM}(no activations in this period)${NC}"
+        echo -e "  ${DIM}(no canary events in this period)${NC}"
     fi
     echo ""
 
     # Not observed skills
-    local observations
-    observations=$(comm -23 <(echo "$installed" | sort) <(echo "$active_skills" | sort))
     local observation_count
-    observation_count=$(echo "$observations" | grep -c . 2>/dev/null || echo 0)
+    observation_count=$(echo "$not_observed_json" | jq 'length')
 
     echo -e "${BOLD}── $observation_title ──${NC}"
     if [ "$observation_count" -gt 0 ]; then
-        echo -e "  ${YELLOW}$observation_count skills${NC} installed but no canary was recorded:"
-        echo "$observations" | head -15 | sed "s/^/  ${DIM}○ /"
+        echo -e "  ${YELLOW}$observation_count skill identities${NC} installed but no canary was recorded:"
+        echo "$not_observed_json" | jq -r '.[:15][] | "\(.name)  [" + (.identity_key[0:8]) + "] " + .canonical_skill_file' | sed "s/^/  ${DIM}○ /"
         echo -e "${NC}"
         [ "$observation_count" -gt 15 ] && echo -e "  ${DIM}... and $((observation_count - 15)) more${NC}"
         echo -e "  ${DIM}Observation only: lack of activation is not a removal verdict.${NC}"
     else
-        echo -e "  ${GREEN}✓${NC} All installed skills have observed activations in this period"
+        echo -e "  ${GREEN}✓${NC} All installed skill identities have observed canaries in this period"
+    fi
+    local legacy_ambiguous_count
+    legacy_ambiguous_count=$(echo "$legacy_ambiguous_json" | jq 'length')
+    if [ "$legacy_ambiguous_count" -gt 0 ]; then
+        echo -e "  ${YELLOW}Legacy name-only events were ambiguous for:${NC} $(echo "$legacy_ambiguous_json" | jq -r 'join(", ")')"
     fi
     echo ""
 
@@ -248,14 +378,16 @@ main() {
     echo -e "${BOLD}── Context Distribution (Top 5 Directories) ──${NC}"
     echo "$filtered_log" | jq -r '.cwd' 2>/dev/null | sort | uniq -c | sort -rn | head -5 | while read -r count dir; do
         local short_dir="${dir#$HOME_DIR/}"
-        printf "  %-40s %4d activations\n" "$short_dir" "$count"
+        printf "  %-40s %4d canary events\n" "$short_dir" "$count"
     done
     echo ""
 
-    # Last activation per skill
+    # Last canary per skill identity
     echo -e "${BOLD}── Recent Activity ──${NC}"
-    echo "$filtered_log" | jq -r '.skill + "|" + .ts' 2>/dev/null | sort -t'|' -k2 -r | awk -F'|' '!seen[$1]++' | head -10 | while IFS='|' read -r name ts; do
-        printf "  %-25s ${DIM}%s${NC}\n" "$name" "$ts"
+    echo "$filtered_log" | jq -r '(.identity_key // ("legacy:" + (.skill // .skill_name // ""))) + "|" + (.skill // .skill_name // "") + "|" + .ts' 2>/dev/null | sort -t'|' -k3 -r | awk -F'|' '!seen[$1]++' | head -10 | while IFS='|' read -r identity name ts; do
+        local suffix=""
+        [[ "$identity" == legacy:* ]] && suffix=" (legacy name-only)" || suffix=" (${identity:0:8})"
+        printf "  %-25s ${DIM}%s%s${NC}\n" "$name" "$ts" "$suffix"
     done
     echo ""
 }

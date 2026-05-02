@@ -55,12 +55,15 @@ Options:
 The script outputs structured data. Your job is to **interpret** it.
 
 Key facts now include:
-- `frontmatter` — parsed name, description, license, compatibility, and declared version when present
+- `frontmatter` — OpenAI/Codex-compatible discovery contract: name and description, plus capped description metadata
+- `claude_code` — official Claude Code behavior signals such as invocation controls, allowed tools, context, paths, shell, and hook event names
+- `openai` — local `agents/openai.yaml` UI metadata presence and a few bounded consistency checks when present
 - `content_sha256` — local content identity for same-name comparison without network access
 - `freshness` — mtime, age, stale threshold, and `is_stale` as a signal
 - `provenance` — local source signals such as canonical-global, symlink-distribution, native-agent, and git remote when directly available
 - `risk_indicators` — structured review-required security signals
 - `name_collisions` — same-name real directories with distinct canonical paths, versions, or content hashes
+- `extra_frontmatter_keys` — non-core frontmatter keys as names only, not full values
 
 ## What to Analyze
 
@@ -71,6 +74,7 @@ Is the skill well-described? Can an agent find it when it's relevant?
 - Does `description` contain clear triggering conditions?
 - Does `name` follow conventions?
 - Would you, as an agent, know when to invoke this skill based on its description alone?
+- Do official invocation controls explain low canary observation, such as `disable-model-invocation` or user-only invocation?
 
 ### 2. Structural Quality
 Does the skill communicate its purpose effectively?

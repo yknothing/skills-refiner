@@ -128,7 +128,7 @@ bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 Expected behavior:
 - scans all agent skill directories (`~/.agents/skills/`, `~/.claude/skills/`, etc.);
 - reports topology: native skills, symlinks, broken symlinks per directory;
-- records version, content hash, freshness, provenance, and same-name collision facts when available;
+- records discovery contract fields, Claude Code invocation controls, OpenAI UI metadata signals, content hash, freshness, provenance, and same-name collision facts when available;
 - flags issues: missing frontmatter, backup remnants, security indicators, stale or stub skills;
 - outputs both terminal-friendly table and JSON report.
 
@@ -158,7 +158,7 @@ Expected behavior:
 - detects name conflicts (same skill name in multiple locations);
 - validates frontmatter.
 
-### 15) Inject activation tracing to track skill usage
+### 15) Inject activation canaries to observe skill following
 
 ```bash
 # Inject into all global skills
@@ -171,7 +171,7 @@ bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --status
 bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --strip-dir ~/.agents/skills/
 ```
 
-### 16) View the effectiveness dashboard
+### 16) View the canary observation dashboard
 
 ```bash
 # Last 30 days (default)
@@ -184,7 +184,7 @@ bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh --days 7
 bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh --json --all
 ```
 
-Expected output: hot skills ranking, not-observed skills (installed but no recorded canary), active rate, context distribution.
+Expected output: observed canary ranking, not-observed skill identities (installed but no recorded canary), observed rate, context distribution.
 
 ### 17) Combined health check
 
@@ -200,7 +200,7 @@ Combines discovery probe with activation log analysis and hygiene scan cross-ref
 # Step 1: What local skill surfaces are likely discoverable?
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 
-# Step 2: Which are actually being used?
+# Step 2: Which have observed canary activity?
 bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh
 
 # Step 3: What is the overall health?

@@ -10,7 +10,7 @@ Four skills across two layers:
 
 **Governance & Observability** — health and visibility:
 3. **`skill-hygiene`** — evaluate health, quality, and topology of installed skills (AI judges; shell scripts collect facts)
-4. **`skill-debug`** — three-layer observability: local discovery diagnostics, activation canary tracing, effectiveness dashboards
+4. **`skill-debug`** — three-layer observability: local discovery diagnostics, activation canary tracing, canary observation dashboards
 
 ## Why this exists
 
@@ -22,7 +22,7 @@ Agent skills grow fast and degrade silently. Most skill ecosystems face two inte
 This repository addresses both:
 
 - `skills-refiner` and `skills-appreciation` handle the **analysis** problem — deep design audit and publishable interpretation.
-- `skill-hygiene` and `skill-debug` handle the **governance** problem — topology scanning, version/provenance fact collection, activation canary tracing, and usage analytics.
+- `skill-hygiene` and `skill-debug` handle the **governance** problem — topology scanning, version/provenance fact collection, activation canary tracing, and observation analytics.
 
 Together with `skill-creator` (the official Claude skill-creation tool), they form a complete skill lifecycle: creation → testing → design audit → governance → observability → interpretation.
 
@@ -64,9 +64,9 @@ Use when you cannot tell whether a skill was discovered, loaded, or followed by 
 
 - **Discovery diagnostics** (`skill-probe`) — what local skill surfaces are likely discoverable from the current working directory?
 - **Activation canary tracing** (`skill-trace`) — inject/remove lightweight canary blocks to observe when agents follow skills.
-- **Effectiveness dashboard** (`skill-dashboard`) — usage frequency, not-observed skill detection, context distribution, active rate.
+- **Canary observation dashboard** (`skill-dashboard`) — canary event frequency, not-observed skill identity detection, context distribution, observed rate.
 
-Combine with `skill-hygiene` for a full governance workflow: probe discovery → check usage → evaluate quality → triage.
+Combine with `skill-hygiene` for a full governance workflow: probe discovery → check canary observations → evaluate quality → triage.
 
 ## Design principles
 
@@ -111,12 +111,12 @@ Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https:/
 **Governance & Observability:**
 - `skills/skill-hygiene/SKILL.md` — AI-driven skill evaluation framework
 - `skills/skill-hygiene/bin/skill-scan.sh` — topology and fact collector
-- `skills/skill-hygiene/tests/test-scan.sh` — integration tests (17 cases)
+- `skills/skill-hygiene/tests/test-scan.sh` — integration tests
 - `skills/skill-debug/SKILL.md` — three-layer observability
 - `skills/skill-debug/bin/skill-probe.sh` — discovery diagnostics
 - `skills/skill-debug/bin/skill-trace.sh` — activation trace injection/removal
-- `skills/skill-debug/bin/skill-dashboard.sh` — effectiveness dashboard
-- `skills/skill-debug/tests/test-trace.sh` — integration tests (8 cases)
+- `skills/skill-debug/bin/skill-dashboard.sh` — canary observation dashboard
+- `skills/skill-debug/tests/test-trace.sh` — integration tests
 - `skills/skill-debug/tests/test-probe.sh` — integration tests for discovery probe
 - `skills/skill-debug/tests/test-dashboard.sh` — integration tests for dashboard
 
@@ -148,13 +148,13 @@ Use skills-appreciation on this skill. I want to understand why it is designed t
 # Scan installed skills for health issues
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 
-# What skills can the agent see from here?
+# What local skill surfaces are likely discoverable from here?
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 
-# Inject activation tracing into all skills
+# Inject activation canaries into all skills
 bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --inject-dir ~/.agents/skills/
 
-# View usage dashboard (last 30 days)
+# View canary observation dashboard (last 30 days)
 bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh
 
 # Combined health check

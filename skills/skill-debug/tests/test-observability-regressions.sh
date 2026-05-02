@@ -108,6 +108,10 @@ EOF
     text_output=$(HOME="$sandbox" bash "$DASHBOARD_SCRIPT" --all 2>&1)
     assert_contains "Uses observation language" "$text_output" "Not Observed Skills"
     assert_not_contains "Does not suggest cleanup directly" "$text_output" "consider cleanup"
+    assert_not_contains "Does not claim actual use" "$text_output" "actually-used"
+    assert_not_contains "Does not claim last used" "$text_output" "last used"
+    assert_not_contains "Does not call skills unused" "$text_output" "Unused Skills"
+    assert_not_contains "Does not call skills inactive" "$text_output" "Inactive Skills"
 
     rm -rf "$sandbox"
     echo ""

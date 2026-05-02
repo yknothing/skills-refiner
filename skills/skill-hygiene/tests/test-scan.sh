@@ -68,6 +68,25 @@ EOF
 name: healthy-skill
 description: Use when testing same-name native skill provenance.
 license: MIT
+disable-model-invocation: true
+user-invocable: true
+allowed-tools: Read Grep Bash(git:*)
+model: sonnet
+effort: medium
+context: project
+agent: claude-code
+paths:
+  - docs/
+  - scripts/
+shell: bash
+when_to_use: |
+  Use this skill when scanner tests need a long enough official behavior field to prove that the hygiene script records length and a capped preview without expanding governance JSON into an unbounded YAML dump.
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: echo should-not-leak
 metadata:
   version: "2.0.0"
 ---
@@ -75,6 +94,14 @@ metadata:
 # healthy-skill
 
 This independently installed skill intentionally shares a name with the canonical skill so the scanner can collect version, provenance, and content-collision facts without treating symlink distribution as duplication.
+EOF
+    mkdir -p "$SANDBOX/.codex/skills/healthy-skill/agents"
+    touch "$SANDBOX/.codex/skills/healthy-skill/agents/icon.txt"
+    cat > "$SANDBOX/.codex/skills/healthy-skill/agents/openai.yaml" << 'EOF'
+display_name: Healthy Skill
+short_description: Tests OpenAI metadata surface.
+default_prompt: Use healthy-skill for scan tests.
+icon_path: icon.txt
 EOF
     mkdir -p "$SANDBOX/.gemini/skills"
 
@@ -126,11 +153,20 @@ run_tests() {
 
     echo -e "${BOLD}── Provenance and Version Facts ──${NC}"
     assert_eq "Content hash collected" "64" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".agents/skills" and .name == "healthy-skill") | .content_sha256 | length')"
-    assert_eq "Metadata version collected" "2.0.0" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .declared_version')"
-    assert_eq "License collected" "MIT" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .frontmatter.license')"
+    assert_eq "Metadata version remains auxiliary fact" "2.0.0" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .declared_version')"
+    assert_eq "Frontmatter contract is name/description only" "name_description_only" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .frontmatter.contract')"
+    assert_eq "License excluded from first-class frontmatter" "false" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .frontmatter | has("license")')"
+    assert_eq "Extra frontmatter keys preserve license signal only" "1" "$(echo "$json_output" | jq '[.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .extra_frontmatter_keys[] | select(. == "license")] | length')"
     assert_eq "Native agent provenance classified" "native_agent" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .provenance.kind')"
     assert_eq "Risk indicators are structured" "1" "$(echo "$json_output" | jq '[.skills[] | select(.name == "risky-skill") | .risk_indicators[] | select(.id == "pipe_to_shell")] | length')"
     assert_eq "Same-name real dirs reported as collision" "1" "$(echo "$json_output" | jq '[.name_collisions[] | select(.name == "healthy-skill")] | length')"
+    assert_eq "Claude disable-model-invocation collected" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .claude_code.disable_model_invocation')"
+    assert_eq "Claude allowed-tools counted" "3" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .claude_code.allowed_tools_count')"
+    assert_eq "Claude paths counted" "2" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .claude_code.paths_count')"
+    assert_eq "Claude hooks summarized" "1" "$(echo "$json_output" | jq '[.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .claude_code.hook_events[] | select(. == "PreToolUse")] | length')"
+    assert_eq "Hook command is not leaked" "0" "$(echo "$json_output" | jq '[.. | strings | select(. == "echo should-not-leak")] | length')"
+    assert_eq "OpenAI yaml detected" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .openai.openai_yaml_exists')"
+    assert_eq "OpenAI icon path checked" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .openai.icon_paths_exist')"
     echo ""
 
     echo -e "${BOLD}══════════════════════════════════════════${NC}"

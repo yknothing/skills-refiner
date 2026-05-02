@@ -44,6 +44,56 @@ get_skill_name() {
     echo "$name"
 }
 
+get_frontmatter() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && index($0, key ":") == 1 {
+            sub("^" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null | head -c 300
+}
+
+get_metadata_value() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && $0 == "metadata:" { in_meta=1; next }
+        in_meta && $0 ~ /^[^[:space:]]/ { exit }
+        in_meta && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
+            sub("^[[:space:]]+" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null | head -c 300
+}
+
+resolve_canonical_file() {
+    local file="$1"
+    local dir base resolved_dir
+    dir=$(dirname "$file")
+    base=$(basename "$file")
+    resolved_dir=$(cd -P "$dir" 2>/dev/null && pwd) || return 1
+    printf '%s/%s\n' "$resolved_dir" "$base"
+}
+
+source_kind_for_canonical_dir() {
+    local canonical_dir="$1"
+    if [[ "$canonical_dir" == "$HOME_DIR/.agents/skills/"* ]]; then
+        echo "canonical_global"
+    elif [[ "$canonical_dir" == "$HOME_DIR/."*"/skills/"* ]]; then
+        echo "native_agent"
+    else
+        echo "direct_file"
+    fi
+}
+
 # ── Inject Trace ──────────────────────────────────────────────────────
 inject_trace() {
     local skill_file="$1"
@@ -61,6 +111,15 @@ inject_trace() {
     local skill_name
     skill_name=$(get_skill_name "$skill_file")
 
+    local source_skill_file canonical_skill_file canonical_dir top_version metadata_version declared_version provenance_kind
+    source_skill_file=$(cd "$(dirname "$skill_file")" 2>/dev/null && pwd)/$(basename "$skill_file")
+    canonical_skill_file=$(resolve_canonical_file "$skill_file" 2>/dev/null || echo "$skill_file")
+    canonical_dir=$(dirname "$canonical_skill_file")
+    top_version=$(get_frontmatter "$skill_file" "version")
+    metadata_version=$(get_metadata_value "$skill_file" "version")
+    declared_version="${metadata_version:-$top_version}"
+    provenance_kind=$(source_kind_for_canonical_dir "$canonical_dir")
+
     # Build the trace block
     local trace_block
     trace_block=$(cat << 'TRACEEOF'
@@ -69,7 +128,21 @@ inject_trace() {
 <!-- SKILL-DEBUG-TRACE-START -->
 When this skill is used, run this canary command first:
 ```bash
-mkdir -p ~/.agents/debug && echo '{"event":"skill_canary_observed","trace_kind":"canary","skill":"__SKILL_NAME__","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
+_skill_debug_file="__CANONICAL_SKILL_FILE__"
+_skill_debug_hash=""
+if command -v sha256sum >/dev/null 2>&1; then
+  _skill_debug_hash=$(sha256sum "$_skill_debug_file" 2>/dev/null | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  _skill_debug_hash=$(shasum -a 256 "$_skill_debug_file" 2>/dev/null | awk '{print $1}')
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  _skill_debug_id=$(printf '%s|%s' "$_skill_debug_file" "$_skill_debug_hash" | sha256sum | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  _skill_debug_id=$(printf '%s|%s' "$_skill_debug_file" "$_skill_debug_hash" | shasum -a 256 | awk '{print $1}')
+else
+  _skill_debug_id="$_skill_debug_file|$_skill_debug_hash"
+fi
+mkdir -p ~/.agents/debug && echo '{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"__SKILL_NAME__","skill_name":"__SKILL_NAME__","identity_key":"'"$_skill_debug_id"'","canonical_skill_file":"__CANONICAL_SKILL_FILE__","canonical_dir":"__CANONICAL_DIR__","declared_version":"__DECLARED_VERSION__","content_sha256":"'"$_skill_debug_hash"'","provenance_kind":"__PROVENANCE_KIND__","entry_path":"__SOURCE_SKILL_FILE__","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
 ```
 <!-- SKILL-DEBUG-TRACE-END -->
 TRACEEOF
@@ -77,6 +150,11 @@ TRACEEOF
 
     # Replace placeholder with actual skill name
     trace_block="${trace_block//__SKILL_NAME__/$skill_name}"
+    trace_block="${trace_block//__CANONICAL_SKILL_FILE__/$canonical_skill_file}"
+    trace_block="${trace_block//__CANONICAL_DIR__/$canonical_dir}"
+    trace_block="${trace_block//__DECLARED_VERSION__/$declared_version}"
+    trace_block="${trace_block//__PROVENANCE_KIND__/$provenance_kind}"
+    trace_block="${trace_block//__SOURCE_SKILL_FILE__/$source_skill_file}"
 
     # Find the end of frontmatter and inject after it
     local fm_end
