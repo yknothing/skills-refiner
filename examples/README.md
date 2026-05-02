@@ -128,7 +128,7 @@ bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 Expected behavior:
 - scans all agent skill directories (`~/.agents/skills/`, `~/.claude/skills/`, etc.);
 - reports topology: native skills, symlinks, broken symlinks per directory;
-- records discovery contract fields, Claude Code invocation controls, OpenAI UI metadata signals, content hash, freshness, provenance, and same-name collision facts when available;
+- records discovery contract fields, bounded native-platform signals, content hash, freshness, provenance, and same-name collision facts when available;
 - flags issues: missing frontmatter, backup remnants, security indicators, stale or stub skills;
 - outputs both terminal-friendly table and JSON report.
 
@@ -144,7 +144,7 @@ bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --stale-days 365
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --json
 ```
 
-Feed the JSON to an AI advisor for expert judgment on the scan results.
+Feed the stdout JSON to an AI advisor for expert judgment on the scan results. This mode does not write a report file.
 
 ### 14) Inspect local skill discovery surfaces from a project directory
 
@@ -192,7 +192,7 @@ Expected output: observed canary ranking, not-observed skill identities (install
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
 ```
 
-Combines discovery probe with activation log analysis and hygiene scan cross-reference.
+Combines discovery probe, native platform signal checks, activation log analysis, and hygiene scan cross-reference.
 
 ### 18) Full governance workflow
 

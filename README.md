@@ -75,6 +75,8 @@ Across all four skills:
 - **AI judges, scripts collect.** Shell scripts gather structured data without making decisions. The AI interprets evidence using expertise and context. Scripts must not strip AI's judgment capability.
 - **Conservative by default.** If evidence is unclear, flag observations — do not recommend removal or action. Only act when evidence is unambiguous.
 - **Respect the topology.** The standard model is: canonical skills in `~/.agents/skills/`, symlinked to agent directories (`.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, etc.). Symlinks are distribution links, not duplicates. Standalone project repos are not broken global skills.
+- **Treat installs as deployment artifacts.** This repository is the source of truth. Global installed skills may drift; compare hashes/commits before treating an installed skill as current.
+- **Use native signals first.** Prefer Claude Code OpenTelemetry, Codex skill metadata, Cursor Rules/Skills/MCP surfaces, and SDK-native traces where they exist. Canary tracing is a local fallback, not a platform trace.
 - **Ground judgment in evidence.** Distinguish direct evidence, inference, and uncertainty. Avoid generic praise, inflated claims, or rote rules.
 - **Keep the input surface small.** Infer mode, depth, and language from context when possible.
 - **Optimize for transfer value.** The goal is not clever observations but actionable insight.
@@ -87,7 +89,7 @@ Across all four skills:
 
 **Governance & Observability:**
 - No false alarms. A skill with zero observed activations may simply not have been needed. Treat "not observed" as an observation, not a verdict.
-- All operations are reversible. Trace injection can be stripped. Scans are read-only. Dashboard never modifies skill files.
+- All operations are reversible. Trace injection can be stripped. Scans never modify skill files; use `--json` or `--no-write` for stdout-only/no-report runs. Dashboard never modifies skill files.
 - All data stays local. No data is sent externally.
 
 ## Installation

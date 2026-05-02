@@ -50,14 +50,15 @@ bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh [OPTIONS]
 
 Options:
 - `--stale-days N` — Override stale threshold (default: 180 days)
-- `--json` — Output JSON only (for programmatic use)
+- `--json` — Output JSON to stdout only; no report file is written
+- `--no-write` — Show the terminal report without writing `~/.agents/skills-report/scan-*.json`
 
 The script outputs structured data. Your job is to **interpret** it.
 
 Key facts now include:
 - `frontmatter` — OpenAI/Codex-compatible discovery contract: name and description, plus capped description metadata
-- `claude_code` — official Claude Code behavior signals such as invocation controls, allowed tools, context, paths, shell, and hook event names
-- `openai` — local `agents/openai.yaml` UI metadata presence and a few bounded consistency checks when present
+- `claude_code` — bounded Claude Code invocation signals such as model/user invocation controls, tool/path counts, and hook event names
+- `openai` — bounded `agents/openai.yaml` signals: UI metadata presence, implicit-invocation policy, and tool dependency count
 - `content_sha256` — local content identity for same-name comparison without network access
 - `freshness` — mtime, age, stale threshold, and `is_stale` as a signal
 - `provenance` — local source signals such as canonical-global, symlink-distribution, native-agent, and git remote when directly available
@@ -66,6 +67,8 @@ Key facts now include:
 - `extra_frontmatter_keys` — non-core frontmatter keys as names only, not full values
 
 ## What to Analyze
+
+Treat the repository as the source of truth and installed global directories as deployment artifacts. If repo and `~/.agents/skills` differ, report drift before trusting global scan results.
 
 When reviewing scan results, apply your judgment across these dimensions. Not all apply to every skill — use the context.
 

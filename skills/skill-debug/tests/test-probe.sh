@@ -120,6 +120,25 @@ EOF
 
     # Empty agent directory (should not crash)
     mkdir -p "$SANDBOX/.gemini/skills"
+
+    mkdir -p "$SANDBOX/.cursor/rules" "$SANDBOX/.cursor/skills/cursor-tool"
+    cat > "$SANDBOX/.cursor/rules/local.mdc" << 'EOF'
+---
+description: Local Cursor rule for probe tests.
+alwaysApply: false
+---
+Use this rule for probe tests.
+EOF
+    cat > "$SANDBOX/.cursor/skills/cursor-tool/SKILL.md" << 'EOF'
+---
+name: cursor-tool
+description: Use when testing Cursor skill surface reporting.
+---
+
+# cursor-tool
+A Cursor native skill for probe tests.
+EOF
+    echo '{"mcpServers":{}}' > "$SANDBOX/.cursor/mcp.json"
 }
 
 # ── Tests ─────────────────────────────────────────────────────────────
@@ -192,6 +211,27 @@ run_tests() {
     HOME="$SANDBOX" bash "$PROBE_SCRIPT" --cwd "$SANDBOX" > /dev/null 2>&1
     exit_code=$?
     assert_eq "Handles empty directories without crash" "0" "$exit_code"
+
+    echo ""
+
+    # Test 7: Doctor mode reports native platform signals without taking them over
+    echo -e "${BOLD}── Native Platform Signals ──${NC}"
+    local doctor_output
+    doctor_output=$(HOME="$SANDBOX" \
+        CLAUDE_CODE_ENABLE_TELEMETRY=1 \
+        CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1 \
+        OTEL_TRACES_EXPORTER=console \
+        OTEL_LOG_TOOL_DETAILS=1 \
+        OPENAI_AGENTS_DISABLE_TRACING=1 \
+        CURSOR_AGENT=1 \
+        bash "$PROBE_SCRIPT" --cwd "$SANDBOX" --doctor 2>&1)
+    assert_contains "Doctor reports native platform section" "$doctor_output" "Native Platform Signals"
+    assert_contains "Doctor detects Claude Code telemetry" "$doctor_output" "Claude Code telemetry"
+    assert_contains "Doctor detects configured traces" "$doctor_output" "traces:"
+    assert_contains "Doctor reports OpenAI SDK env state" "$doctor_output" "disabled by env"
+    assert_contains "Doctor detects Cursor Agent terminal" "$doctor_output" "Cursor native context"
+    assert_contains "Doctor reports Cursor rules" "$doctor_output" "rules:"
+    assert_contains "Doctor reports Cursor mcp config" "$doctor_output" "mcp config:"
 
     echo ""
 

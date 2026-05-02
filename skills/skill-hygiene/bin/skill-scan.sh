@@ -7,7 +7,7 @@
 # Usage:
 #   bash skill-scan.sh                    # Full scan, table + JSON output
 #   bash skill-scan.sh --stale-days 365   # Custom staleness threshold
-#   bash skill-scan.sh --json             # JSON only (for AI consumption)
+#   bash skill-scan.sh --json             # JSON to stdout only
 
 set -o pipefail
 
@@ -18,6 +18,7 @@ TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
 REPORT_JSON="$REPORT_DIR/scan-$TIMESTAMP.json"
 STALE_DAYS=180
 JSON_ONLY=false
+NO_WRITE=false
 
 # Colors
 RED='\033[0;31m'
@@ -51,11 +52,13 @@ show_help() {
     echo "Usage:"
     echo "  bash skill-scan.sh                    # Full scan, table + JSON output"
     echo "  bash skill-scan.sh --stale-days 365   # Custom staleness threshold"
-    echo "  bash skill-scan.sh --json             # JSON only (for programmatic use)"
+    echo "  bash skill-scan.sh --json             # JSON to stdout only"
+    echo "  bash skill-scan.sh --no-write         # Terminal report without writing JSON"
     echo ""
     echo "Options:"
     echo "  --stale-days N   Override stale threshold (default: 180 days)"
-    echo "  --json           Output JSON only (for programmatic use)"
+    echo "  --json           Output JSON to stdout only (no report file)"
+    echo "  --no-write       Do not write ~/.agents/skills-report/scan-*.json"
     echo "  --help, -h       Show this help message"
 }
 
@@ -70,14 +73,13 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --json) JSON_ONLY=true; shift ;;
+        --no-write) NO_WRITE=true; shift ;;
         --help|-h) show_help; exit 0 ;;
         *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
     esac
 done
 
 # ── Helpers ───────────────────────────────────────────────────────────
-mkdir -p "$REPORT_DIR"
-
 if ! command -v jq >/dev/null 2>&1; then
     echo "[ERROR] jq is required for JSON output and aggregation. Install jq and retry." >&2
     exit 127
@@ -210,6 +212,30 @@ yaml_scalar() {
             exit
         }
     ' "$file" 2>/dev/null | head -c 300
+}
+
+yaml_section_scalar() {
+    local file="$1" section="$2" key="$3"
+    awk -v section="$section" -v key="$key" '
+        $0 ~ "^" section ":[[:space:]]*$" { in_section=1; next }
+        in_section && $0 ~ /^[^[:space:]]/ { exit }
+        in_section && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
+            sub("^[[:space:]]+" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null | head -c 300
+}
+
+yaml_sequence_count() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        $0 ~ "^[[:space:]]*" key ":[[:space:]]*$" { in_seq=1; next }
+        in_seq && $0 ~ /^[^[:space:]]/ { exit }
+        in_seq && $0 ~ /^[[:space:]]*-[[:space:]]*/ { count++ }
+        END { print count + 0 }
+    ' "$file" 2>/dev/null
 }
 
 count_content_words() {
@@ -418,7 +444,7 @@ scan_directory() {
 
         local when_to_use when_to_use_preview disable_model_invocation user_invocable model effort context agent shell_value
         local allowed_tools_json paths_json hook_events_json_value has_hooks extra_keys_json fm_keys_json openai_yaml openai_yaml_exists
-        local display_name short_description default_prompt icon_path icon_paths_exist default_prompt_mentions_skill
+        local display_name short_description default_prompt icon_path icon_paths_exist default_prompt_mentions_skill allow_implicit_invocation tool_dependencies_count
         local desc_length desc_truncated when_to_use_length when_to_use_truncated allowed_tools_count paths_count
 
         when_to_use=$(get_frontmatter_text "$skill_file" "when_to_use")
@@ -455,13 +481,22 @@ scan_directory() {
         icon_path=""
         icon_paths_exist=null
         default_prompt_mentions_skill=false
+        allow_implicit_invocation=""
+        tool_dependencies_count=0
         if [ -f "$openai_yaml" ]; then
             openai_yaml_exists=true
-            display_name=$(yaml_scalar "$openai_yaml" "display_name")
-            short_description=$(yaml_scalar "$openai_yaml" "short_description")
-            default_prompt=$(yaml_scalar "$openai_yaml" "default_prompt")
-            icon_path=$(yaml_scalar "$openai_yaml" "icon_path")
+            display_name=$(yaml_section_scalar "$openai_yaml" "interface" "display_name")
+            [ -z "$display_name" ] && display_name=$(yaml_scalar "$openai_yaml" "display_name")
+            short_description=$(yaml_section_scalar "$openai_yaml" "interface" "short_description")
+            [ -z "$short_description" ] && short_description=$(yaml_scalar "$openai_yaml" "short_description")
+            default_prompt=$(yaml_section_scalar "$openai_yaml" "interface" "default_prompt")
+            [ -z "$default_prompt" ] && default_prompt=$(yaml_scalar "$openai_yaml" "default_prompt")
+            icon_path=$(yaml_section_scalar "$openai_yaml" "interface" "icon_small")
+            [ -z "$icon_path" ] && icon_path=$(yaml_section_scalar "$openai_yaml" "interface" "icon_large")
+            [ -z "$icon_path" ] && icon_path=$(yaml_scalar "$openai_yaml" "icon_path")
             [ -z "$icon_path" ] && icon_path=$(yaml_scalar "$openai_yaml" "icon")
+            allow_implicit_invocation=$(yaml_section_scalar "$openai_yaml" "policy" "allow_implicit_invocation")
+            tool_dependencies_count=$(yaml_sequence_count "$openai_yaml" "tools")
             if [ -n "$default_prompt" ] && [ -n "$name" ] && printf '%s' "$default_prompt" | grep -q "$name"; then
                 default_prompt_mentions_skill=true
             fi
@@ -500,6 +535,7 @@ scan_directory() {
             --arg shell "$shell_value" \
             --arg display_name "$display_name" \
             --arg short_description "$short_description" \
+            --arg allow_implicit_invocation "$allow_implicit_invocation" \
             --argjson words "$word_count" \
             --argjson mtime "$mtime" \
             --argjson age "$age_days" \
@@ -518,6 +554,7 @@ scan_directory() {
             --argjson openai_yaml_exists "$openai_yaml_exists" \
             --argjson default_prompt_mentions_skill "$default_prompt_mentions_skill" \
             --argjson icon_paths_exist "$icon_paths_exist" \
+            --argjson tool_dependencies_count "$tool_dependencies_count" \
             --argjson flags "$flags_json" \
             --argjson risks "$risk_json" \
             '{
@@ -560,6 +597,8 @@ scan_directory() {
                     openai_yaml_exists: $openai_yaml_exists,
                     display_name: $display_name,
                     short_description: $short_description,
+                    allow_implicit_invocation: $allow_implicit_invocation,
+                    tool_dependencies_count: $tool_dependencies_count,
                     default_prompt_mentions_skill: $default_prompt_mentions_skill,
                     icon_paths_exist: $icon_paths_exist
                 },
@@ -656,11 +695,22 @@ main() {
         )
     ')
 
-    echo "$all_data" | jq '.' > "$REPORT_JSON"
-
     if $JSON_ONLY; then
-        cat "$REPORT_JSON"
+        echo "$all_data" | jq '.'
         return
+    fi
+
+    local report_written=false
+    if ! $NO_WRITE; then
+        if ! mkdir -p "$REPORT_DIR"; then
+            echo "[ERROR] Cannot create report directory: $REPORT_DIR" >&2
+            exit 1
+        fi
+        if ! echo "$all_data" | jq '.' > "$REPORT_JSON"; then
+            echo "[ERROR] Cannot write report JSON: $REPORT_JSON" >&2
+            exit 1
+        fi
+        report_written=true
     fi
 
     echo -e "${BOLD}── Topology Map ──${NC}"
@@ -755,7 +805,11 @@ main() {
     echo "  >${STALE_DAYS} days (stale):     $stale"
     echo ""
 
-    echo -e "${GREEN}[OK]${NC} Scan complete. JSON: ${CYAN}$REPORT_JSON${NC}"
+    if $report_written; then
+        echo -e "${GREEN}[OK]${NC} Scan complete. JSON: ${CYAN}$REPORT_JSON${NC}"
+    else
+        echo -e "${GREEN}[OK]${NC} Scan complete. JSON report not written (--json/--no-write)."
+    fi
     echo -e "${DIM}Feed this JSON to the AI for expert analysis. Findings are signals, not verdicts.${NC}"
 }
 

@@ -167,6 +167,78 @@ discover_global_skills() {
     done
 }
 
+count_skill_files() {
+    local dir="$1"
+    [ -d "$dir" ] || { echo 0; return; }
+    find "$dir" -maxdepth 2 -name SKILL.md -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+count_cursor_rules() {
+    local dir="$1"
+    [ -d "$dir" ] || { echo 0; return; }
+    find "$dir" -maxdepth 1 -name '*.mdc' -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+cursor_mcp_state() {
+    if [ -f "$TARGET_CWD/.cursor/mcp.json" ] || [ -d "$TARGET_CWD/.cursor/mcp" ] || \
+       [ -f "$HOME_DIR/.cursor/mcp.json" ] || [ -d "$HOME_DIR/.cursor/mcp" ]; then
+        echo "present"
+    else
+        echo "absent"
+    fi
+}
+
+show_native_observability() {
+    echo -e "${BOLD}── Native Platform Signals ──${NC}"
+
+    if [ "${CLAUDE_CODE_ENABLE_TELEMETRY:-}" = "1" ]; then
+        echo -e "  Claude Code telemetry: ${GREEN}enabled${NC}"
+        echo -e "    metrics exporter: ${OTEL_METRICS_EXPORTER:-unset}"
+        echo -e "    logs exporter:    ${OTEL_LOGS_EXPORTER:-unset}"
+        if { [ "${CLAUDE_CODE_ENHANCED_TELEMETRY_BETA:-}" = "1" ] || [ "${ENABLE_ENHANCED_TELEMETRY_BETA:-}" = "1" ]; } && [ -n "${OTEL_TRACES_EXPORTER:-}" ] && [ "${OTEL_TRACES_EXPORTER:-}" != "none" ]; then
+            echo -e "    traces:           ${GREEN}configured${NC} (${OTEL_TRACES_EXPORTER})"
+        else
+            echo -e "    traces:           ${DIM}not configured${NC}"
+        fi
+        if [ "${OTEL_LOG_TOOL_DETAILS:-}" = "1" ]; then
+            echo -e "    tool details:     enabled (skill names may be exported)"
+        else
+            echo -e "    tool details:     disabled (custom skill names may be redacted)"
+        fi
+    else
+        echo -e "  Claude Code telemetry: ${DIM}not detected${NC}"
+    fi
+
+    local codex_user_count codex_config cursor_rule_count cursor_skill_count cursor_mcp
+    codex_user_count=$(count_skill_files "$HOME_DIR/.agents/skills")
+    if [ -f "$HOME_DIR/.codex/config.toml" ]; then
+        codex_config="present"
+    else
+        codex_config="absent"
+    fi
+    echo -e "  Codex native skill surface: ${DIM}~/.agents/skills=${codex_user_count}, ~/.codex/config.toml=${codex_config}${NC}"
+
+    if [ "${OPENAI_AGENTS_DISABLE_TRACING:-}" = "1" ]; then
+        echo -e "  OpenAI Agents SDK tracing: ${YELLOW}disabled by env${NC} ${DIM}(app workflow signal, not Codex skill runtime)${NC}"
+    else
+        echo -e "  OpenAI Agents SDK tracing: ${DIM}app-level default when using SDK apps; no Codex runtime trace reader here${NC}"
+    fi
+
+    cursor_rule_count=$(count_cursor_rules "$TARGET_CWD/.cursor/rules")
+    cursor_skill_count=$(count_skill_files "$TARGET_CWD/.cursor/skills")
+    cursor_mcp=$(cursor_mcp_state)
+    if [ -n "${CURSOR_AGENT:-}" ]; then
+        echo -e "  Cursor native context: ${GREEN}agent terminal detected${NC}"
+    else
+        echo -e "  Cursor native context: ${DIM}agent terminal not detected${NC}"
+    fi
+    echo -e "    rules:            ${cursor_rule_count} .mdc files in cwd/.cursor/rules"
+    echo -e "    skills:           ${cursor_skill_count} SKILL.md files in cwd/.cursor/skills"
+    echo -e "    mcp config:       ${cursor_mcp}"
+    echo -e "  ${DIM}Boundary: this reports local config/signals only; it does not prove runtime loading or effectiveness.${NC}"
+    echo ""
+}
+
 # ── Main Report ──────────────────────────────────────────────────────
 main() {
     echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
@@ -304,6 +376,7 @@ main() {
     if $DOCTOR; then
         echo -e "${BOLD}── Doctor Mode ──${NC}"
         echo ""
+        show_native_observability
 
         local log_file="$HOME_DIR/.agents/debug/activation.jsonl"
         if [ -f "$log_file" ]; then

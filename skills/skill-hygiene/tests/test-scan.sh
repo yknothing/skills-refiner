@@ -98,10 +98,17 @@ EOF
     mkdir -p "$SANDBOX/.codex/skills/healthy-skill/agents"
     touch "$SANDBOX/.codex/skills/healthy-skill/agents/icon.txt"
     cat > "$SANDBOX/.codex/skills/healthy-skill/agents/openai.yaml" << 'EOF'
-display_name: Healthy Skill
-short_description: Tests OpenAI metadata surface.
-default_prompt: Use healthy-skill for scan tests.
-icon_path: icon.txt
+interface:
+  display_name: Healthy Skill
+  short_description: Tests OpenAI metadata surface.
+  default_prompt: Use healthy-skill for scan tests.
+  icon_small: icon.txt
+policy:
+  allow_implicit_invocation: false
+dependencies:
+  tools:
+    - type: mcp
+      value: openaiDeveloperDocs
 EOF
     mkdir -p "$SANDBOX/.gemini/skills"
 
@@ -117,6 +124,12 @@ run_tests() {
     setup_sandbox
     local json_output
     json_output=$(HOME="$SANDBOX" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    local report_count
+    if [ -d "$SANDBOX/.agents/skills-report" ]; then
+        report_count=$(find "$SANDBOX/.agents/skills-report" -name 'scan-*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
+    else
+        report_count=0
+    fi
 
     echo -e "${BOLD}── Topology ──${NC}"
     assert_eq "Canonical native count" "5" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
@@ -149,6 +162,7 @@ run_tests() {
     assert_eq "JSON has topology key" "true" "$(echo "$json_output" | jq 'has("topology")')"
     assert_eq "JSON has skills key" "true" "$(echo "$json_output" | jq 'has("skills")')"
     assert_eq "JSON has skill_links key" "true" "$(echo "$json_output" | jq 'has("skill_links")')"
+    assert_eq "JSON-only mode does not write report files" "0" "$report_count"
     echo ""
 
     echo -e "${BOLD}── Provenance and Version Facts ──${NC}"
@@ -167,6 +181,8 @@ run_tests() {
     assert_eq "Hook command is not leaked" "0" "$(echo "$json_output" | jq '[.. | strings | select(. == "echo should-not-leak")] | length')"
     assert_eq "OpenAI yaml detected" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .openai.openai_yaml_exists')"
     assert_eq "OpenAI icon path checked" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .openai.icon_paths_exist')"
+    assert_eq "OpenAI implicit invocation policy collected" "false" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .openai.allow_implicit_invocation')"
+    assert_eq "OpenAI tool dependencies counted" "1" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .openai.tool_dependencies_count')"
     echo ""
 
     echo -e "${BOLD}══════════════════════════════════════════${NC}"

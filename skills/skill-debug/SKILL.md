@@ -38,6 +38,17 @@ bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh
 
 ## Three-Layer Debug Architecture
 
+### Native Platform Signals First
+
+Prefer native agent signals when they exist. This skill fills the local evidence gap; it does not replace platform telemetry.
+
+| Platform | Native signal | This repo's boundary |
+| --- | --- | --- |
+| Claude Code | OpenTelemetry metrics/events/traces, including skill activation and tool spans when configured | `skill-probe --doctor` reports local OTel env state; canary remains a fallback/proxy |
+| Codex | Native skill discovery from `.agents/skills`, `~/.agents/skills`, admin/system scopes, symlink following, and `agents/openai.yaml` invocation policy | Report local surfaces and metadata; do not claim runtime activation |
+| OpenAI Agents SDK | App-workflow tracing for SDK runs: generations, tools, handoffs, guardrails, custom spans | Separate SDK signal; not evidence of Codex/IDE skill loading |
+| Cursor | Rules, memories, MCP config, Agent Skills, and agent terminal context | Report local rules/skills/MCP presence; no documented full trace exporter is assumed |
+
 ### Layer 1: Discovery Diagnostics (`skill-probe`)
 
 Answers: "Which local skill files are on likely discovery surfaces from here?"
@@ -117,8 +128,9 @@ bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
 
 The `--doctor` mode combines:
 1. Discovery probe (Layer 1)
-2. Activation log analysis (Layer 3)
-3. Cross-reference with `skill-hygiene` scan results if available
+2. Native platform signal check (Claude Code OTel env, Codex/Cursor local surfaces, OpenAI Agents SDK tracing env)
+3. Activation log analysis (Layer 3)
+4. Cross-reference with `skill-hygiene` scan results if available
 
 ## Interpreting Results
 
