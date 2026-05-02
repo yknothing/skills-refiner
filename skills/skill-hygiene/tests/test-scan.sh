@@ -62,6 +62,20 @@ EOF
     write_skill "$SANDBOX/.claude/skills/native-geo" "native-geo" "Use when testing native agent skill detection." "A native skill not installed through the canonical path."
 
     write_skill "$SANDBOX/.codex/skills/codex-only" "codex-only" "Use when testing codex-specific skill detection." "An independently installed codex skill."
+    mkdir -p "$SANDBOX/.codex/skills/healthy-skill"
+    cat > "$SANDBOX/.codex/skills/healthy-skill/SKILL.md" << 'EOF'
+---
+name: healthy-skill
+description: Use when testing same-name native skill provenance.
+license: MIT
+metadata:
+  version: "2.0.0"
+---
+
+# healthy-skill
+
+This independently installed skill intentionally shares a name with the canonical skill so the scanner can collect version, provenance, and content-collision facts without treating symlink distribution as duplication.
+EOF
     mkdir -p "$SANDBOX/.gemini/skills"
 
     write_skill "$SANDBOX/workspace/my-project/.agents/skills/project-skill" "project-skill" "Use when this should not appear in global scan." "Project local skill."
@@ -104,9 +118,19 @@ run_tests() {
     echo -e "${BOLD}── JSON Shape ──${NC}"
     echo "$json_output" | jq . >/dev/null 2>&1
     assert_eq "JSON output is valid" "0" "$?"
+    assert_eq "JSON has schema version" "skill-scan.v2" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
     assert_eq "JSON has topology key" "true" "$(echo "$json_output" | jq 'has("topology")')"
     assert_eq "JSON has skills key" "true" "$(echo "$json_output" | jq 'has("skills")')"
     assert_eq "JSON has skill_links key" "true" "$(echo "$json_output" | jq 'has("skill_links")')"
+    echo ""
+
+    echo -e "${BOLD}── Provenance and Version Facts ──${NC}"
+    assert_eq "Content hash collected" "64" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".agents/skills" and .name == "healthy-skill") | .content_sha256 | length')"
+    assert_eq "Metadata version collected" "2.0.0" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .declared_version')"
+    assert_eq "License collected" "MIT" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .frontmatter.license')"
+    assert_eq "Native agent provenance classified" "native_agent" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .provenance.kind')"
+    assert_eq "Risk indicators are structured" "1" "$(echo "$json_output" | jq '[.skills[] | select(.name == "risky-skill") | .risk_indicators[] | select(.id == "pipe_to_shell")] | length')"
+    assert_eq "Same-name real dirs reported as collision" "1" "$(echo "$json_output" | jq '[.name_collisions[] | select(.name == "healthy-skill")] | length')"
     echo ""
 
     echo -e "${BOLD}══════════════════════════════════════════${NC}"

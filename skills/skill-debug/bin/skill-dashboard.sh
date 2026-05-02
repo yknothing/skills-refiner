@@ -172,7 +172,6 @@ main() {
                 active_rate_pct: $active_rate,
                 frequency: $frequency,
                 not_observed_skills: $observations,
-                zombie_skills: $observations,
                 context_distribution: $contexts,
                 note: "Not observed is an observation, not a removal verdict. Cross-reference user workflow and hygiene scan before recommending action."
             }'
@@ -235,7 +234,7 @@ main() {
 
     echo -e "${BOLD}── $observation_title ──${NC}"
     if [ "$observation_count" -gt 0 ]; then
-        echo -e "  ${YELLOW}$observation_count skills${NC} installed but not observed activated:"
+        echo -e "  ${YELLOW}$observation_count skills${NC} installed but no canary was recorded:"
         echo "$observations" | head -15 | sed "s/^/  ${DIM}○ /"
         echo -e "${NC}"
         [ "$observation_count" -gt 15 ] && echo -e "  ${DIM}... and $((observation_count - 15)) more${NC}"

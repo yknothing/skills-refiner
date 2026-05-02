@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# skill-probe.sh — Skill discovery diagnostics
-# Shows what skills an agent can see from the current working directory.
+# skill-probe.sh — Local skill discovery-surface diagnostics
+# Shows skill files this diagnostic can find from the current working directory.
 #
 # Usage:
 #   bash skill-probe.sh                    # Probe from current cwd
@@ -32,7 +32,7 @@ SKILL_DIRS=(".warp/skills" ".agents/skills" ".claude/skills" ".codex/skills"
 
 # ── Parse Args ────────────────────────────────────────────────────────
 show_help() {
-    echo "skill-probe.sh — Skill discovery diagnostics"
+    echo "skill-probe.sh — Local skill discovery-surface diagnostics"
     echo ""
     echo "Usage:"
     echo "  bash skill-probe.sh"
@@ -139,8 +139,25 @@ discover_project_skills() {
     git_root=$(find_git_root "$cwd")
     search_root="${git_root:-$cwd}"
 
-    for dir_name in "${SKILL_DIRS[@]}"; do
-        emit_skills_from_base "project" "$dir_name" "$search_root/$dir_name"
+    local bases=("$search_root")
+    if [ -n "$git_root" ]; then
+        local current="$cwd"
+        while [ "$current" != "$git_root" ] && [ "$current" != "/" ] && [ "$current" != "$HOME_DIR" ]; do
+            bases+=("$current")
+            current=$(dirname "$current")
+        done
+    fi
+
+    local base
+    for base in "${bases[@]}"; do
+        for dir_name in "${SKILL_DIRS[@]}"; do
+            local label="$dir_name"
+            if [ "$base" != "$search_root" ]; then
+                local rel="${base#$search_root/}"
+                label="$rel/$dir_name"
+            fi
+            emit_skills_from_base "project" "$label" "$base/$dir_name"
+        done
     done
 }
 
@@ -153,10 +170,11 @@ discover_global_skills() {
 # ── Main Report ──────────────────────────────────────────────────────
 main() {
     echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║       Skill Discovery Probe v1.2         ║${NC}"
+    echo -e "${BOLD}║  Skill Discovery Surface Probe v1.3      ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  ${DIM}CWD:${NC} $TARGET_CWD"
+    echo -e "  ${DIM}Mode:${NC} best-effort local filesystem diagnostic"
 
     local git_root
     git_root=$(find_git_root "$TARGET_CWD")
@@ -277,6 +295,7 @@ main() {
     echo -e "  Discoverable skill entries: ${BOLD}$total${NC} (project: $project_count, global: $global_count)"
     echo -e "  Symlink distribution entries: ${BOLD}$symlink_distribution_count${NC}"
     echo -e "  Scanned directories: ${#SKILL_DIRS[@]} patterns × 2 scopes"
+    echo -e "  ${DIM}Note: platform runtime discovery can differ from this filesystem scan.${NC}"
     if $conflict_found; then
         echo -e "  ${YELLOW}⚠ Name conflicts detected — agent may pick an unexpected version depending on discovery priority${NC}"
     fi
@@ -288,20 +307,20 @@ main() {
 
         local log_file="$HOME_DIR/.agents/debug/activation.jsonl"
         if [ -f "$log_file" ]; then
-            local log_count activated_skills installed_names active_names zombies zombie_count
+            local log_count activated_skills installed_names active_names not_observed not_observed_count
             log_count=$(wc -l < "$log_file" | tr -d ' ')
             activated_skills=$(jq -r '.skill' "$log_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
             echo -e "  Activation log: ${GREEN}$log_count${NC} events, ${GREEN}$activated_skills${NC} unique skills"
 
             installed_names=$(printf '%s\n' "${seen_names[@]}" | sort -u)
             active_names=$(jq -r '.skill' "$log_file" 2>/dev/null | sort -u)
-            zombies=$(comm -23 <(echo "$installed_names") <(echo "$active_names"))
-            zombie_count=$(echo "$zombies" | grep -c . 2>/dev/null || echo 0)
+            not_observed=$(comm -23 <(echo "$installed_names") <(echo "$active_names"))
+            not_observed_count=$(echo "$not_observed" | grep -c . 2>/dev/null || echo 0)
 
-            if [ "$zombie_count" -gt 0 ]; then
-                echo -e "  ${YELLOW}Installed but not observed activated:${NC} $zombie_count"
-                echo "$zombies" | head -10 | sed 's/^/    - /'
-                [ "$zombie_count" -gt 10 ] && echo "    ... and $((zombie_count - 10)) more"
+            if [ "$not_observed_count" -gt 0 ]; then
+                echo -e "  ${YELLOW}Installed but no canary recorded:${NC} $not_observed_count"
+                echo "$not_observed" | head -10 | sed 's/^/    - /'
+                [ "$not_observed_count" -gt 10 ] && echo "    ... and $((not_observed_count - 10)) more"
                 echo -e "  ${DIM}Observation only: lack of activation is not a removal verdict.${NC}"
             else
                 echo -e "  ${GREEN}✓${NC} All installed skills have been observed at least once"

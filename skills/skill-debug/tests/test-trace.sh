@@ -65,6 +65,10 @@ run_tests() {
     has_skill_name=$(grep -c '"test-skill"' "$skill_file")
     assert_eq "Correct skill name in trace" "1" "$has_skill_name"
 
+    local has_canary_kind
+    has_canary_kind=$(grep -c '"trace_kind":"canary"' "$skill_file")
+    assert_eq "Trace is labeled as canary" "1" "$has_canary_kind"
+
     # Frontmatter should still be intact
     local fm_start
     fm_start=$(head -1 "$skill_file")

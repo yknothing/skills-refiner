@@ -10,19 +10,19 @@ Four skills across two layers:
 
 **Governance & Observability** — health and visibility:
 3. **`skill-hygiene`** — evaluate health, quality, and topology of installed skills (AI judges; shell scripts collect facts)
-4. **`skill-debug`** — three-layer observability: discovery diagnostics, activation tracing, effectiveness dashboards
+4. **`skill-debug`** — three-layer observability: local discovery diagnostics, activation canary tracing, effectiveness dashboards
 
 ## Why this exists
 
 Agent skills grow fast and degrade silently. Most skill ecosystems face two intertwined problems:
 
 1. **No deep design review.** Skills pass assertion tests but suffer from scope creep, poor context engineering, or hidden fragility. Surface-level praise or criticism does not help.
-2. **No operational visibility.** Users install dozens of skills across multiple agent directories and have no way to tell which are discovered, activated, effective, stale, or broken.
+2. **No operational visibility.** Users install dozens of skills across multiple agent directories and have no way to tell which are locally visible, observed in use, effective, stale, or broken.
 
 This repository addresses both:
 
 - `skills-refiner` and `skills-appreciation` handle the **analysis** problem — deep design audit and publishable interpretation.
-- `skill-hygiene` and `skill-debug` handle the **governance** problem — topology scanning, fact collection, activation tracing, and usage analytics.
+- `skill-hygiene` and `skill-debug` handle the **governance** problem — topology scanning, version/provenance fact collection, activation canary tracing, and usage analytics.
 
 Together with `skill-creator` (the official Claude skill-creation tool), they form a complete skill lifecycle: creation → testing → design audit → governance → observability → interpretation.
 
@@ -53,7 +53,7 @@ This skill is interpretation-oriented. It does **not** force engineering-style c
 Use when you need to:
 - audit the health and quality of installed skills across all agent directories;
 - identify broken symlinks, backup remnants, security indicators, stale or stub skills;
-- understand the skill topology: canonical sources, symlinked distributions, native agent skills;
+- understand the skill topology: canonical sources, symlinked distributions, native agent skills, same-name content/version collisions;
 - get a structured inventory for governance review.
 
 This skill follows the "AI judges, scripts collect" philosophy. The shell script (`bin/skill-scan.sh`) gathers structured facts; the AI applies expert judgment. It respects the standard skill installation model: skills installed to `~/.agents/skills/` and symlinked to agent directories are distribution links, not duplicates.
@@ -62,9 +62,9 @@ This skill follows the "AI judges, scripts collect" philosophy. The shell script
 
 Use when you cannot tell whether a skill was discovered, loaded, or followed by the agent. Three layers:
 
-- **Discovery diagnostics** (`skill-probe`) — what skills can the agent see from the current working directory?
-- **Activation tracing** (`skill-trace`) — inject/remove lightweight canary blocks to track when skills are actually used.
-- **Effectiveness dashboard** (`skill-dashboard`) — usage frequency, zombie detection, context distribution, active rate.
+- **Discovery diagnostics** (`skill-probe`) — what local skill surfaces are likely discoverable from the current working directory?
+- **Activation canary tracing** (`skill-trace`) — inject/remove lightweight canary blocks to observe when agents follow skills.
+- **Effectiveness dashboard** (`skill-dashboard`) — usage frequency, not-observed skill detection, context distribution, active rate.
 
 Combine with `skill-hygiene` for a full governance workflow: probe discovery → check usage → evaluate quality → triage.
 
@@ -86,7 +86,7 @@ Across all four skills:
 - A strong appreciation piece must combine the rigor of a technical blog, the clarity of a teaching text, and the readability of a publishable article.
 
 **Governance & Observability:**
-- No false alarms. A skill with zero activations may simply not have been needed — "zombie" is an observation, not a verdict.
+- No false alarms. A skill with zero observed activations may simply not have been needed. Treat "not observed" as an observation, not a verdict.
 - All operations are reversible. Trace injection can be stripped. Scans are read-only. Dashboard never modifies skill files.
 - All data stays local. No data is sent externally.
 

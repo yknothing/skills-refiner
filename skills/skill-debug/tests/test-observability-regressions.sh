@@ -74,6 +74,7 @@ run_probe_regression() {
     output=$(HOME="$sandbox" bash "$PROBE_SCRIPT" --cwd "$sandbox" --verbose 2>&1)
     assert_contains "Acknowledges same canonical source" "$output" "resolves to one canonical source"
     assert_contains "Reports no conflict" "$output" "No name conflicts detected"
+    assert_contains "Probe uses best-effort language" "$output" "best-effort local filesystem diagnostic"
     assert_not_contains "Does not report canonical conflict" "$output" "same skill name resolves to different canonical sources"
 
     rm -rf "$sandbox"
@@ -92,7 +93,7 @@ run_dashboard_regression() {
     local now_ts
     now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     cat > "$sandbox/.agents/debug/activation.jsonl" << EOF
-{"event":"skill_activated","skill":"shared-skill","ts":"$now_ts","cwd":"$sandbox/project"}
+{"event":"skill_canary_observed","trace_kind":"canary","skill":"shared-skill","ts":"$now_ts","cwd":"$sandbox/project"}
 EOF
 
     local json_output

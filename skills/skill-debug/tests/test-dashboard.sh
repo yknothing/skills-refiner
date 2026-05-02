@@ -63,7 +63,7 @@ EOF
     cat > "$SANDBOX/.agents/skills/skill-c/SKILL.md" << 'EOF'
 ---
 name: skill-c
-description: Test skill C (never activated — zombie).
+    description: Test skill C (never observed activated).
 ---
 # skill-c
 EOF
@@ -74,10 +74,10 @@ EOF
     now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     cat > "$SANDBOX/.agents/debug/activation.jsonl" << LOGEOF
-{"event":"skill_activated","skill":"skill-a","ts":"$now_ts","cwd":"/tmp/project-x"}
-{"event":"skill_activated","skill":"skill-a","ts":"$now_ts","cwd":"/tmp/project-x"}
-{"event":"skill_activated","skill":"skill-a","ts":"$now_ts","cwd":"/tmp/project-y"}
-{"event":"skill_activated","skill":"skill-b","ts":"$now_ts","cwd":"/tmp/project-x"}
+{"event":"skill_canary_observed","trace_kind":"canary","skill":"skill-a","ts":"$now_ts","cwd":"/tmp/project-x"}
+{"event":"skill_canary_observed","trace_kind":"canary","skill":"skill-a","ts":"$now_ts","cwd":"/tmp/project-x"}
+{"event":"skill_canary_observed","trace_kind":"canary","skill":"skill-a","ts":"$now_ts","cwd":"/tmp/project-y"}
+{"event":"skill_canary_observed","trace_kind":"canary","skill":"skill-b","ts":"$now_ts","cwd":"/tmp/project-x"}
 LOGEOF
 }
 
@@ -123,7 +123,7 @@ EOF
     assert_contains "Shows overview section" "$term_output" "Overview"
     assert_contains "Shows total activations" "$term_output" "Total activations"
     assert_contains "Shows hot skills" "$term_output" "Hot Skills"
-    assert_contains "Shows zombie section" "$term_output" "Zombie"
+    assert_contains "Shows not-observed section" "$term_output" "Not Observed Skills"
 
     echo ""
 
@@ -146,15 +146,15 @@ EOF
 
     echo ""
 
-    # Test 4: Zombie detection
-    echo -e "${BOLD}── Zombie Detection ──${NC}"
-    local zombies
-    zombies=$(echo "$json_output" | jq -r '.zombie_skills[]' 2>/dev/null)
-    assert_contains "skill-c is a zombie" "$zombies" "skill-c"
+    # Test 4: Not-observed detection
+    echo -e "${BOLD}── Not Observed Detection ──${NC}"
+    local not_observed
+    not_observed=$(echo "$json_output" | jq -r '.not_observed_skills[]' 2>/dev/null)
+    assert_contains "skill-c is not observed" "$not_observed" "skill-c"
 
-    local zombie_count
-    zombie_count=$(echo "$json_output" | jq '.zombie_skills | length')
-    assert_eq "Exactly 1 zombie" "1" "$zombie_count"
+    local not_observed_count
+    not_observed_count=$(echo "$json_output" | jq '.not_observed_skills | length')
+    assert_eq "Exactly 1 not-observed skill" "1" "$not_observed_count"
 
     echo ""
 

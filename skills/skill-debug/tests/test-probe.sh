@@ -95,6 +95,17 @@ description: Use when testing project-level skill discovery.
 A project-level skill.
 EOF
 
+    mkdir -p "$SANDBOX/projects/my-app/packages/frontend/.claude/skills/nested-tool"
+    cat > "$SANDBOX/projects/my-app/packages/frontend/.claude/skills/nested-tool/SKILL.md" << 'EOF'
+---
+name: nested-tool
+description: Use when testing nested project skill discovery surfaces.
+---
+
+# nested-tool
+A nested package-level skill.
+EOF
+
     # Name conflict: same name in two locations
     mkdir -p "$SANDBOX/.codex/skills/global-skill"
     cat > "$SANDBOX/.codex/skills/global-skill/SKILL.md" << 'EOF'
@@ -128,6 +139,7 @@ run_tests() {
     assert_contains "Finds global-skill" "$output" "global-skill"
     assert_contains "Finds claude-native" "$output" "claude-native"
     assert_contains "Shows global count" "$output" "Global Skills"
+    assert_contains "States best-effort local mode" "$output" "best-effort local filesystem diagnostic"
 
     echo ""
 
@@ -138,6 +150,10 @@ run_tests() {
 
     assert_contains "Finds project-tool" "$project_output" "project-tool"
     assert_contains "Shows project skills section" "$project_output" "Project-Level Skills"
+
+    local nested_output
+    nested_output=$(HOME="$SANDBOX" bash "$PROBE_SCRIPT" --cwd "$SANDBOX/projects/my-app/packages/frontend" 2>&1)
+    assert_contains "Finds nested project skill" "$nested_output" "nested-tool"
 
     echo ""
 

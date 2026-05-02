@@ -5,20 +5,20 @@ description: Use when you cannot tell whether a skill was discovered, loaded, or
 
 # skill-debug
 
-You are a skill observability advisor. Your job is to help users understand whether their skills are actually working — are they discovered, loaded, activated, and effective?
+You are a skill observability advisor. Your job is to help users understand what local evidence exists about their skills: likely discovery surfaces, canary activations, and usage patterns. Do not overstate these signals as platform-level proof of loading or effectiveness.
 
 ## Philosophy
 
 1. **Observe, don't assume.** The tools collect facts about skill discovery and activation. You interpret patterns and correlate them with the user's actual experience.
 2. **Respect the topology.** Skills are installed to `~/.agents/skills/` and symlinked to agent directories. Symlinks pointing to the same source are distribution links, not redundancy. The probe must distinguish symlinks from real duplicates.
-3. **No false alarms.** A skill that hasn't been activated may simply not have been needed. "Zombie" is an observation, not a verdict. Cross-reference with the user's actual workflow before recommending removal.
+3. **No false alarms.** A skill with no observed activation may simply not have been needed. "Not observed" is an observation, not a verdict. Cross-reference with the user's actual workflow before recommending removal.
 
 ## The Problem
 
-Agent skills are "fire and forget" by design. You install them, hope the agent finds them, and have no way to verify:
-- Was the skill discovered by the agent?
-- Was it loaded into the conversation context?
-- Did the agent actually follow its instructions?
+Agent skills are "fire and forget" by design. You install them, hope the agent finds them, and have limited ways to verify:
+- Is the skill present on a local discovery surface this diagnostic knows how to scan?
+- Was the canary command observed during a skill-guided run?
+- Did the agent appear to follow the skill's instructions?
 - How often is it used vs. sitting idle?
 
 This skill provides a three-layer debug architecture to collect evidence for these questions. You apply judgment.
@@ -26,7 +26,7 @@ This skill provides a three-layer debug architecture to collect evidence for the
 ## Quick Start
 
 ```bash
-# Layer 1: What skills can the agent see right now?
+# Layer 1: What local skill surfaces are likely discoverable right now?
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 
 # Layer 2: Inject activation tracing into skills
@@ -40,24 +40,24 @@ bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh
 
 ### Layer 1: Discovery Diagnostics (`skill-probe`)
 
-Answers: "What skills CAN the agent see from here?"
+Answers: "Which local skill files are on likely discovery surfaces from here?"
 
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh [--cwd /path/to/project] [--verbose]
 ```
 
 What it does:
-- Scans all 10 Warp-supported skill directories (`.warp/skills/`, `.agents/skills/`, `.claude/skills/`, `.codex/skills/`, `.cursor/skills/`, `.gemini/skills/`, `.copilot/skills/`, `.factory/skills/`, `.github/skills/`, `.opencode/skills/`)
+- Scans common local skill directories (`.warp/skills/`, `.agents/skills/`, `.claude/skills/`, `.codex/skills/`, `.cursor/skills/`, `.gemini/skills/`, `.copilot/skills/`, `.factory/skills/`, `.github/skills/`, `.opencode/skills/`)
 - Checks both project-level (cwd → repo root) and global (`~/`) locations
 - Reports skill name conflicts (same name, different paths)
-- Shows discovery priority order
+- Shows the diagnostic's discovery priority order
 - Validates frontmatter is parseable
 
-Output: color-coded terminal report showing discovered skills with priority ranking.
+Output: color-coded terminal report showing local skill files this diagnostic can see. Platform-specific runtime discovery can differ.
 
 ### Layer 2: Activation Tracing (`skill-trace`)
 
-Answers: "Was this skill actually loaded and executed?"
+Answers: "Did the agent follow the injected canary command for this skill?"
 
 ```bash
 # Inject trace into one skill
@@ -77,22 +77,23 @@ How it works:
 - Injects a lightweight "canary" preamble block into skills:
 
 ```markdown
-## Activation Trace (auto-injected by skill-debug)
+## Activation Canary Trace (auto-injected by skill-debug)
 <!-- SKILL-DEBUG-TRACE-START -->
-When this skill is activated, run this command first:
+When this skill is used, run this canary command first:
 \`\`\`bash
-echo '{"event":"skill_activated","skill":"SKILL_NAME","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'","agent":"'${AGENT_NAME:-unknown}'"}' >> ~/.agents/debug/activation.jsonl
+echo '{"event":"skill_canary_observed","trace_kind":"canary","skill":"SKILL_NAME","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'","agent":"'${AGENT_NAME:-unknown}'"}' >> ~/.agents/debug/activation.jsonl
 \`\`\`
 <!-- SKILL-DEBUG-TRACE-END -->
 ```
 
-- The trace is a standard bash block that agents naturally execute when following skill instructions
+- The trace is a standard bash block that can be observed if the agent follows the injected instruction
 - Minimal overhead: one `echo` append per activation
 - All traces are clearly marked for easy removal
+- Presence means the canary command was followed. Absence is inconclusive; it is not proof that the skill was not discovered, loaded, or useful.
 
 ### Layer 3: Effectiveness Dashboard (`skill-dashboard`)
 
-Answers: "Which skills are actually being used, and which are zombies?"
+Answers: "Which skills have observed canary activations, and which have not been observed?"
 
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh [--json] [--days 30]
@@ -103,7 +104,7 @@ What it reports:
 - **Last activation** — when each skill was last used
 - **Context distribution** — which projects/directories trigger which skills
 - **Active rate** — installed skills vs. actually-used skills ratio
-- **Zombie list** — installed skills with zero activations
+- **Not-observed list** — installed skills with zero recorded canary activations
 - **Hot skills** — most frequently used skills
 
 ## Comprehensive Health Check
@@ -121,19 +122,19 @@ The `--doctor` mode combines:
 ## Interpreting Results
 
 ### Discovery Issues
-- **"Skill not in discovery path"** — Skill exists but agent won't find it from current cwd
+- **"Skill not in discovery path"** — Skill exists outside the local paths this diagnostic scans from the current cwd
 - **"Name conflict"** — Two+ skills with same name; agent picks by priority, may get wrong one
 - **"Invalid frontmatter"** — Agent may skip skill due to parse error
 
 ### Activation Issues
-- **Zero activations after 7+ days** — Skill may not be triggering; check description quality
-- **Activated but not followed** — Description triggers loading but instructions are unclear
-- **High activation, low effectiveness** — Skill is found but may need design improvements
+- **Zero observed canaries after 7+ days** — Skill may not be triggering, may not have been needed, or the canary may not have been followed
+- **Observed canary but weak output** — Skill instructions may be unclear or too broad
+- **High canary count, low effectiveness** — Skill is likely being invoked but may need design improvements
 
 ### Usage Patterns
-- **Active rate < 30%** — Too many skills installed; consider cleanup with `skill-hygiene`
-- **Single-project skills in global path** — Should be moved to project-level
-- **Global skills never used** — Candidates for archival
+- **Active rate < 30%** — Low observed usage; review workflow context with `skill-hygiene`
+- **Single-project skills in global path** — Review whether project-level scope would be clearer
+- **Global skills not observed** — Advisory candidates for human review, not automatic archival
 
 ## Guardrails
 

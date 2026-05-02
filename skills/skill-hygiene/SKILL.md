@@ -54,6 +54,14 @@ Options:
 
 The script outputs structured data. Your job is to **interpret** it.
 
+Key facts now include:
+- `frontmatter` — parsed name, description, license, compatibility, and declared version when present
+- `content_sha256` — local content identity for same-name comparison without network access
+- `freshness` — mtime, age, stale threshold, and `is_stale` as a signal
+- `provenance` — local source signals such as canonical-global, symlink-distribution, native-agent, and git remote when directly available
+- `risk_indicators` — structured review-required security signals
+- `name_collisions` — same-name real directories with distinct canonical paths, versions, or content hashes
+
 ## What to Analyze
 
 When reviewing scan results, apply your judgment across these dimensions. Not all apply to every skill — use the context.
@@ -105,6 +113,7 @@ Where did the skill come from?
 - Auto-generated (e.g., `.codex/memories/skills/`) — may be disposable
 - Hand-crafted by user — treat with extra care before recommending changes
 - Third-party (cursor built-in, etc.) — may have its own update mechanism
+- The scanner only reports local provenance signals. Treat missing source URLs or unknown package metadata as uncertainty, not failure.
 
 ## How to Present Results
 

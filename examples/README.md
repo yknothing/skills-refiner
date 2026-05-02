@@ -128,6 +128,7 @@ bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 Expected behavior:
 - scans all agent skill directories (`~/.agents/skills/`, `~/.claude/skills/`, etc.);
 - reports topology: native skills, symlinks, broken symlinks per directory;
+- records version, content hash, freshness, provenance, and same-name collision facts when available;
 - flags issues: missing frontmatter, backup remnants, security indicators, stale or stub skills;
 - outputs both terminal-friendly table and JSON report.
 
@@ -145,7 +146,7 @@ bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --json
 
 Feed the JSON to an AI advisor for expert judgment on the scan results.
 
-### 14) Discover what skills are visible from a project directory
+### 14) Inspect local skill discovery surfaces from a project directory
 
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --cwd ~/projects/my-app
@@ -183,7 +184,7 @@ bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh --days 7
 bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh --json --all
 ```
 
-Expected output: hot skills ranking, zombie skills (installed but never activated), active rate, context distribution.
+Expected output: hot skills ranking, not-observed skills (installed but no recorded canary), active rate, context distribution.
 
 ### 17) Combined health check
 
@@ -196,7 +197,7 @@ Combines discovery probe with activation log analysis and hygiene scan cross-ref
 ### 18) Full governance workflow
 
 ```text
-# Step 1: What skills can the agent see?
+# Step 1: What local skill surfaces are likely discoverable?
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 
 # Step 2: Which are actually being used?

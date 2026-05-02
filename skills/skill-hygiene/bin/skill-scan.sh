@@ -97,6 +97,22 @@ get_frontmatter() {
     ' "$file" 2>/dev/null | head -c 300
 }
 
+get_metadata_value() {
+    local file="$1" key="$2"
+    awk -v key="$key" '
+        NR == 1 && $0 == "---" { in_fm=1; next }
+        in_fm && $0 == "---" { exit }
+        in_fm && $0 == "metadata:" { in_meta=1; next }
+        in_meta && $0 ~ /^[^[:space:]]/ { exit }
+        in_meta && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
+            sub("^[[:space:]]+" key ":[[:space:]]*", "")
+            gsub(/^['\''\"]|['\''\"]$/, "")
+            print
+            exit
+        }
+    ' "$file" 2>/dev/null | head -c 300
+}
+
 count_content_words() {
     awk '
         NR == 1 && $0 == "---" { in_fm=1; next }
@@ -108,6 +124,51 @@ count_content_words() {
 get_mtime() {
     # GNU stat first, then BSD/macOS stat.
     stat -c "%Y" "$1" 2>/dev/null || stat -f "%m" "$1" 2>/dev/null || echo 0
+}
+
+iso_from_epoch() {
+    local epoch="$1"
+    date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo ""
+}
+
+hash_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+git_root_for_dir() {
+    local dir="$1"
+    command -v git >/dev/null 2>&1 || return 0
+    git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true
+}
+
+git_remote_for_root() {
+    local root="$1"
+    [ -z "$root" ] && return 0
+    git -C "$root" config --get remote.origin.url 2>/dev/null || true
+}
+
+git_branch_for_root() {
+    local root="$1"
+    [ -z "$root" ] && return 0
+    git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || true
+}
+
+source_kind_for_entry() {
+    local location="$1" entry_type="$2"
+    if [ "$entry_type" = "symlink" ]; then
+        echo "symlink_distribution"
+    elif [ "$location" = ".agents/skills" ]; then
+        echo "canonical_global"
+    else
+        echo "native_agent"
+    fi
 }
 
 resolve_symlink_target() {
@@ -195,11 +256,17 @@ scan_directory() {
         canonical_skill_file="$skill_file"
         [ ! -f "$skill_file" ] && continue
 
-        local name desc word_count mtime now age_days
+        local name desc license compatibility top_version metadata_version declared_version word_count mtime mtime_iso now age_days
         name=$(get_frontmatter "$skill_file" "name")
         desc=$(get_frontmatter "$skill_file" "description")
+        license=$(get_frontmatter "$skill_file" "license")
+        compatibility=$(get_frontmatter "$skill_file" "compatibility")
+        top_version=$(get_frontmatter "$skill_file" "version")
+        metadata_version=$(get_metadata_value "$skill_file" "version")
+        declared_version="${metadata_version:-$top_version}"
         word_count=$(count_content_words "$skill_file")
         mtime=$(get_mtime "$skill_file")
+        mtime_iso=$(iso_from_epoch "$mtime")
         now=$(date +%s)
         age_days=$(( (now - mtime) / 86400 ))
 
@@ -241,6 +308,16 @@ scan_directory() {
             flags_json=$(printf '%s\n' "${flags[@]}" | jq -R . | jq -s .)
         fi
 
+        local risk_json content_sha256 git_root git_remote git_branch source_kind
+        risk_json=$(printf '%s\n' "${flags[@]}" | jq -R 'select(. == "pipe_to_shell" or . == "dangerous_cmd" or . == "possible_secret") | {id: ., severity: "review_required"}' | jq -s .)
+        [ -z "$risk_json" ] && risk_json='[]'
+
+        content_sha256=$(hash_file "$skill_file")
+        git_root=$(git_root_for_dir "$canonical_dir")
+        git_remote=$(git_remote_for_root "$git_root")
+        git_branch=$(git_branch_for_root "$git_root")
+        source_kind=$(source_kind_for_entry "$dir_label" "$entry_type")
+
         local entry_json
         entry_json=$(jq -n \
             --arg name "${name:-$entry_name}" \
@@ -250,10 +327,24 @@ scan_directory() {
             --arg link_target "$link_target" \
             --arg source_skill_file "$source_skill_file" \
             --arg canonical_skill_file "$canonical_skill_file" \
+            --arg canonical_dir "$canonical_dir" \
             --arg desc "${desc:0:200}" \
+            --arg license "$license" \
+            --arg compatibility "$compatibility" \
+            --arg declared_version "$declared_version" \
+            --arg metadata_version "$metadata_version" \
+            --arg content_sha256 "$content_sha256" \
+            --arg mtime_iso "$mtime_iso" \
+            --arg source_kind "$source_kind" \
+            --arg git_root "$git_root" \
+            --arg git_remote "$git_remote" \
+            --arg git_branch "$git_branch" \
             --argjson words "$word_count" \
+            --argjson mtime "$mtime" \
             --argjson age "$age_days" \
+            --argjson stale_days "$STALE_DAYS" \
             --argjson flags "$flags_json" \
+            --argjson risks "$risk_json" \
             '{
                 name: $name,
                 dir_name: $dir_name,
@@ -262,9 +353,35 @@ scan_directory() {
                 link_target: $link_target,
                 source_skill_file: $source_skill_file,
                 canonical_skill_file: $canonical_skill_file,
+                canonical_dir: $canonical_dir,
                 description: $desc,
+                frontmatter: {
+                    name: $name,
+                    description: $desc,
+                    license: $license,
+                    compatibility: $compatibility,
+                    declared_version: $declared_version,
+                    metadata_version: $metadata_version
+                },
+                declared_version: $declared_version,
+                content_sha256: $content_sha256,
                 word_count: $words,
                 age_days: $age,
+                freshness: {
+                    mtime_epoch: $mtime,
+                    mtime_iso: $mtime_iso,
+                    age_days: $age,
+                    stale_threshold_days: $stale_days,
+                    is_stale: ($age > $stale_days)
+                },
+                provenance: {
+                    kind: $source_kind,
+                    source_url: $git_remote,
+                    git_root: $git_root,
+                    git_branch: $git_branch,
+                    confidence: (if $git_remote != "" then "direct" else "heuristic" end)
+                },
+                risk_indicators: $risks,
                 flags: $flags
             }')
 
@@ -286,7 +403,7 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" '{metadata:{scanned_at:$scanned_at, stale_days:$stale_days, scope:"agent-recognized-directories"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" '{metadata:{schema_version:"skill-scan.v2", scanned_at:$scanned_at, stale_days:$stale_days, scope:"agent-recognized-directories"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], name_collisions:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
@@ -312,6 +429,30 @@ main() {
             .broken_symlinks += [$d[] | select(.type == "broken_symlink")]
         ')
     done
+
+    all_data=$(echo "$all_data" | jq '
+        .name_collisions = (
+            .skills
+            | sort_by(.name)
+            | group_by(.name)
+            | map(select(length > 1) | {
+                name: .[0].name,
+                real_directory_count: length,
+                distinct_canonical_dirs: ([.[].canonical_dir] | unique | length),
+                distinct_versions: ([.[].declared_version | select(length > 0)] | unique),
+                distinct_hashes: ([.[].content_sha256 | select(length > 0)] | unique),
+                entries: [.[] | {
+                    location,
+                    canonical_dir,
+                    canonical_skill_file,
+                    declared_version,
+                    content_sha256,
+                    provenance
+                }]
+            })
+            | map(select(.distinct_canonical_dirs > 1 or (.distinct_versions | length) > 1 or (.distinct_hashes | length) > 1))
+        )
+    ')
 
     echo "$all_data" | jq '.' > "$REPORT_JSON"
 
@@ -339,6 +480,19 @@ main() {
     echo -e "  Native agent-specific skills:         ${BOLD}$((total_skills - canonical_count))${NC}"
     echo -e "  Total unique real-directory skills:   ${BOLD}$total_skills${NC}"
     echo -e "  Symlink distribution links:           ${BOLD}$link_count${NC}"
+    echo ""
+
+    echo -e "${BOLD}── Provenance Signals ──${NC}"
+    echo "$all_data" | jq -r '.skills | group_by(.provenance.kind) | .[] | "\(.[0].provenance.kind)|\(length)"' | while IFS='|' read -r kind count; do
+        printf "  %-24s %3d\n" "$kind" "$count"
+    done
+    local collision_count
+    collision_count=$(echo "$all_data" | jq '.name_collisions | length')
+    if [ "$collision_count" -gt 0 ]; then
+        echo -e "  ${YELLOW}Name/version/content collisions:${NC} $collision_count"
+    else
+        echo "  Name/version/content collisions: 0"
+    fi
     echo ""
 
     local flagged flagged_count

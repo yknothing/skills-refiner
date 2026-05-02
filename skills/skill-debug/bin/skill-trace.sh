@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# skill-trace.sh — Skill activation trace injection/removal
-# Injects lightweight canary blocks into skills to track when they are activated.
+# skill-trace.sh — Skill activation canary injection/removal
+# Injects lightweight canary blocks into skills to observe when agents follow them.
 #
 # Usage:
 #   bash skill-trace.sh --inject <SKILL.md>      # Inject trace into one skill
@@ -65,11 +65,11 @@ inject_trace() {
     local trace_block
     trace_block=$(cat << 'TRACEEOF'
 
-## Activation Trace (auto-injected by skill-debug)
+## Activation Canary Trace (auto-injected by skill-debug)
 <!-- SKILL-DEBUG-TRACE-START -->
-When this skill is activated, run this command first:
+When this skill is used, run this canary command first:
 ```bash
-mkdir -p ~/.agents/debug && echo '{"event":"skill_activated","skill":"__SKILL_NAME__","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
+mkdir -p ~/.agents/debug && echo '{"event":"skill_canary_observed","trace_kind":"canary","skill":"__SKILL_NAME__","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
 ```
 <!-- SKILL-DEBUG-TRACE-END -->
 TRACEEOF
@@ -123,7 +123,7 @@ strip_trace() {
     local tmp
     tmp=$(mktemp)
     awk '
-        /## Activation Trace \(auto-injected/ { skip=1; next }
+        /## Activation (Canary )?Trace \(auto-injected/ { skip=1; next }
         /<!-- SKILL-DEBUG-TRACE-START -->/ { skip=1; next }
         /<!-- SKILL-DEBUG-TRACE-END -->/ { skip=0; next }
         !skip { print }
