@@ -92,6 +92,11 @@ Across all four skills:
 - All operations are reversible. Trace injection can be stripped. Scans never modify skill files; use `--json` or `--no-write` for stdout-only/no-report runs. Dashboard never modifies skill files.
 - All data stays local. No data is sent externally.
 
+**Statistics accuracy contract:**
+- Exact local statistics: skill file inventory, canonical paths, symlink distribution links, broken symlinks, content hashes, same-name/content/version collisions, report freshness, and recorded canary JSONL events.
+- Proxy statistics: canary observed rate, not-observed identities, cwd distribution, and observation frequency. These count local evidence, not true runtime use.
+- Out of scope without native telemetry: whether an agent discovered, loaded, obeyed, or benefited from a skill in a real conversation.
+
 ## Installation
 
 Install with the [skills CLI](https://github.com/vercel-labs/skills):

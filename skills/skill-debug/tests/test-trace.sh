@@ -77,9 +77,9 @@ run_tests() {
     has_identity_key=$(grep -c '"identity_key":"' "$skill_file")
     assert_eq "Trace records identity key" "1" "$has_identity_key"
 
-    local has_canonical_file
-    has_canonical_file=$(grep -c '"canonical_skill_file":"' "$skill_file")
-    assert_eq "Trace records canonical file" "1" "$has_canonical_file"
+    local has_snapshot_fields
+    has_snapshot_fields=$(grep -Ec '"canonical_skill_file"|"canonical_dir"|"content_sha256"|"declared_version"|"provenance_kind"|"entry_path"' "$skill_file" || true)
+    assert_eq "Trace omits inventory snapshot fields" "0" "$has_snapshot_fields"
 
     # Frontmatter should still be intact
     local fm_start

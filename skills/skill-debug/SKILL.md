@@ -49,6 +49,10 @@ Prefer native agent signals when they exist. This skill fills the local evidence
 | OpenAI Agents SDK | App-workflow tracing for SDK runs: generations, tools, handoffs, guardrails, custom spans | Separate SDK signal; not evidence of Codex/IDE skill loading |
 | Cursor | Rules, memories, MCP config, Agent Skills, and agent terminal context | Report local rules/skills/MCP presence; no documented full trace exporter is assumed |
 
+### Accuracy Contract
+
+This skill can produce accurate counts for local evidence: discoverable files on scanned paths, canonical skill identities, symlink distributions, broken links, and recorded canary JSONL events. It cannot accurately count true discovery, loading, obedience, or usefulness unless the platform exports those runtime events. Without native telemetry, canary statistics are proxy observations only.
+
 ### Layer 1: Discovery Diagnostics (`skill-probe`)
 
 Answers: "Which local skill files are on likely discovery surfaces from here?"
@@ -115,7 +119,7 @@ What it reports:
 - **Canary event frequency** — observed canary event count per skill identity
 - **Last observed canary** — most recent recorded canary timestamp
 - **Context distribution** — cwd distribution for recorded canary events
-- **Observed rate** — installed skill identities vs. identities with observed canary events
+- **Canary observed identity rate** — installed skill identities vs. identities with recorded canary events
 - **Not-observed list** — installed skill identities with zero recorded canary events
 - **Most observed skills** — identities with the most observed canary events
 
@@ -145,7 +149,7 @@ The `--doctor` mode combines:
 - **High canary count, weak output** — Skill may be followed often but still need design improvements
 
 ### Usage Patterns
-- **Observed rate < 30%** — Low canary observation; review workflow context with `skill-hygiene`
+- **Canary observed identity rate < 30%** — Low canary observation; review workflow context with `skill-hygiene`
 - **Single-project skills in global path** — Review whether project-level scope would be clearer
 - **Global skills not observed** — Advisory candidates for human review, not automatic archival
 

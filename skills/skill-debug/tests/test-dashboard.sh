@@ -115,19 +115,17 @@ EOF
     mkdir -p "$SANDBOX/.agents/debug"
     local now_ts
     now_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local skill_a_file skill_b_file skill_a_id skill_b_id skill_a_hash skill_b_hash
+    local skill_a_file skill_b_file skill_a_id skill_b_id
     skill_a_file=$(canonical_file "$SANDBOX/.agents/skills/skill-a/SKILL.md")
     skill_b_file=$(canonical_file "$SANDBOX/.agents/skills/skill-b/SKILL.md")
     skill_a_id=$(identity_for "$skill_a_file")
     skill_b_id=$(identity_for "$skill_b_file")
-    skill_a_hash=$(hash_file "$skill_a_file")
-    skill_b_hash=$(hash_file "$skill_b_file")
 
     cat > "$SANDBOX/.agents/debug/activation.jsonl" << LOGEOF
-{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"skill-a","skill_name":"skill-a","identity_key":"$skill_a_id","canonical_skill_file":"$skill_a_file","content_sha256":"$skill_a_hash","ts":"$now_ts","cwd":"/tmp/project-x"}
-{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"skill-a","skill_name":"skill-a","identity_key":"$skill_a_id","canonical_skill_file":"$skill_a_file","content_sha256":"$skill_a_hash","ts":"$now_ts","cwd":"/tmp/project-x"}
-{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"skill-a","skill_name":"skill-a","identity_key":"$skill_a_id","canonical_skill_file":"$skill_a_file","content_sha256":"$skill_a_hash","ts":"$now_ts","cwd":"/tmp/project-y"}
-{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"skill-b","skill_name":"skill-b","identity_key":"$skill_b_id","canonical_skill_file":"$skill_b_file","content_sha256":"$skill_b_hash","ts":"$now_ts","cwd":"/tmp/project-x"}
+{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"skill-a","identity_key":"$skill_a_id","ts":"$now_ts","cwd":"/tmp/project-x"}
+{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"skill-a","identity_key":"$skill_a_id","ts":"$now_ts","cwd":"/tmp/project-x"}
+{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"skill-a","identity_key":"$skill_a_id","ts":"$now_ts","cwd":"/tmp/project-y"}
+{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"skill-b","identity_key":"$skill_b_id","ts":"$now_ts","cwd":"/tmp/project-x"}
 LOGEOF
 }
 
@@ -190,9 +188,13 @@ EOF
     total_events=$(echo "$json_output" | jq '.total_events')
     assert_eq "Total events is 4" "4" "$total_events"
 
-    local active_count
-    active_count=$(echo "$json_output" | jq '.active_skills')
-    assert_eq "Active skills is 2" "2" "$active_count"
+    local observed_count
+    observed_count=$(echo "$json_output" | jq '.observed_canary_identities')
+    assert_eq "Observed canary identities is 2" "2" "$observed_count"
+
+    local observed_rate
+    observed_rate=$(echo "$json_output" | jq '.canary_observed_identity_rate_pct')
+    assert_eq "Canary observed identity rate is 50%" "50" "$observed_rate"
 
     local installed_count
     installed_count=$(echo "$json_output" | jq '.installed_skills')

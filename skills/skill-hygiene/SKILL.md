@@ -55,6 +55,8 @@ Options:
 
 The script outputs structured data. Your job is to **interpret** it.
 
+Accurate local statistics are limited to facts the filesystem can prove: skill file counts, canonical paths, symlink links, broken links, content hashes, source remotes when Git exposes them, and name/content/version collisions. Runtime usage and effectiveness remain outside the scanner; combine with native telemetry or `skill-debug` canary evidence.
+
 Key facts now include:
 - `frontmatter` — OpenAI/Codex-compatible discovery contract: name and description, plus capped description metadata
 - `claude_code` — bounded Claude Code invocation signals such as model/user invocation controls, tool/path counts, and hook event names

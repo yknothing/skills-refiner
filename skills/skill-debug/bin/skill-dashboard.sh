@@ -226,7 +226,7 @@ main() {
     local total_events
     total_events=$(echo "$filtered_log" | jq -r '.skill // .skill_name // empty' 2>/dev/null | grep -c . 2>/dev/null || echo 0)
 
-    local filtered_json observed_identities active_count active_rate frequency_json context_json not_observed_json legacy_ambiguous_json
+    local filtered_json observed_identities observed_count observed_rate frequency_json context_json not_observed_json legacy_ambiguous_json
     filtered_json=$(echo "$filtered_log" | jq -s '.')
     observed_identities=$(jq -n --argjson installed "$installed" --argjson events "$filtered_json" '
         def name_counts:
@@ -248,11 +248,11 @@ main() {
             )
         })
     ')
-    active_count=$(echo "$observed_identities" | jq '[.[] | select(.observed)] | length')
+    observed_count=$(echo "$observed_identities" | jq '[.[] | select(.observed)] | length')
 
-    active_rate=0
+    observed_rate=0
     if [ "$installed_count" -gt 0 ]; then
-        active_rate=$((active_count * 100 / installed_count))
+        observed_rate=$((observed_count * 100 / installed_count))
     fi
 
     frequency_json=$(jq -n --argjson events "$filtered_json" '
@@ -279,8 +279,8 @@ main() {
         jq -n \
             --argjson total_events "$total_events" \
             --argjson installed_count "$installed_count" \
-            --argjson active_count "$active_count" \
-            --argjson active_rate "$active_rate" \
+            --argjson observed_count "$observed_count" \
+            --argjson observed_rate "$observed_rate" \
             --argjson days "$DAYS" \
             --argjson installed "$observed_identities" \
             --argjson frequency "$frequency_json" \
@@ -292,8 +292,8 @@ main() {
                 period_days: $days,
                 total_events: $total_events,
                 installed_skills: $installed_count,
-                active_skills: $active_count,
-                active_rate_pct: $active_rate,
+                observed_canary_identities: $observed_count,
+                canary_observed_identity_rate_pct: $observed_rate,
                 installed_identities: $installed,
                 frequency: $frequency,
                 not_observed_skills: $observations,
@@ -322,15 +322,15 @@ main() {
     echo -e "${BOLD}── Overview ──${NC}"
     echo -e "  Total canary events: ${BOLD}$total_events${NC}"
     echo -e "  Installed skill identities:  $installed_count"
-    echo -e "  Observed skill identities:   $active_count"
+    echo -e "  Observed canary identities:  $observed_count"
 
-    # Active rate with conservative interpretation
-    if [ "$active_rate" -ge 60 ]; then
-        echo -e "  Observed rate:     ${GREEN}${active_rate}%${NC}"
-    elif [ "$active_rate" -ge 30 ]; then
-        echo -e "  Observed rate:     ${YELLOW}${active_rate}%${NC}"
+    # Canary observation rate with conservative interpretation
+    if [ "$observed_rate" -ge 60 ]; then
+        echo -e "  Canary observed identity rate: ${GREEN}${observed_rate}%${NC}"
+    elif [ "$observed_rate" -ge 30 ]; then
+        echo -e "  Canary observed identity rate: ${YELLOW}${observed_rate}%${NC}"
     else
-        echo -e "  Observed rate:     ${YELLOW}${active_rate}%${NC} (low canary observation; review context before acting)"
+        echo -e "  Canary observed identity rate: ${YELLOW}${observed_rate}%${NC} (low canary observation; review context before acting)"
     fi
     echo ""
 

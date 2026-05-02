@@ -101,7 +101,7 @@ EOF
     echo "$json_output" | jq . >/dev/null 2>&1
     assert_eq "Dashboard JSON is valid" "0" "$?"
     assert_eq "Symlinked/canonical skill counted once" "1" "$(echo "$json_output" | jq '.installed_skills')"
-    assert_eq "Observed skill counted active" "1" "$(echo "$json_output" | jq '.active_skills')"
+    assert_eq "Observed skill counted as canary-observed" "1" "$(echo "$json_output" | jq '.observed_canary_identities')"
     assert_contains "JSON preserves conservative note" "$json_output" "not a removal verdict"
 
     local text_output

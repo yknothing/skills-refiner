@@ -202,18 +202,6 @@ hook_events_json() {
     ' "$file" 2>/dev/null | jq -R 'select(length > 0)' | jq -s 'unique'
 }
 
-yaml_scalar() {
-    local file="$1" key="$2"
-    awk -v key="$key" '
-        $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
-            sub("^[[:space:]]*" key ":[[:space:]]*", "")
-            gsub(/^['\''\"]|['\''\"]$/, "")
-            print
-            exit
-        }
-    ' "$file" 2>/dev/null | head -c 300
-}
-
 yaml_section_scalar() {
     local file="$1" section="$2" key="$3"
     awk -v section="$section" -v key="$key" '
@@ -444,7 +432,7 @@ scan_directory() {
 
         local when_to_use when_to_use_preview disable_model_invocation user_invocable model effort context agent shell_value
         local allowed_tools_json paths_json hook_events_json_value has_hooks extra_keys_json fm_keys_json openai_yaml openai_yaml_exists
-        local display_name short_description default_prompt icon_path icon_paths_exist default_prompt_mentions_skill allow_implicit_invocation tool_dependencies_count
+        local allow_implicit_invocation tool_dependencies_count
         local desc_length desc_truncated when_to_use_length when_to_use_truncated allowed_tools_count paths_count
 
         when_to_use=$(get_frontmatter_text "$skill_file" "when_to_use")
@@ -475,35 +463,12 @@ scan_directory() {
 
         openai_yaml="$canonical_dir/agents/openai.yaml"
         openai_yaml_exists=false
-        display_name=""
-        short_description=""
-        default_prompt=""
-        icon_path=""
-        icon_paths_exist=null
-        default_prompt_mentions_skill=false
         allow_implicit_invocation=""
         tool_dependencies_count=0
         if [ -f "$openai_yaml" ]; then
             openai_yaml_exists=true
-            display_name=$(yaml_section_scalar "$openai_yaml" "interface" "display_name")
-            [ -z "$display_name" ] && display_name=$(yaml_scalar "$openai_yaml" "display_name")
-            short_description=$(yaml_section_scalar "$openai_yaml" "interface" "short_description")
-            [ -z "$short_description" ] && short_description=$(yaml_scalar "$openai_yaml" "short_description")
-            default_prompt=$(yaml_section_scalar "$openai_yaml" "interface" "default_prompt")
-            [ -z "$default_prompt" ] && default_prompt=$(yaml_scalar "$openai_yaml" "default_prompt")
-            icon_path=$(yaml_section_scalar "$openai_yaml" "interface" "icon_small")
-            [ -z "$icon_path" ] && icon_path=$(yaml_section_scalar "$openai_yaml" "interface" "icon_large")
-            [ -z "$icon_path" ] && icon_path=$(yaml_scalar "$openai_yaml" "icon_path")
-            [ -z "$icon_path" ] && icon_path=$(yaml_scalar "$openai_yaml" "icon")
             allow_implicit_invocation=$(yaml_section_scalar "$openai_yaml" "policy" "allow_implicit_invocation")
             tool_dependencies_count=$(yaml_sequence_count "$openai_yaml" "tools")
-            if [ -n "$default_prompt" ] && [ -n "$name" ] && printf '%s' "$default_prompt" | grep -q "$name"; then
-                default_prompt_mentions_skill=true
-            fi
-            if [ -n "$icon_path" ]; then
-                icon_paths_exist=false
-                [ -f "$canonical_dir/$icon_path" ] || [ -f "$canonical_dir/agents/$icon_path" ] && icon_paths_exist=true
-            fi
         fi
 
         local entry_json
@@ -533,8 +498,6 @@ scan_directory() {
             --arg context "$context" \
             --arg agent "$agent" \
             --arg shell "$shell_value" \
-            --arg display_name "$display_name" \
-            --arg short_description "$short_description" \
             --arg allow_implicit_invocation "$allow_implicit_invocation" \
             --argjson words "$word_count" \
             --argjson mtime "$mtime" \
@@ -552,8 +515,6 @@ scan_directory() {
             --argjson hook_events "$hook_events_json_value" \
             --argjson extra_keys "$extra_keys_json" \
             --argjson openai_yaml_exists "$openai_yaml_exists" \
-            --argjson default_prompt_mentions_skill "$default_prompt_mentions_skill" \
-            --argjson icon_paths_exist "$icon_paths_exist" \
             --argjson tool_dependencies_count "$tool_dependencies_count" \
             --argjson flags "$flags_json" \
             --argjson risks "$risk_json" \
@@ -595,12 +556,8 @@ scan_directory() {
                 openai: {
                     skill_md_contract: "name_description_only",
                     openai_yaml_exists: $openai_yaml_exists,
-                    display_name: $display_name,
-                    short_description: $short_description,
                     allow_implicit_invocation: $allow_implicit_invocation,
-                    tool_dependencies_count: $tool_dependencies_count,
-                    default_prompt_mentions_skill: $default_prompt_mentions_skill,
-                    icon_paths_exist: $icon_paths_exist
+                    tool_dependencies_count: $tool_dependencies_count
                 },
                 extra_frontmatter_keys: $extra_keys,
                 declared_version: $declared_version,
