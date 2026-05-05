@@ -2,6 +2,10 @@
 
 A skill governance toolkit for analyzing, interpreting, evaluating, and debugging agent skills systems.
 
+Version 1.0 focused on design judgment after skill creation: whether a single skill is well positioned, scoped, portable, and context-efficient.
+
+Version 2.0 extends that judgment from individual skills to installed skill systems: topology, provenance, symlink distribution, local evidence, and conservative governance.
+
 Four skills across two layers:
 
 **Analysis & Interpretation** — judgment and understanding:
@@ -17,14 +21,14 @@ Four skills across two layers:
 Agent skills grow fast and degrade silently. Most skill ecosystems face two intertwined problems:
 
 1. **No deep design review.** Skills pass assertion tests but suffer from scope creep, poor context engineering, or hidden fragility. Surface-level praise or criticism does not help.
-2. **No operational visibility.** Users install dozens of skills across multiple agent directories and have no way to tell which are locally visible, observed in use, effective, stale, or broken.
+2. **No operational visibility.** Users install dozens of skills across multiple agent directories and have no way to tell which are locally visible, observed through local evidence, stale, broken, or worth deeper review.
 
 This repository addresses both:
 
 - `skills-refiner` and `skills-appreciation` handle the **analysis** problem — deep design audit and publishable interpretation.
 - `skill-hygiene` and `skill-debug` handle the **governance** problem — topology scanning, version/provenance fact collection, activation canary tracing, and observation analytics.
 
-Together with `skill-creator` (the official Claude skill-creation tool), they form a complete skill lifecycle: creation → testing → design audit → governance → observability → interpretation.
+Together with a skill-creation tool such as `skill-creator`, they form a complete skill lifecycle: creation → testing → design audit → governance → observability → interpretation.
 
 ## The four skills
 
@@ -60,11 +64,11 @@ This skill follows the "AI judges, scripts collect" philosophy. The shell script
 
 ### 4) `skill-debug` — skill observability
 
-Use when you cannot tell whether a skill was discovered, loaded, or followed by the agent. Three layers:
+Use when you need local evidence about likely skill discovery surfaces, observed canary events, and installed skill identities with no local canary evidence. Three layers:
 
 - **Discovery diagnostics** (`skill-probe`) — what local skill surfaces are likely discoverable from the current working directory?
 - **Activation canary tracing** (`skill-trace`) — inject/remove lightweight canary blocks to observe when agents follow skills.
-- **Canary observation dashboard** (`skill-dashboard`) — canary event frequency, not-observed skill identity detection, context distribution, observed rate.
+- **Canary observation dashboard** (`skill-dashboard`) — canary event frequency, not-observed skill identity detection, context distribution, canary observed identity rate.
 
 Combine with `skill-hygiene` for a full governance workflow: probe discovery → check canary observations → evaluate quality → triage.
 
@@ -126,6 +130,7 @@ Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https:/
 - `skills/skill-debug/tests/test-trace.sh` — integration tests
 - `skills/skill-debug/tests/test-probe.sh` — integration tests for discovery probe
 - `skills/skill-debug/tests/test-dashboard.sh` — integration tests for dashboard
+- `skills/skill-debug/tests/test-observability-regressions.sh` — regression tests for conservative observability semantics
 
 **Supporting materials:**
 - `examples/` — usage examples for all four skills

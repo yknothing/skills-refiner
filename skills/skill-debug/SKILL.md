@@ -1,11 +1,11 @@
 ---
 name: skill-debug
-description: Use when you cannot tell whether a skill was discovered, loaded, or followed by the agent. Use for skill observability, activation tracing, discovery diagnostics, and effectiveness analysis. Also use when troubleshooting why a skill seems to have no effect.
+description: Use when you need local evidence about whether agent skills are on likely discovery surfaces, whether activation canaries were observed, and which installed skill identities have no local canary evidence.
 ---
 
 # skill-debug
 
-You are a skill observability advisor. Your job is to help users understand what local evidence exists about their skills: likely discovery surfaces, canary activations, and usage patterns. Do not overstate these signals as platform-level proof of loading or effectiveness.
+You are a skill observability advisor. Your job is to help users understand what local evidence exists about their skills: likely discovery surfaces, canary activations, and usage patterns. Do not overstate these signals as platform-level proof of loading, obedience, or outcome quality.
 
 ## Philosophy
 
@@ -149,7 +149,7 @@ The `--doctor` mode combines:
 - **High canary count, weak output** — Skill may be followed often but still need design improvements
 
 ### Usage Patterns
-- **Canary observed identity rate < 30%** — Low canary observation; review workflow context with `skill-hygiene`
+- **Canary observed identity rate < 30%** — Low canary observation; review workflow context with `skill-hygiene`. This threshold is triage-only, not a quality or outcome threshold.
 - **Single-project skills in global path** — Review whether project-level scope would be clearer
 - **Global skills not observed** — Advisory candidates for human review, not automatic archival
 

@@ -55,12 +55,12 @@ Options:
 
 The script outputs structured data. Your job is to **interpret** it.
 
-Accurate local statistics are limited to facts the filesystem can prove: skill file counts, canonical paths, symlink links, broken links, content hashes, source remotes when Git exposes them, and name/content/version collisions. Runtime usage and effectiveness remain outside the scanner; combine with native telemetry or `skill-debug` canary evidence.
+Accurate local statistics are limited to facts the filesystem can prove: skill file counts, canonical paths, symlink links, broken links, content hashes, source remotes when Git exposes them, and name/content/version collisions. Runtime usage and outcome quality remain outside the scanner; combine with native telemetry or `skill-debug` canary evidence.
 
 Key facts now include:
-- `frontmatter` — OpenAI/Codex-compatible discovery contract: name and description, plus capped description metadata
+- `frontmatter` — local discovery contract facts: name and description, plus capped description metadata
 - `claude_code` — bounded Claude Code invocation signals such as model/user invocation controls, tool/path counts, and hook event names
-- `openai` — bounded `agents/openai.yaml` signals: UI metadata presence, implicit-invocation policy, and tool dependency count
+- `openai` — bounded `agents/openai.yaml` facts: file presence, implicit-invocation policy, and tool dependency count; not runtime behavior proof
 - `content_sha256` — local content identity for same-name comparison without network access
 - `freshness` — mtime, age, stale threshold, and `is_stale` as a signal
 - `provenance` — local source signals such as canonical-global, symlink-distribution, native-agent, and git remote when directly available
@@ -148,5 +148,5 @@ Statistics, topology map, provenance distribution.
 ## Integration
 
 - Use `skill-debug probe` to verify which skills are discoverable from a specific cwd
-- Use `skill-debug dashboard` to cross-reference with actual activation data
+- Use `skill-debug dashboard` to cross-reference with recorded canary activation evidence
 - Use `skills-refiner` for deep design-quality analysis of individual skills

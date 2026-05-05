@@ -184,7 +184,9 @@ bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh --days 7
 bash ~/.agents/skills/skill-debug/bin/skill-dashboard.sh --json --all
 ```
 
-Expected output: observed canary ranking, not-observed skill identities (installed but no recorded canary), observed rate, context distribution.
+Expected output: observed canary ranking, not-observed skill identities (installed but no recorded canary), canary observed identity rate, context distribution.
+
+These are local canary proxy statistics. They do not prove platform loading, instruction obedience, outcome quality, or true runtime usage frequency.
 
 ### 17) Combined health check
 

@@ -14,6 +14,10 @@ skills/
     ├── bin/skill-trace.sh
     ├── bin/skill-dashboard.sh
     └── tests/
+        ├── test-trace.sh
+        ├── test-probe.sh
+        ├── test-dashboard.sh
+        └── test-observability-regressions.sh
 examples/                 # Usage examples for all four skills
 evals/                    # Evaluation rubrics and cases
 ```
@@ -43,15 +47,18 @@ evals/                    # Evaluation rubrics and cases
 - Use `assert_eq`, `assert_contains`, `assert_not_contains` helpers for consistent test output.
 - Clean up temp directories with `trap "rm -rf $SANDBOX" EXIT`.
 
-### Running tests
+### Running shell integration tests
 
 ```bash
-# Run all tests
+# Run shell integration tests
 bash skills/skill-hygiene/tests/test-scan.sh
 bash skills/skill-debug/tests/test-trace.sh
 bash skills/skill-debug/tests/test-probe.sh
 bash skills/skill-debug/tests/test-dashboard.sh
+bash skills/skill-debug/tests/test-observability-regressions.sh
 ```
+
+The `evals/` directory contains human/model review anchors, not an automated release gate. Add an explicit runner before treating evals as required CI.
 
 ### SKILL.md files
 
@@ -67,7 +74,7 @@ bash skills/skill-debug/tests/test-dashboard.sh
 
 ## Pull request guidelines
 
-- Run all tests before submitting.
+- Run the shell integration tests before submitting.
 - Keep changes focused: one logical change per PR.
 - Update `README.md` and `examples/` when adding or changing skill behavior.
 - If adding a new shell script, add corresponding tests.
