@@ -34,7 +34,7 @@ evals/                    # Evaluation rubrics and cases
 ### Shell scripts
 
 - All scripts must work on both macOS and Linux. Test with both `stat -f` (macOS) and `stat -c` (Linux) variants.
-- Use `${HOME:-$(eval echo ~$(whoami))}` for HOME directory fallback — do not hardcode OS-specific paths.
+- Resolve HOME without `eval`: prefer `$HOME`, then `getent passwd`, then macOS `dscl`, then common home roots; fail clearly if no home directory can be determined.
 - Include `--help` / `-h` support in all user-facing scripts.
 - Use `set -o pipefail` but not `set -e` (handled by callers).
 - Require `jq` for JSON processing. Check availability gracefully.
@@ -45,7 +45,7 @@ evals/                    # Evaluation rubrics and cases
 - Tests create sandboxed environments in temp directories to avoid affecting the user's actual skill installation.
 - Override `HOME` to the sandbox directory when running tests.
 - Use `assert_eq`, `assert_contains`, `assert_not_contains` helpers for consistent test output.
-- Clean up temp directories with `trap "rm -rf $SANDBOX" EXIT`.
+- Clean up temp directories through a path-checked cleanup function that only operates on known temporary roots.
 
 ### Running shell integration tests
 
