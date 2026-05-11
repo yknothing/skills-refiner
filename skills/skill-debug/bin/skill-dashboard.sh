@@ -10,9 +10,43 @@
 
 set -o pipefail
 
-HOME_DIR="${HOME:-$(eval echo ~$(whoami))}"
-DEBUG_DIR="$HOME_DIR/.agents/debug"
-LOG_FILE="$DEBUG_DIR/activation.jsonl"
+detect_home_dir() {
+    if [ -n "${HOME:-}" ]; then
+        printf '%s\n' "$HOME"
+        return 0
+    fi
+
+    local user home
+    user=$(id -un 2>/dev/null || whoami 2>/dev/null || true)
+
+    if [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
+        home=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6; exit}')
+        if [ -n "$home" ]; then
+            printf '%s\n' "$home"
+            return 0
+        fi
+    fi
+
+    if [ -n "$user" ] && command -v dscl >/dev/null 2>&1; then
+        home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
+        if [ -n "$home" ]; then
+            printf '%s\n' "$home"
+            return 0
+        fi
+    fi
+
+    if [ -n "$user" ]; then
+        for home in "/Users/$user" "/home/$user"; do
+            if [ -d "$home" ]; then
+                printf '%s\n' "$home"
+                return 0
+            fi
+        done
+    fi
+
+    return 1
+}
+
 DAYS=30
 JSON_MODE=false
 
@@ -56,6 +90,13 @@ while [[ $# -gt 0 ]]; do
         *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
     esac
 done
+
+HOME_DIR="$(detect_home_dir)" || {
+    echo "[ERROR] Unable to determine home directory. Set HOME and retry." >&2
+    exit 2
+}
+DEBUG_DIR="$HOME_DIR/.agents/debug"
+LOG_FILE="$DEBUG_DIR/activation.jsonl"
 
 # ── Collect Installed Skills ──────────────────────────────────────────
 get_skill_name() {
@@ -224,7 +265,9 @@ main() {
     filtered_log=$(jq --arg cutoff "$cutoff_ts" 'select(.ts >= $cutoff)' "$LOG_FILE" 2>/dev/null)
 
     local total_events
-    total_events=$(echo "$filtered_log" | jq -r '.skill // .skill_name // empty' 2>/dev/null | grep -c . 2>/dev/null || echo 0)
+    # BSD grep: `grep -c .` prints 0 but exits 1 on no match — do not append `|| echo 0` or jq --argjson sees "0\n0".
+    total_events=$(echo "$filtered_log" | jq -r '.skill // .skill_name // empty' 2>/dev/null | grep -c . 2>/dev/null || true)
+    total_events=${total_events:-0}
 
     local filtered_json observed_identities observed_count observed_rate frequency_json context_json not_observed_json legacy_ambiguous_json
     filtered_json=$(echo "$filtered_log" | jq -s '.')
