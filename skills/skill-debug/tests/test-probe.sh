@@ -46,9 +46,33 @@ assert_not_contains() {
     fi
 }
 
+safe_delete_tree() {
+    local target="$1" tmp_root="${TMPDIR:-/tmp}"
+    tmp_root="${tmp_root%/}"
+
+    if [ -z "$target" ] || [ ! -d "$target" ]; then
+        return 0
+    fi
+
+    case "$target" in
+        "$tmp_root"/*|/tmp/*|/private/tmp/*|/var/folders/*)
+            find "$target" -depth -mindepth 1 -delete 2>/dev/null || return 1
+            rmdir "$target" 2>/dev/null || true
+            ;;
+        *)
+            echo "[WARN] Refusing to clean unexpected sandbox path: $target" >&2
+            return 1
+            ;;
+    esac
+}
+
+cleanup_sandbox() {
+    safe_delete_tree "${SANDBOX:-}"
+}
+
 # ── Setup ─────────────────────────────────────────────────────────────
 SANDBOX=$(mktemp -d)
-trap "rm -rf $SANDBOX" EXIT
+trap cleanup_sandbox EXIT
 
 setup_sandbox() {
     # Global skills in ~/.agents/skills/

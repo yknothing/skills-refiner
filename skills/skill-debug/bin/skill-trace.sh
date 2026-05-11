@@ -11,9 +11,59 @@
 
 set -o pipefail
 
-HOME_DIR="${HOME:-$(eval echo ~$(whoami))}"
-DEBUG_DIR="$HOME_DIR/.agents/debug"
-LOG_FILE="$DEBUG_DIR/activation.jsonl"
+detect_home_dir() {
+    if [ -n "${HOME:-}" ]; then
+        printf '%s\n' "$HOME"
+        return 0
+    fi
+
+    local user home
+    user=$(id -un 2>/dev/null || whoami 2>/dev/null || true)
+
+    if [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
+        home=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6; exit}')
+        if [ -n "$home" ]; then
+            printf '%s\n' "$home"
+            return 0
+        fi
+    fi
+
+    if [ -n "$user" ] && command -v dscl >/dev/null 2>&1; then
+        home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
+        if [ -n "$home" ]; then
+            printf '%s\n' "$home"
+            return 0
+        fi
+    fi
+
+    if [ -n "$user" ]; then
+        for home in "/Users/$user" "/home/$user"; do
+            if [ -d "$home" ]; then
+                printf '%s\n' "$home"
+                return 0
+            fi
+        done
+    fi
+
+    return 1
+}
+
+HOME_DIR=""
+DEBUG_DIR=""
+LOG_FILE=""
+
+init_home_paths() {
+    if [ -n "$HOME_DIR" ]; then
+        return 0
+    fi
+
+    HOME_DIR="$(detect_home_dir)" || {
+        echo "[ERROR] Unable to determine home directory. Set HOME and retry." >&2
+        return 2
+    }
+    DEBUG_DIR="$HOME_DIR/.agents/debug"
+    LOG_FILE="$DEBUG_DIR/activation.jsonl"
+}
 
 # Colors
 RED='\033[0;31m'
@@ -190,6 +240,8 @@ strip_dir() {
 
 # ── Status ────────────────────────────────────────────────────────────
 show_status() {
+    init_home_paths || exit 2
+
     echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}║        Skill Trace Status v1.0           ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
@@ -259,6 +311,7 @@ case "${1:-}" in
         show_status
         ;;
     --rotate)
+        init_home_paths || exit 2
         if [ -f "$LOG_FILE" ]; then
             rotated="$DEBUG_DIR/activation-$(date +%Y%m%d-%H%M%S).jsonl"
             mv "$LOG_FILE" "$rotated"

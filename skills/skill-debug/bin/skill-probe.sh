@@ -11,7 +11,43 @@
 set -o pipefail
 
 # ── Config ────────────────────────────────────────────────────────────
-HOME_DIR="${HOME:-$(eval echo ~$(whoami))}"
+detect_home_dir() {
+    if [ -n "${HOME:-}" ]; then
+        printf '%s\n' "$HOME"
+        return 0
+    fi
+
+    local user home
+    user=$(id -un 2>/dev/null || whoami 2>/dev/null || true)
+
+    if [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
+        home=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6; exit}')
+        if [ -n "$home" ]; then
+            printf '%s\n' "$home"
+            return 0
+        fi
+    fi
+
+    if [ -n "$user" ] && command -v dscl >/dev/null 2>&1; then
+        home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
+        if [ -n "$home" ]; then
+            printf '%s\n' "$home"
+            return 0
+        fi
+    fi
+
+    if [ -n "$user" ]; then
+        for home in "/Users/$user" "/home/$user"; do
+            if [ -d "$home" ]; then
+                printf '%s\n' "$home"
+                return 0
+            fi
+        done
+    fi
+
+    return 1
+}
+
 TARGET_CWD="${PWD}"
 VERBOSE=false
 DOCTOR=false
@@ -63,6 +99,11 @@ while [[ $# -gt 0 ]]; do
         *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
     esac
 done
+
+HOME_DIR="$(detect_home_dir)" || {
+    echo "[ERROR] Unable to determine home directory. Set HOME and retry." >&2
+    exit 2
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────
 get_frontmatter() {

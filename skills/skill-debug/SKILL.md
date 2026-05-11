@@ -13,6 +13,20 @@ You are a skill observability advisor. Your job is to help users understand what
 2. **Respect the topology.** Skills are installed to `~/.agents/skills/` and symlinked to agent directories. Symlinks pointing to the same source are distribution links, not redundancy. The probe must distinguish symlinks from real duplicates.
 3. **No false alarms.** A skill with no observed activation may simply not have been needed. "Not observed" is an observation, not a verdict. Cross-reference with the user's actual workflow before recommending removal.
 
+## Running tools from an agent session
+
+When you have **shell access** and the user asks for discovery diagnostics, activation statistics, or a general skills health snapshot:
+
+- Prefer executing **read-only** scripts yourself (`skills-refiner-doctor.sh`, `skill-probe.sh`, `skill-dashboard.sh`) rather than instructing the user to run them manually.
+- **Do not** run `skill-trace.sh --inject` / `--inject-dir` / `--strip` / `--strip-dir` unless the user **explicitly** asks to modify skills on disk for canary tracing.
+
+One-shot read-only snapshot:
+
+```bash
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
+```
+
 ## The Problem
 
 Agent skills are "fire and forget" by design. You install them, hope the agent finds them, and have limited ways to verify:
@@ -26,6 +40,9 @@ This skill provides a three-layer debug architecture to collect evidence for the
 ## Quick Start
 
 ```bash
+# Read-only bundle: probe + dashboard + hygiene scan (does not inject traces)
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
+
 # Layer 1: What local skill surfaces are likely discoverable right now?
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 

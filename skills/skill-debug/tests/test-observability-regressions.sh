@@ -60,6 +60,26 @@ Enough body content for regression testing.
 EOF
 }
 
+safe_delete_tree() {
+    local target="$1" tmp_root="${TMPDIR:-/tmp}"
+    tmp_root="${tmp_root%/}"
+
+    if [ -z "$target" ] || [ ! -d "$target" ]; then
+        return 0
+    fi
+
+    case "$target" in
+        "$tmp_root"/*|/tmp/*|/private/tmp/*|/var/folders/*)
+            find "$target" -depth -mindepth 1 -delete 2>/dev/null || return 1
+            rmdir "$target" 2>/dev/null || true
+            ;;
+        *)
+            echo "[WARN] Refusing to clean unexpected sandbox path: $target" >&2
+            return 1
+            ;;
+    esac
+}
+
 run_probe_regression() {
     echo -e "${BOLD}── Probe: symlink distribution is not conflict ──${NC}"
     local sandbox
@@ -77,7 +97,7 @@ run_probe_regression() {
     assert_contains "Probe uses best-effort language" "$output" "best-effort local filesystem diagnostic"
     assert_not_contains "Does not report canonical conflict" "$output" "same skill name resolves to different canonical sources"
 
-    rm -rf "$sandbox"
+    safe_delete_tree "$sandbox"
     echo ""
 }
 
@@ -113,7 +133,7 @@ EOF
     assert_not_contains "Does not call skills unused" "$text_output" "Unused Skills"
     assert_not_contains "Does not call skills inactive" "$text_output" "Inactive Skills"
 
-    rm -rf "$sandbox"
+    safe_delete_tree "$sandbox"
     echo ""
 }
 

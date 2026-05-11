@@ -119,7 +119,21 @@ Expected behavior:
 
 These examples demonstrate the `skill-hygiene` and `skill-debug` skills.
 
-### 11) Scan installed skills for health issues
+### 11) One-shot read-only governance snapshot (`doctor`)
+
+```bash
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
+# Contributor checkout:
+bash bin/skills-refiner-doctor.sh --help
+```
+
+Expected behavior:
+- runs discovery probe, activation dashboard, and hygiene scan terminal report in sequence;
+- does **not** inject or strip activation traces (those mutate skill files);
+- `--json` emits a single JSON object (`schema: skills-refiner.doctor.v1`) suitable for AI interpretation.
+
+### 12) Scan installed skills for health issues
 
 ```bash
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
@@ -132,13 +146,13 @@ Expected behavior:
 - flags issues: missing frontmatter, backup remnants, security indicators, stale or stub skills;
 - outputs both terminal-friendly table and JSON report.
 
-### 12) Scan with custom staleness threshold
+### 13) Scan with custom staleness threshold
 
 ```bash
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --stale-days 365
 ```
 
-### 13) JSON-only output for AI consumption
+### 14) JSON-only output for AI consumption
 
 ```bash
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --json
@@ -146,7 +160,7 @@ bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --json
 
 Feed the stdout JSON to an AI advisor for expert judgment on the scan results. This mode does not write a report file.
 
-### 14) Inspect local skill discovery surfaces from a project directory
+### 15) Inspect local skill discovery surfaces from a project directory
 
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --cwd ~/projects/my-app
@@ -158,7 +172,7 @@ Expected behavior:
 - detects name conflicts (same skill name in multiple locations);
 - validates frontmatter.
 
-### 15) Inject activation canaries to observe skill following
+### 16) Inject activation canaries to observe skill following
 
 ```bash
 # Inject into all global skills
@@ -171,7 +185,7 @@ bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --status
 bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --strip-dir ~/.agents/skills/
 ```
 
-### 16) View the canary observation dashboard
+### 17) View the canary observation dashboard
 
 ```bash
 # Last 30 days (default)
@@ -188,7 +202,7 @@ Expected output: observed canary ranking, not-observed skill identities (install
 
 These are local canary proxy statistics. They do not prove platform loading, instruction obedience, outcome quality, or true runtime usage frequency.
 
-### 17) Combined health check
+### 18) Combined health check
 
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
@@ -196,9 +210,12 @@ bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
 
 Combines discovery probe, native platform signal checks, activation log analysis, and hygiene scan cross-reference.
 
-### 18) Full governance workflow
+### 19) Full governance workflow
 
 ```text
+# Step 0 (optional): One-shot read-only snapshot — probe + dashboard + hygiene terminal report
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
+
 # Step 1: What local skill surfaces are likely discoverable?
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 
