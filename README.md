@@ -1,5 +1,7 @@
 # skills-refiner
 
+**Languages:** English | [简体中文](README.zh-CN.md)
+
 A skill governance toolkit for analyzing, interpreting, evaluating, and debugging agent skills systems.
 
 Version 1.0 focused on design judgment after skill creation: whether a single skill is well positioned, scoped, portable, and context-efficient.
@@ -111,6 +113,20 @@ npx skills add yknothing/skills-refiner
 
 Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https://github.com/vercel-labs/skills#supported-agents).
 
+### One-shot health snapshot (`doctor`)
+
+Read-only aggregate (discovery probe → activation dashboard → hygiene scan). Does **not** inject activation traces (those edit skill files).
+
+```bash
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
+# Machine-readable bundle for agents / tooling:
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
+# From a git checkout (wrapper):
+bash bin/skills-refiner-doctor.sh --help
+```
+
+Optional env: `SKILLS_REFINER_TOOLS_ROOT` — directory that contains `skill-debug/` and `skill-hygiene/` (same layout as `~/.agents/skills`).
+
 ## Repository layout
 
 **Analysis & Interpretation:**
@@ -127,12 +143,15 @@ Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https:/
 - `skills/skill-debug/bin/skill-probe.sh` — discovery diagnostics
 - `skills/skill-debug/bin/skill-trace.sh` — activation trace injection/removal
 - `skills/skill-debug/bin/skill-dashboard.sh` — canary observation dashboard
+- `skills/skill-debug/bin/skills-refiner-doctor.sh` — read-only probe + dashboard + hygiene snapshot
+- `skills/skill-debug/tests/test-doctor.sh` — smoke test for doctor (`HOME` sandbox)
 - `skills/skill-debug/tests/test-trace.sh` — integration tests
 - `skills/skill-debug/tests/test-probe.sh` — integration tests for discovery probe
 - `skills/skill-debug/tests/test-dashboard.sh` — integration tests for dashboard
 - `skills/skill-debug/tests/test-observability-regressions.sh` — regression tests for conservative observability semantics
 
 **Supporting materials:**
+- `bin/skills-refiner-doctor.sh` — contributor wrapper → `skills/skill-debug/bin/skills-refiner-doctor.sh`
 - `examples/` — usage examples for all four skills
 - `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)
 
@@ -157,6 +176,9 @@ Use skills-appreciation on this skill. I want to understand why it is designed t
 ### Governance & Observability
 
 ```bash
+# One-shot read-only snapshot (probe + dashboard + hygiene terminal report)
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
+
 # Scan installed skills for health issues
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 
@@ -182,7 +204,7 @@ The `evals/` directory contains anchor-based evaluations for the analysis skills
 
 Cases 08–09 test the collaboration scenario with skill-creator.
 
-The governance skills (`skill-hygiene`, `skill-debug`) are validated through integration tests that create sandboxed skill topologies and verify scanner/tracer correctness.
+The governance skills (`skill-hygiene`, `skill-debug`) are validated through integration tests that create sandboxed skill topologies and verify scanner/tracer correctness. `skills/skill-debug/tests/test-doctor.sh` smoke-tests the read-only `skills-refiner-doctor.sh` bundle under an isolated `HOME`.
 
 ## Contributing
 
