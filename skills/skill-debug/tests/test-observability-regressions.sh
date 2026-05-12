@@ -85,7 +85,7 @@ run_probe_regression() {
     local sandbox
     sandbox=$(mktemp -d)
 
-    write_skill "$sandbox/.agents/skills/shared-skill" "shared-skill" "Use when testing same-source symlink distribution."
+    write_skill "$sandbox/.agents/skills/shared-skill" "shared-skill" "Use when testing same-source symlink distribution with a pipe | in the description."
     mkdir -p "$sandbox/.claude/skills" "$sandbox/.cursor/skills"
     ln -s "../../.agents/skills/shared-skill" "$sandbox/.claude/skills/shared-skill"
     ln -s "../../.agents/skills/shared-skill" "$sandbox/.cursor/skills/shared-skill"

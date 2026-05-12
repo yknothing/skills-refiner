@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
-# skill-probe.sh — Local skill discovery-surface diagnostics
+# skill-probe.sh - Local skill discovery-surface diagnostics.
 # Shows skill files this diagnostic can find from the current working directory.
-#
-# Usage:
-#   bash skill-probe.sh                    # Probe from current cwd
-#   bash skill-probe.sh --cwd /path/to/project
-#   bash skill-probe.sh --verbose          # Show full details
-#   bash skill-probe.sh --doctor           # Combined health check
 
 set -o pipefail
 
-# ── Config ────────────────────────────────────────────────────────────
+PRODUCT_VERSION="2.0"
+TARGET_CWD="${PWD}"
+VERBOSE=false
+DOCTOR=false
+JSON_MODE=false
+FIELD_SEP=$'\037'
+
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+if [ -n "${NO_COLOR:-}" ]; then
+    RED=''; YELLOW=''; GREEN=''; CYAN=''; DIM=''; BOLD=''; NC=''
+fi
+
+SKILL_DIRS=(".warp/skills" ".agents/skills" ".claude/skills" ".codex/skills"
+            ".cursor/skills" ".gemini/skills" ".copilot/skills" ".factory/skills"
+            ".github/skills" ".opencode/skills")
+
 detect_home_dir() {
     if [ -n "${HOME:-}" ]; then
         printf '%s\n' "$HOME"
@@ -22,79 +38,58 @@ detect_home_dir() {
 
     if [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
         home=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6; exit}')
-        if [ -n "$home" ]; then
-            printf '%s\n' "$home"
-            return 0
-        fi
+        [ -n "$home" ] && { printf '%s\n' "$home"; return 0; }
     fi
 
     if [ -n "$user" ] && command -v dscl >/dev/null 2>&1; then
         home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
-        if [ -n "$home" ]; then
-            printf '%s\n' "$home"
-            return 0
-        fi
+        [ -n "$home" ] && { printf '%s\n' "$home"; return 0; }
     fi
 
     if [ -n "$user" ]; then
         for home in "/Users/$user" "/home/$user"; do
-            if [ -d "$home" ]; then
-                printf '%s\n' "$home"
-                return 0
-            fi
+            [ -d "$home" ] && { printf '%s\n' "$home"; return 0; }
         done
     fi
 
     return 1
 }
 
-TARGET_CWD="${PWD}"
-VERBOSE=false
-DOCTOR=false
-
-# Colors
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-DIM='\033[2m'
-BOLD='\033[1m'
-NC='\033[0m'
-
-# Agent-recognized skill directories, in discovery priority order used by this diagnostic.
-SKILL_DIRS=(".warp/skills" ".agents/skills" ".claude/skills" ".codex/skills"
-            ".cursor/skills" ".gemini/skills" ".copilot/skills" ".factory/skills"
-            ".github/skills" ".opencode/skills")
-
-# ── Parse Args ────────────────────────────────────────────────────────
 show_help() {
-    echo "skill-probe.sh — Local skill discovery-surface diagnostics"
-    echo ""
-    echo "Usage:"
-    echo "  bash skill-probe.sh"
-    echo "  bash skill-probe.sh --cwd /path/to/project"
-    echo "  bash skill-probe.sh --verbose"
-    echo "  bash skill-probe.sh --doctor"
-    echo ""
-    echo "Options:"
-    echo "  --cwd PATH     Probe discovery from PATH instead of current directory"
-    echo "  --verbose      Show paths, descriptions, and frontmatter validation"
-    echo "  --doctor       Include activation-log and hygiene-scan cross-checks"
-    echo "  --help, -h     Show this help message"
+    cat <<EOF
+skill-probe.sh - Local skill discovery-surface diagnostics
+
+Usage:
+  bash skill-probe.sh
+  bash skill-probe.sh --cwd /path/to/project
+  bash skill-probe.sh --verbose
+  bash skill-probe.sh --doctor
+  bash skill-probe.sh --json
+
+Options:
+  --cwd PATH     Probe discovery from PATH instead of current directory
+  --verbose      Show paths, descriptions, and frontmatter validation
+  --doctor       Include activation-log and native-signal cross-checks
+  --json         Emit a compact structured summary
+  --no-color     Disable terminal colors
+  --help, -h     Show this help message
+EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --cwd)
-            if [ -z "${2:-}" ]; then
-                echo "[ERROR] --cwd requires a path" >&2
-                exit 2
-            fi
+            [ -z "${2:-}" ] && { echo "[ERROR] --cwd requires a path" >&2; exit 2; }
             TARGET_CWD="$2"
             shift 2
             ;;
         --verbose) VERBOSE=true; shift ;;
         --doctor) DOCTOR=true; shift ;;
+        --json) JSON_MODE=true; shift ;;
+        --no-color)
+            RED=''; YELLOW=''; GREEN=''; CYAN=''; DIM=''; BOLD=''; NC=''
+            shift
+            ;;
         --help|-h) show_help; exit 0 ;;
         *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
     esac
@@ -105,7 +100,6 @@ HOME_DIR="$(detect_home_dir)" || {
     exit 2
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────
 get_frontmatter() {
     local file="$1" key="$2"
     awk -v key="$key" '
@@ -113,7 +107,7 @@ get_frontmatter() {
         in_fm && $0 == "---" { exit }
         in_fm && index($0, key ":") == 1 {
             sub("^" key ":[[:space:]]*", "")
-            gsub(/^['\''\"]|['\''\"]$/, "")
+            gsub(/^['\''"]|['\''"]$/, "")
             print
             exit
         }
@@ -136,6 +130,22 @@ canonical_file() {
     base=$(basename "$file")
     resolved_dir=$(cd -P "$dir" 2>/dev/null && pwd) || return 1
     printf '%s/%s\n' "$resolved_dir" "$base"
+}
+
+hash_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+is_backup_entry_name() {
+    local entry_name="$1"
+    echo "$entry_name" | grep -qE '\.backup\.|\.disabled|\.tmp|\.old|\.archive'
 }
 
 find_git_root() {
@@ -161,24 +171,35 @@ emit_skills_from_base() {
         local skill_file="$entry/SKILL.md"
         [ ! -f "$skill_file" ] && continue
 
-        local name desc dir_n entry_type canon
+        local name desc dir_n entry_type canon content_hash
         name=$(get_frontmatter "$skill_file" "name")
         desc=$(get_frontmatter "$skill_file" "description")
         dir_n=$(basename "$entry")
         entry_type="directory"
         [ -L "$entry" ] && entry_type="symlink"
         canon=$(canonical_file "$skill_file" 2>/dev/null || echo "$skill_file")
+        content_hash=$(hash_file "$canon")
 
-        echo "$scope|$dir_name|${name:-$dir_n}|$skill_file|${desc:0:80}|$entry_type|$canon"
+        printf '%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n' \
+            "$scope" "$FIELD_SEP" \
+            "$dir_name" "$FIELD_SEP" \
+            "${name:-$dir_n}" "$FIELD_SEP" \
+            "$skill_file" "$FIELD_SEP" \
+            "${desc:0:80}" "$FIELD_SEP" \
+            "$entry_type" "$FIELD_SEP" \
+            "$canon" "$FIELD_SEP" \
+            "$content_hash"
     done
 }
 
-# ── Discovery Logic ──────────────────────────────────────────────────
 discover_project_skills() {
     local cwd="$1"
     local git_root search_root
     git_root=$(find_git_root "$cwd")
     search_root="${git_root:-$cwd}"
+
+    # Running from $HOME otherwise duplicates the global scan exactly.
+    [ "$search_root" = "$HOME_DIR" ] && return
 
     local bases=("$search_root")
     if [ -n "$git_root" ]; then
@@ -203,6 +224,7 @@ discover_project_skills() {
 }
 
 discover_global_skills() {
+    local dir_name
     for dir_name in "${SKILL_DIRS[@]}"; do
         emit_skills_from_base "global" "$dir_name" "$HOME_DIR/$dir_name"
     done
@@ -230,7 +252,7 @@ cursor_mcp_state() {
 }
 
 show_native_observability() {
-    echo -e "${BOLD}── Native Platform Signals ──${NC}"
+    echo -e "${BOLD}-- Native Platform Signals --${NC}"
 
     if [ "${CLAUDE_CODE_ENABLE_TELEMETRY:-}" = "1" ]; then
         echo -e "  Claude Code telemetry: ${GREEN}enabled${NC}"
@@ -280,17 +302,129 @@ show_native_observability() {
     echo ""
 }
 
-# ── Main Report ──────────────────────────────────────────────────────
+append_entry_json() {
+    local entries_json="$1" scope="$2" source="$3" name="$4" path="$5" desc="$6" entry_type="$7" canonical_path="$8" content_hash="$9"
+    jq -n \
+        --argjson entries "$entries_json" \
+        --arg scope "$scope" \
+        --arg source "$source" \
+        --arg name "$name" \
+        --arg path "$path" \
+        --arg description "$desc" \
+        --arg type "$entry_type" \
+        --arg canonical_skill_file "$canonical_path" \
+        --arg content_sha256 "$content_hash" \
+        '$entries + [{
+            scope:$scope,
+            source:$source,
+            name:$name,
+            path:$path,
+            description:$description,
+            type:$type,
+            canonical_skill_file:$canonical_skill_file,
+            content_sha256:$content_sha256
+        }]'
+}
+
+build_conflicts_json() {
+    local entries_json="$1"
+    echo "$entries_json" | jq '
+        def is_backup:
+            (.path | split("/")[-2] | test("\\.backup\\.|\\.disabled|\\.tmp|\\.old|\\.archive"));
+        group_by(.name)
+        | map(select(length > 1) | {
+            name: .[0].name,
+            entries: .,
+            active_real_entries: [.[] | select(.type != "symlink" and (is_backup | not))],
+            symlink_distribution_count: ([.[] | select(.type == "symlink")] | length),
+            backup_or_archive_count: ([.[] | select(is_backup)] | length)
+        })
+        | map(. + {
+            active_real_count: (.active_real_entries | length),
+            active_hashes: ([.active_real_entries[].content_sha256 | select(length > 0)] | unique),
+            has_project_variant: ([.active_real_entries[] | select(.scope == "project")] | length > 0)
+        })
+        | map(. + {
+            classification: (
+                if (.active_real_count > 1 and (.active_hashes | length) > 1 and (.has_project_variant | not)) then "active_conflict"
+                elif (.active_real_count > 1 or .symlink_distribution_count > 0 or .backup_or_archive_count > 0) then "topology_variant"
+                else "same_canonical_source" end
+            )
+        })
+    '
+}
+
 main() {
-    echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║  Skill Discovery Surface Probe v1.3      ║${NC}"
-    echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
-    echo ""
-    echo -e "  ${DIM}CWD:${NC} $TARGET_CWD"
-    echo -e "  ${DIM}Mode:${NC} best-effort local filesystem diagnostic"
+    local skill_entries=()
+    local entries_json="[]"
+    local symlink_distribution_count=0
+    local project_count=0
+    local global_count=0
+
+    while IFS="$FIELD_SEP" read -r scope source name path desc entry_type canonical_path content_hash; do
+        [ -z "$scope" ] && continue
+        project_count=$((project_count + 1))
+        [ "$entry_type" = "symlink" ] && symlink_distribution_count=$((symlink_distribution_count + 1))
+        skill_entries+=("$name$FIELD_SEP$path$FIELD_SEP$scope$FIELD_SEP$source$FIELD_SEP$entry_type$FIELD_SEP$canonical_path$FIELD_SEP$content_hash")
+        entries_json=$(append_entry_json "$entries_json" "$scope" "$source" "$name" "$path" "$desc" "$entry_type" "$canonical_path" "$content_hash")
+    done < <(discover_project_skills "$TARGET_CWD")
+
+    while IFS="$FIELD_SEP" read -r scope source name path desc entry_type canonical_path content_hash; do
+        [ -z "$scope" ] && continue
+        global_count=$((global_count + 1))
+        [ "$entry_type" = "symlink" ] && symlink_distribution_count=$((symlink_distribution_count + 1))
+        skill_entries+=("$name$FIELD_SEP$path$FIELD_SEP$scope$FIELD_SEP$source$FIELD_SEP$entry_type$FIELD_SEP$canonical_path$FIELD_SEP$content_hash")
+        entries_json=$(append_entry_json "$entries_json" "$scope" "$source" "$name" "$path" "$desc" "$entry_type" "$canonical_path" "$content_hash")
+    done < <(discover_global_skills)
+
+    local total conflicts_json active_conflict_count topology_variant_count
+    total=$((project_count + global_count))
+    conflicts_json=$(build_conflicts_json "$entries_json")
+    active_conflict_count=$(echo "$conflicts_json" | jq '[.[] | select(.classification == "active_conflict")] | length')
+    topology_variant_count=$(echo "$conflicts_json" | jq '[.[] | select(.classification == "topology_variant")] | length')
 
     local git_root
     git_root=$(find_git_root "$TARGET_CWD")
+
+    if $JSON_MODE; then
+        jq -n \
+            --arg schema "skill-probe.v2" \
+            --arg product_version "$PRODUCT_VERSION" \
+            --arg cwd "$TARGET_CWD" \
+            --arg git_root "$git_root" \
+            --argjson total "$total" \
+            --argjson project_count "$project_count" \
+            --argjson global_count "$global_count" \
+            --argjson symlink_distribution_count "$symlink_distribution_count" \
+            --argjson active_conflict_count "$active_conflict_count" \
+            --argjson topology_variant_count "$topology_variant_count" \
+            --argjson conflicts "$conflicts_json" \
+            --argjson entries "$entries_json" \
+            '{
+                schema_version: $schema,
+                product_version: $product_version,
+                cwd: $cwd,
+                git_root: $git_root,
+                counts: {
+                    discoverable_entries: $total,
+                    project_entries: $project_count,
+                    global_entries: $global_count,
+                    symlink_distribution_entries: $symlink_distribution_count,
+                    active_name_conflicts: $active_conflict_count,
+                    topology_variants: $topology_variant_count
+                },
+                conflicts: $conflicts,
+                entries: $entries
+            }'
+        return
+    fi
+
+    echo -e "${BOLD}+------------------------------------------+${NC}"
+    echo -e "${BOLD}|  Skill Discovery Surface Probe v$PRODUCT_VERSION      |${NC}"
+    echo -e "${BOLD}+------------------------------------------+${NC}"
+    echo ""
+    echo -e "  ${DIM}CWD:${NC} $TARGET_CWD"
+    echo -e "  ${DIM}Mode:${NC} best-effort local filesystem diagnostic"
     if [ -n "$git_root" ]; then
         echo -e "  ${DIM}Git root:${NC} $git_root"
     else
@@ -298,124 +432,82 @@ main() {
     fi
     echo ""
 
-    local skill_entries=()
-    local symlink_distribution_count=0
-
-    echo -e "${BOLD}── Project-Level Skills ──${NC}"
-    local project_count=0
-    while IFS='|' read -r scope source name path desc entry_type canonical_path; do
-        [ -z "$scope" ] && continue
-        project_count=$((project_count + 1))
-        [ "$entry_type" = "symlink" ] && symlink_distribution_count=$((symlink_distribution_count + 1))
-        skill_entries+=("$name|$path|project|$source|$entry_type|$canonical_path")
-
-        local valid_fm="✓"
-        if ! validate_frontmatter "$path"; then valid_fm="${RED}✗${NC}"; fi
+    echo -e "${BOLD}-- Project-Level Skills --${NC}"
+    local entry
+    for entry in "${skill_entries[@]}"; do
+        IFS="$FIELD_SEP" read -r name path scope source entry_type canonical_path content_hash <<< "$entry"
+        [ "$scope" = "project" ] || continue
+        local valid_fm="ok"
+        validate_frontmatter "$path" || valid_fm="bad"
         local type_label=""
         [ "$entry_type" = "symlink" ] && type_label=" ${DIM}(symlink distribution)${NC}"
-
         if $VERBOSE; then
-            echo -e "  ${GREEN}●${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC}$type_label fm:$valid_fm"
+            echo -e "  ${GREEN}*${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC}$type_label fm:$valid_fm"
             echo -e "    ${DIM}$path${NC}"
             [ "$path" != "$canonical_path" ] && echo -e "    ${DIM}canonical: $canonical_path${NC}"
-            [ -n "$desc" ] && echo -e "    ${DIM}$desc${NC}"
         else
-            echo -e "  ${GREEN}●${NC} $name ${DIM}[$source]${NC}$type_label"
+            echo -e "  ${GREEN}*${NC} $name ${DIM}[$source]${NC}$type_label"
         fi
-    done < <(discover_project_skills "$TARGET_CWD")
-
-    if [ "$project_count" -eq 0 ]; then
-        echo -e "  ${DIM}(none found)${NC}"
-    fi
+    done
+    [ "$project_count" -eq 0 ] && echo -e "  ${DIM}(none found)${NC}"
     echo -e "  ${DIM}Total: $project_count${NC}"
     echo ""
 
-    echo -e "${BOLD}── Global Skills ──${NC}"
-    local global_count=0
-    while IFS='|' read -r scope source name path desc entry_type canonical_path; do
-        [ -z "$scope" ] && continue
-        global_count=$((global_count + 1))
-        [ "$entry_type" = "symlink" ] && symlink_distribution_count=$((symlink_distribution_count + 1))
-        skill_entries+=("$name|$path|global|$source|$entry_type|$canonical_path")
-
-        local valid_fm="✓"
-        if ! validate_frontmatter "$path"; then valid_fm="${RED}✗${NC}"; fi
+    echo -e "${BOLD}-- Global Skills --${NC}"
+    for entry in "${skill_entries[@]}"; do
+        IFS="$FIELD_SEP" read -r name path scope source entry_type canonical_path content_hash <<< "$entry"
+        [ "$scope" = "global" ] || continue
+        local valid_fm="ok"
+        validate_frontmatter "$path" || valid_fm="bad"
         local type_label=""
         [ "$entry_type" = "symlink" ] && type_label=" ${DIM}(symlink distribution)${NC}"
-
         if $VERBOSE; then
-            echo -e "  ${CYAN}●${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC}$type_label fm:$valid_fm"
+            echo -e "  ${CYAN}*${NC} ${BOLD}$name${NC} ${DIM}[$source]${NC}$type_label fm:$valid_fm"
             echo -e "    ${DIM}$path${NC}"
             [ "$path" != "$canonical_path" ] && echo -e "    ${DIM}canonical: $canonical_path${NC}"
-            [ -n "$desc" ] && echo -e "    ${DIM}$desc${NC}"
         else
-            echo -e "  ${CYAN}●${NC} $name ${DIM}[$source]${NC}$type_label"
+            echo -e "  ${CYAN}*${NC} $name ${DIM}[$source]${NC}$type_label"
         fi
-    done < <(discover_global_skills)
-
-    if [ "$global_count" -eq 0 ]; then
-        echo -e "  ${DIM}(none found)${NC}"
-    fi
+    done
+    [ "$global_count" -eq 0 ] && echo -e "  ${DIM}(none found)${NC}"
     echo -e "  ${DIM}Total: $global_count${NC}"
     echo ""
 
-    echo -e "${BOLD}── Name Conflicts ──${NC}"
-    local conflict_found=false
-    local seen_names=()
-    local entry
-    for entry in "${skill_entries[@]}"; do
-        local name="${entry%%|*}"
-        seen_names+=("$name")
-    done
-
-    local duplicate_names
-    duplicate_names=$(printf '%s\n' "${seen_names[@]}" | sort | uniq -d)
-    if [ -n "$duplicate_names" ]; then
-        while IFS= read -r dup_name; do
-            [ -z "$dup_name" ] && continue
-            local canonical_paths canonical_count
-            canonical_paths=$(for entry in "${skill_entries[@]}"; do
-                IFS='|' read -r name path scope source entry_type canonical_path <<< "$entry"
-                if [ "$name" = "$dup_name" ]; then
-                    echo "$canonical_path"
-                fi
-            done | sort -u)
-            canonical_count=$(echo "$canonical_paths" | grep -c . 2>/dev/null || echo 0)
-
-            if [ "$canonical_count" -gt 1 ]; then
-                conflict_found=true
-                echo -e "  ${YELLOW}⚠${NC} ${BOLD}$dup_name${NC} — same skill name resolves to different canonical sources:"
-                for entry in "${skill_entries[@]}"; do
-                    IFS='|' read -r name path scope source entry_type canonical_path <<< "$entry"
-                    if [ "$name" = "$dup_name" ]; then
-                        echo -e "    ${DIM}[$scope/$source/$entry_type]${NC} $path"
-                        echo -e "      ${DIM}canonical: $canonical_path${NC}"
-                    fi
-                done
-            elif $VERBOSE; then
-                echo -e "  ${GREEN}✓${NC} ${BOLD}$dup_name${NC} appears in multiple locations but resolves to one canonical source"
-            fi
-        done <<< "$duplicate_names"
-    fi
-
-    if ! $conflict_found; then
-        echo -e "  ${GREEN}✓${NC} No name conflicts detected"
+    echo -e "${BOLD}-- Name Conflicts --${NC}"
+    if [ "$active_conflict_count" -gt 0 ]; then
+        echo "$conflicts_json" | jq -r '.[] | select(.classification == "active_conflict") | .name' | while IFS= read -r dup_name; do
+            echo -e "  ${YELLOW}!${NC} ${BOLD}$dup_name${NC} - active real directories have different content/version surfaces:"
+            echo "$entries_json" | jq -r --arg n "$dup_name" '.[] | select(.name == $n) | "\(.scope)|\(.source)|\(.type)|\(.path)|\(.canonical_skill_file)|\(.content_sha256)"' | while IFS='|' read -r scope source entry_type path canonical_path content_hash; do
+                echo -e "    ${DIM}[$scope/$source/$entry_type]${NC} $path"
+                echo -e "      ${DIM}canonical: $canonical_path${NC}"
+                [ -n "$content_hash" ] && echo -e "      ${DIM}sha256: ${content_hash:0:12}${NC}"
+            done
+        done
+    else
+        echo -e "  ${GREEN}ok${NC} No name conflicts detected"
+        if [ "$topology_variant_count" -gt 0 ]; then
+            echo -e "  ${DIM}Topology variants seen: $topology_variant_count. Symlink distributions, backups, same-content copies, and project/source variants are not conflicts.${NC}"
+        fi
+        if $VERBOSE; then
+            echo "$conflicts_json" | jq -r '.[] | select(.classification != "active_conflict") | "\(.name)|\(.classification)"' | while IFS='|' read -r name classification; do
+                [ -n "$name" ] && echo -e "  ${GREEN}ok${NC} ${BOLD}$name${NC} appears in multiple locations but resolves to one canonical source or a non-conflict topology variant (${classification})"
+            done
+        fi
     fi
     echo ""
 
-    local total=$((project_count + global_count))
-    echo -e "${BOLD}── Summary ──${NC}"
+    echo -e "${BOLD}-- Summary --${NC}"
     echo -e "  Discoverable skill entries: ${BOLD}$total${NC} (project: $project_count, global: $global_count)"
     echo -e "  Symlink distribution entries: ${BOLD}$symlink_distribution_count${NC}"
-    echo -e "  Scanned directories: ${#SKILL_DIRS[@]} patterns × 2 scopes"
+    echo -e "  Active name conflicts: ${BOLD}$active_conflict_count${NC}"
+    echo -e "  Topology variants (not conflicts): ${BOLD}$topology_variant_count${NC}"
+    echo -e "  Scanned directories: ${#SKILL_DIRS[@]} patterns x 2 scopes"
     echo -e "  ${DIM}Note: platform runtime discovery can differ from this filesystem scan.${NC}"
-    if $conflict_found; then
-        echo -e "  ${YELLOW}⚠ Name conflicts detected — agent may pick an unexpected version depending on discovery priority${NC}"
-    fi
+    [ "$active_conflict_count" -gt 0 ] && echo -e "  ${YELLOW}! Active name conflicts detected - agent may pick an unexpected version depending on discovery priority${NC}"
     echo ""
 
     if $DOCTOR; then
-        echo -e "${BOLD}── Doctor Mode ──${NC}"
+        echo -e "${BOLD}-- Doctor Mode --${NC}"
         echo ""
         show_native_observability
 
@@ -426,7 +518,7 @@ main() {
             activated_skills=$(jq -r '.skill' "$log_file" 2>/dev/null | sort -u | wc -l | tr -d ' ')
             echo -e "  Activation log: ${GREEN}$log_count${NC} events, ${GREEN}$activated_skills${NC} unique skills"
 
-            installed_names=$(printf '%s\n' "${seen_names[@]}" | sort -u)
+            installed_names=$(printf '%s\n' "${skill_entries[@]}" | awk -v FS="$FIELD_SEP" '{print $1}' | sort -u)
             active_names=$(jq -r '.skill' "$log_file" 2>/dev/null | sort -u)
             not_observed=$(comm -23 <(echo "$installed_names") <(echo "$active_names"))
             not_observed_count=$(echo "$not_observed" | grep -c . 2>/dev/null || echo 0)
@@ -437,11 +529,10 @@ main() {
                 [ "$not_observed_count" -gt 10 ] && echo "    ... and $((not_observed_count - 10)) more"
                 echo -e "  ${DIM}Observation only: lack of activation is not a removal verdict.${NC}"
             else
-                echo -e "  ${GREEN}✓${NC} All installed skills have been observed at least once"
+                echo -e "  ${GREEN}ok${NC} All installed skills have been observed at least once"
             fi
         else
-            echo -e "  ${DIM}No activation log found. Inject traces with:${NC}"
-            echo -e "  ${DIM}  bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --inject-dir ~/.agents/skills/${NC}"
+            echo -e "  ${DIM}No activation log found. This is no-data, not a doctor failure.${NC}"
         fi
         echo ""
 

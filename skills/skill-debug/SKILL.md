@@ -25,6 +25,8 @@ One-shot read-only snapshot:
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --lang zh
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --raw
 ```
 
 ## The Problem
@@ -42,6 +44,15 @@ This skill provides a three-layer debug architecture to collect evidence for the
 ```bash
 # Read-only bundle: probe + dashboard + hygiene scan (does not inject traces)
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
+```
+
+The default doctor terminal output is a compact governance summary. Use `--raw`
+only when you need full subtool terminal reports. Use `--lang zh` for Chinese
+terminal labels. JSON output keeps stable English keys and includes
+`product_version: "2.0"`; schema strings such as `skills-refiner.doctor.v1` are
+compatibility versions, not product release numbers.
+
+```bash
 
 # Layer 1: What local skill surfaces are likely discoverable right now?
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh

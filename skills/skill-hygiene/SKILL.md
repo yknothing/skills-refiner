@@ -69,7 +69,11 @@ Options:
 
 The script outputs structured data. Your job is to **interpret** it.
 
-Accurate local statistics are limited to facts the filesystem can prove: skill file counts, canonical paths, symlink links, broken links, content hashes, source remotes when Git exposes them, and name/content/version collisions. Runtime usage and outcome quality remain outside the scanner; combine with native telemetry or `skill-debug` canary evidence.
+The terminal report includes a severity summary, but the script still collects
+facts rather than issuing cleanup verdicts. Active collisions exclude symlink
+distribution links, backup/archive remnants, and same-content copies.
+
+Accurate local statistics are limited to facts the filesystem can prove: skill file counts, canonical paths, symlink links, broken links, content hashes, source remotes when Git exposes them, and active name/content/version collisions. Runtime usage and outcome quality remain outside the scanner; combine with native telemetry or `skill-debug` canary evidence.
 
 Key facts now include:
 - `frontmatter` — local discovery contract facts: name and description, plus capped description metadata

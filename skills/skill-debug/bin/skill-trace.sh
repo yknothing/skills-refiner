@@ -243,7 +243,7 @@ show_status() {
     init_home_paths || exit 2
 
     echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
-    echo -e "${BOLD}║        Skill Trace Status v1.0           ║${NC}"
+    echo -e "${BOLD}║        Skill Trace Status v2.0           ║${NC}"
     echo -e "${BOLD}╚══════════════════════════════════════════╝${NC}"
     echo ""
 

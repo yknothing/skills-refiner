@@ -115,17 +115,21 @@ Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https:/
 
 ### One-shot health snapshot (`doctor`)
 
-Read-only aggregate (discovery probe → activation dashboard → hygiene scan). Does **not** inject activation traces (those edit skill files).
+Read-only aggregate (discovery probe -> activation dashboard -> hygiene scan). Does **not** inject activation traces (those edit skill files). The default report is a compact governance summary; pass `--raw` when you need the full subtool terminal output.
 
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 # Machine-readable bundle for agents / tooling:
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
+# Chinese terminal report:
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --lang zh
 # From a git checkout (wrapper):
 bash bin/skills-refiner-doctor.sh --help
 ```
 
 Optional env: `SKILLS_REFINER_TOOLS_ROOT` — directory that contains `skill-debug/` and `skill-hygiene/` (same layout as `~/.agents/skills`).
+
+Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v1`, `skill-dashboard.identity.v1`, and `skill-scan.v2` are schema versions, not product release numbers.
 
 ## Repository layout
 

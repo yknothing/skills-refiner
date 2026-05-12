@@ -124,14 +124,17 @@ These examples demonstrate the `skill-hygiene` and `skill-debug` skills.
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --lang zh
 # Contributor checkout:
 bash bin/skills-refiner-doctor.sh --help
 ```
 
 Expected behavior:
-- runs discovery probe, activation dashboard, and hygiene scan terminal report in sequence;
+- runs discovery probe, activation dashboard, and hygiene scan, then prints a compact governance summary;
 - does **not** inject or strip activation traces (those mutate skill files);
-- `--json` emits a single JSON object (`schema: skills-refiner.doctor.v1`) suitable for AI interpretation.
+- `--raw` appends full subtool terminal reports for debugging;
+- `--json` emits a single JSON object (`schema: skills-refiner.doctor.v1`) suitable for AI interpretation;
+- `product_version: "2.0"` is the release line; schema versions are API compatibility markers.
 
 ### 12) Scan installed skills for health issues
 

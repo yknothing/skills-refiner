@@ -110,17 +110,21 @@ npx skills add yknothing/skills-refiner
 
 ### 一键健康快照（`doctor`）
 
-只读串联：**发现 probe → 激活面板 → hygiene 扫描**。**不会**注入探针（那会改写 skill 文件）。
+只读聚合：**发现 probe -> 激活面板 -> hygiene 扫描**。**不会**注入探针（那会改写 skill 文件）。默认输出是压缩治理摘要；需要完整底层终端输出时使用 `--raw`。
 
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 # 面向 agent / 工具的单文件 JSON：
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
+# 中文终端报告：
+bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --lang zh
 # 克隆本仓库后可用根目录包装脚本：
 bash bin/skills-refiner-doctor.sh --help
 ```
 
 可选环境变量：`SKILLS_REFINER_TOOLS_ROOT` — 包含 `skill-debug/` 与 `skill-hygiene/` 的目录（布局与 `~/.agents/skills` 相同）。
+
+版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v1`、`skill-dashboard.identity.v1`、`skill-scan.v2` 等字段是 JSON schema / 事件协议版本，不是产品发布号。
 
 ## 仓库布局
 

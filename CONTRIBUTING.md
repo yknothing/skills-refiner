@@ -52,6 +52,7 @@ evals/                    # Evaluation rubrics and cases
 ```bash
 # Run shell integration tests
 bash skills/skill-hygiene/tests/test-scan.sh
+bash skills/skill-debug/tests/test-doctor.sh
 bash skills/skill-debug/tests/test-trace.sh
 bash skills/skill-debug/tests/test-probe.sh
 bash skills/skill-debug/tests/test-dashboard.sh

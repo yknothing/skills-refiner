@@ -647,7 +647,7 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" '{metadata:{schema_version:"skill-scan.v2", scanned_at:$scanned_at, stale_days:$stale_days, scope:"agent-recognized-directories"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], name_collisions:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" '{metadata:{schema_version:"skill-scan.v2", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, scope:"agent-recognized-directories"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], name_collisions:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
@@ -675,8 +675,10 @@ main() {
     done
 
     all_data=$(echo "$all_data" | jq '
+        def is_backup_or_archive:
+            (.dir_name | test("\\.backup\\.|\\.disabled|\\.tmp|\\.old|\\.archive"));
         .name_collisions = (
-            .skills
+            [.skills[] | select(is_backup_or_archive | not)]
             | sort_by(.name)
             | group_by(.name)
             | map(select(length > 1) | {
@@ -694,7 +696,7 @@ main() {
                     provenance
                 }]
             })
-            | map(select(.distinct_canonical_dirs > 1 or (.distinct_versions | length) > 1 or (.distinct_hashes | length) > 1))
+            | map(select((.distinct_versions | length) > 1 or (.distinct_hashes | length) > 1))
         )
     ')
 
@@ -744,10 +746,23 @@ main() {
     local collision_count
     collision_count=$(echo "$all_data" | jq '.name_collisions | length')
     if [ "$collision_count" -gt 0 ]; then
-        echo -e "  ${YELLOW}Name/version/content collisions:${NC} $collision_count"
+        echo -e "  ${YELLOW}Active name/version/content collisions:${NC} $collision_count"
     else
-        echo "  Name/version/content collisions: 0"
+        echo "  Active name/version/content collisions: 0"
     fi
+    echo ""
+
+    local broken_count security_count backup_count critical_count advisory_count
+    broken_count=$(echo "$all_data" | jq '.broken_symlinks | length')
+    security_count=$(echo "$all_data" | jq '[.skills[] | select(any(.flags[]?; . == "pipe_to_shell" or . == "dangerous_cmd" or . == "possible_secret"))] | length')
+    backup_count=$(echo "$all_data" | jq '[.skills[] | select(any(.flags[]?; startswith("backup")))] | length')
+    critical_count=$((broken_count + security_count + collision_count))
+    advisory_count=$backup_count
+    echo -e "${BOLD}── Severity Summary ──${NC}"
+    echo "  Critical signals:     $critical_count (broken symlinks: $broken_count, security review flags: $security_count, active collisions: $collision_count)"
+    echo "  Advisory signals:     $advisory_count (backup/archive remnants)"
+    echo "  Informational signals: topology, provenance, size, and age distributions below"
+    echo -e "  ${DIM}Signals are not verdicts; validate high-priority paths directly before cleanup.${NC}"
     echo ""
 
     local flagged flagged_count
@@ -766,8 +781,6 @@ main() {
         echo ""
     fi
 
-    local broken_count
-    broken_count=$(echo "$all_data" | jq '.broken_symlinks | length')
     if [ "$broken_count" -gt 0 ]; then
         echo -e "${RED}${BOLD}── Broken Symlinks ──${NC}"
         echo "$all_data" | jq -r '.broken_symlinks[] | "  \(.dir_name) in \(.location) → \(.link_target)"'
