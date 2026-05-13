@@ -76,7 +76,8 @@ distribution links, backup/archive remnants, and same-content copies.
 Accurate local statistics are limited to facts the filesystem can prove: skill file counts, canonical paths, symlink links, broken links, content hashes, source remotes when Git exposes them, and active name/content/version collisions. Runtime usage and outcome quality remain outside the scanner; combine with native telemetry or `skill-debug` canary evidence.
 
 Key facts now include:
-- `frontmatter` — local discovery contract facts: name and description, plus capped description metadata
+- `frontmatter` — local discovery contract facts: name and description, exact description length, UTF-8 byte length, and capped preview metadata
+- `runtime_contract` — hard loader facts such as missing `name`, missing `description`, or `description` longer than the 1024-character loader limit
 - `claude_code` — bounded Claude Code invocation signals such as model/user invocation controls, tool/path counts, and hook event names
 - `openai` — bounded `agents/openai.yaml` facts: file presence, implicit-invocation policy, and tool dependency count; not runtime behavior proof
 - `content_sha256` — local content identity for same-name comparison without network access
@@ -92,49 +93,56 @@ Treat the repository as the source of truth and installed global directories as 
 
 When reviewing scan results, apply your judgment across these dimensions. Not all apply to every skill — use the context.
 
-### 1. Frontmatter & Discoverability
+### 1. Runtime Loadability
+Can the skill be loaded before any design judgment starts?
+- Is `runtime_contract.loadable` true?
+- Are required frontmatter fields present?
+- Is `description` within the loader limit?
+- If this layer fails, report it as a critical blocker before evaluating design quality.
+
+### 2. Frontmatter & Discoverability
 Is the skill well-described? Can an agent find it when it's relevant?
 - Does `description` contain clear triggering conditions?
 - Does `name` follow conventions?
 - Would you, as an agent, know when to invoke this skill based on its description alone?
 - Do official invocation controls explain low canary observation, such as `disable-model-invocation` or user-only invocation?
 
-### 2. Structural Quality
+### 3. Structural Quality
 Does the skill communicate its purpose effectively?
 - Is there a clear "when to use" signal?
 - Are instructions actionable, not vague?
 - Is the skill well-scoped (one job done well) or overloaded?
 
-### 3. Size & Context Cost
+### 4. Size & Context Cost
 Skills are loaded into agent context. Oversized skills waste tokens.
 - Extremely small skills (<30 words of content) may be stubs or placeholders
 - Very large skills (>5000 words) may need splitting
 - These are heuristics, not rules — a reference skill legitimately needs more words
 
-### 4. Freshness
+### 5. Freshness
 Old doesn't mean bad. Many skills are stable and don't need updates.
 - Staleness (configurable, default 180 days) is a **signal**, not a verdict
 - Cross-reference with: is the skill still relevant? Does it reference deprecated tools?
 - A 1-year-old skill that works perfectly is healthy
 
-### 5. Link Integrity
+### 6. Link Integrity
 - Symlinks: are they pointing to valid targets?
 - Broken symlinks indicate uninstalled or moved source skills
 - Internal references to other skills or files: do they resolve?
 
-### 6. Backup & Archive Remnants
+### 7. Backup & Archive Remnants
 Directories with `.backup.`, `.disabled-`, `.old` in their names may be leftover from upgrades.
 - These are **advisory findings** — the user may have kept them intentionally
 - Report them; do not auto-remove
 
-### 7. Security Indicators
+### 8. Security Indicators
 Flag (do not auto-fix) skills that contain:
 - Hardcoded secrets or tokens
 - pipe-to-shell installer patterns, such as downloader output sent directly into `sh` or `bash`
 - destructive filesystem commands rooted at `/`, or privileged shell commands in automated blocks
 - These need human review, not automated removal
 
-### 8. Provenance
+### 9. Provenance
 Where did the skill come from?
 - Installed via npx/npm (standard) — check if source repo is known
 - Auto-generated (e.g., `.codex/memories/skills/`) — may be disposable

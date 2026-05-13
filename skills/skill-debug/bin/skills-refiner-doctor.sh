@@ -248,6 +248,7 @@ topology_variants=$(metric "$probe_tmp" '.counts.topology_variants')
 broken_symlinks=$(metric "$scan_tmp" '.broken_symlinks | length')
 scan_collisions=$(metric "$scan_tmp" '.name_collisions | length')
 flagged_skills=$(metric "$scan_tmp" '[.skills[] | select(.flags | length > 0)] | length')
+load_blockers=$(metric "$scan_tmp" '.runtime_load_blockers | length')
 security_flags=$(metric "$scan_tmp" '[.skills[] | select(any(.flags[]?; . == "pipe_to_shell" or . == "dangerous_cmd" or . == "possible_secret"))] | length')
 backup_flags=$(metric "$scan_tmp" '[.skills[] | select(any(.flags[]?; startswith("backup")))] | length')
 canonical_count=$(metric "$scan_tmp" '[.skills[] | select(.location == ".agents/skills")] | length')
@@ -278,7 +279,7 @@ if [ "$LANGUAGE" = "zh" ]; then
     echo "  $dash_line_zh"
     echo ""
     echo "信号分层"
-    echo "  critical signals: broken_symlinks=$broken_symlinks, security_review_flags=$security_flags, active_name_conflicts=$active_conflicts"
+    echo "  critical signals: load_blockers=$load_blockers, broken_symlinks=$broken_symlinks, security_review_flags=$security_flags, active_name_conflicts=$active_conflicts"
     echo "  advisory signals: topology_variants=$topology_variants, backup_or_archive_remnants=$backup_flags, scan_name_collisions=$scan_collisions"
     echo "  informational: flagged_skills=$flagged_skills, dashboard_status=$dash_status"
     echo ""
@@ -298,7 +299,7 @@ else
     echo "  $dash_line_en"
     echo ""
     echo "Signal Levels"
-    echo "  critical signals: broken_symlinks=$broken_symlinks, security_review_flags=$security_flags, active_name_conflicts=$active_conflicts"
+    echo "  critical signals: load_blockers=$load_blockers, broken_symlinks=$broken_symlinks, security_review_flags=$security_flags, active_name_conflicts=$active_conflicts"
     echo "  advisory signals: topology_variants=$topology_variants, backup_or_archive_remnants=$backup_flags, scan_name_collisions=$scan_collisions"
     echo "  informational: flagged_skills=$flagged_skills, dashboard_status=$dash_status"
     echo ""

@@ -68,6 +68,26 @@ setup_sandbox() {
     write_skill "$SANDBOX/.agents/skills/healthy-skill" "healthy-skill" "Use when testing a well formed skill." "This is a healthy skill with enough content to avoid stub classification in hygiene tests."
     write_skill "$SANDBOX/.agents/skills/tiny-stub" "tiny-stub" "stub" "TODO"
     write_skill "$SANDBOX/.agents/skills/old-tool.backup.20250101" "old-tool" "Use when testing backup detection." "backup"
+    local overlong_desc
+    overlong_desc=$(printf 'x%.0s' {1..1030})
+    write_skill "$SANDBOX/.agents/skills/overlong-description" "overlong-description" "$overlong_desc" "This skill has an overlong single-line description so scanner tests catch runtime loader contract failures."
+
+    local overlong_block_line
+    overlong_block_line=$(printf 'y%.0s' {1..350})
+    mkdir -p "$SANDBOX/.agents/skills/overlong-block-description"
+    cat > "$SANDBOX/.agents/skills/overlong-block-description/SKILL.md" << EOF
+---
+name: overlong-block-description
+description: |
+  $overlong_block_line
+  $overlong_block_line
+  $overlong_block_line
+---
+
+# overlong-block-description
+
+This skill has an overlong block-scalar description so the scanner proves it does not truncate frontmatter before measuring loader contract compliance.
+EOF
 
     mkdir -p "$SANDBOX/.agents/skills/no-name-skill"
     cat > "$SANDBOX/.agents/skills/no-name-skill/SKILL.md" << 'EOF'
@@ -89,6 +109,12 @@ EOF
     ln -s "../../.agents/skills/healthy-skill" "$SANDBOX/.claude/skills/healthy-skill"
     ln -s "../../.agents/skills/deleted-skill" "$SANDBOX/.claude/skills/broken-link"
     write_skill "$SANDBOX/.claude/skills/native-geo" "native-geo" "Use when testing native agent skill detection." "A native skill not installed through the canonical path."
+
+    local linked_overlong_desc
+    linked_overlong_desc=$(printf 'z%.0s' {1..1031})
+    write_skill "$SANDBOX/vendor/linked-overlong-skill" "linked-overlong-skill" "$linked_overlong_desc" "This out-of-canonical skill is visible only through a symlink distribution and must still count as a runtime load blocker."
+    mkdir -p "$SANDBOX/.cursor/skills"
+    ln -s "../../vendor/linked-overlong-skill" "$SANDBOX/.cursor/skills/linked-overlong-skill"
 
     write_skill "$SANDBOX/.codex/skills/codex-only" "codex-only" "Use when testing codex-specific skill detection." "An independently installed codex skill."
     mkdir -p "$SANDBOX/.codex/skills/healthy-skill"
@@ -161,15 +187,16 @@ run_tests() {
     fi
 
     echo -e "${BOLD}── Topology ──${NC}"
-    assert_eq "Canonical native count" "5" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
+    assert_eq "Canonical native count" "7" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
     assert_eq "Claude symlink count" "1" "$(echo "$json_output" | jq '.topology[".claude/skills"].symlinks // 0')"
     assert_eq "Claude native count" "1" "$(echo "$json_output" | jq '.topology[".claude/skills"].native // 0')"
+    assert_eq "Cursor symlink count" "1" "$(echo "$json_output" | jq '.topology[".cursor/skills"].symlinks // 0')"
     assert_eq "Gemini empty dir has zero skills" "0" "$(echo "$json_output" | jq '.topology[".gemini/skills"].total // 0')"
     echo ""
 
     echo -e "${BOLD}── Symlink Semantics ──${NC}"
     assert_eq "Symlinks excluded from unique skills array" "0" "$(echo "$json_output" | jq '[.skills[] | select(.type == "symlink")] | length')"
-    assert_eq "Symlink distributions preserved in skill_links" "1" "$(echo "$json_output" | jq '.skill_links | length')"
+    assert_eq "Symlink distributions preserved in skill_links" "2" "$(echo "$json_output" | jq '.skill_links | length')"
     assert_eq "Distribution keeps skill name" "healthy-skill" "$(echo "$json_output" | jq -r '.skill_links[0].name // ""')"
     assert_eq "Distribution records canonical file" "$SANDBOX/.agents/skills/healthy-skill/SKILL.md" "$(echo "$json_output" | jq -r '.skill_links[0].canonical_skill_file // ""')"
     assert_eq "Broken symlink detected" "1" "$(echo "$json_output" | jq '.broken_symlinks | length')"
@@ -179,6 +206,12 @@ run_tests() {
     echo -e "${BOLD}── Flags and Scope ──${NC}"
     assert_eq "Backup remnant flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "backup_remnant")] | length')"
     assert_eq "Missing name flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "no_name")] | length')"
+    assert_eq "Overlong real-directory descriptions flagged" "2" "$(echo "$json_output" | jq '[.skills[] | select(any(.flags[]?; startswith("description_too_long:")))] | length')"
+    assert_eq "Overlong descriptions include symlink distributions" "3" "$(echo "$json_output" | jq '[.skills[], .skill_links[]] | map(select(any(.runtime_contract.load_blockers[]?; . == "description_too_long"))) | length')"
+    assert_eq "Unique load blockers include symlink-only targets" "4" "$(echo "$json_output" | jq '[.skills + .skill_links | unique_by(.canonical_skill_file)[] | select(.runtime_contract.loadable == false)] | length')"
+    assert_eq "Missing name is a load blocker" "1" "$(echo "$json_output" | jq '[.skills[] | select(any(.runtime_contract.load_blockers[]?; . == "missing_name"))] | length')"
+    assert_eq "Single-line description length is not pre-truncated" "1030" "$(echo "$json_output" | jq '.skills[] | select(.name == "overlong-description") | .frontmatter.description_length')"
+    assert_eq "Block description length is not pre-truncated" "1052" "$(echo "$json_output" | jq '.skills[] | select(.name == "overlong-block-description") | .frontmatter.description_length')"
     assert_eq "Pipe-to-shell flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "pipe_to_shell")] | length')"
     assert_eq "Dangerous command flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "dangerous_cmd")] | length')"
     assert_eq "Project repo skill excluded from global scan" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "project-skill")] | length')"
@@ -191,6 +224,8 @@ run_tests() {
     assert_eq "JSON has topology key" "true" "$(echo "$json_output" | jq 'has("topology")')"
     assert_eq "JSON has skills key" "true" "$(echo "$json_output" | jq 'has("skills")')"
     assert_eq "JSON has skill_links key" "true" "$(echo "$json_output" | jq 'has("skill_links")')"
+    assert_eq "JSON has runtime_load_blockers key" "true" "$(echo "$json_output" | jq 'has("runtime_load_blockers")')"
+    assert_eq "Runtime load blockers are elevated" "4" "$(echo "$json_output" | jq '.runtime_load_blockers | length')"
     assert_eq "JSON-only mode does not write report files" "0" "$report_count"
     echo ""
 

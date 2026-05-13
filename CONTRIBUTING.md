@@ -64,6 +64,7 @@ The `evals/` directory contains human/model review anchors, not an automated rel
 ### SKILL.md files
 
 - Must have YAML frontmatter with `name` and `description` fields.
+- `description` must stay within the runtime loader limit of 1024 characters. Put extended trigger lists and examples in the body, not the frontmatter.
 - `description` should contain clear trigger conditions so agents know when to activate the skill.
 - Keep the skill well-scoped: one clear job per skill.
 

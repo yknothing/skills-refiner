@@ -89,6 +89,17 @@ Titles, headings, body text, conclusions, and recommendations must stay in one l
 
 Keep these layers distinct.
 
+### 0. Runtime validity
+Can the object actually be loaded, discovered, or executed by its intended agent before design analysis begins?
+
+For Agent Skills, check the loader contract first:
+- `SKILL.md` has parseable frontmatter.
+- Required fields such as `name` and `description` exist.
+- `description` is within the loader limit.
+- Declared dependencies and referenced local files are not obviously missing.
+
+If runtime validity fails, treat that as the first finding. Do not let polished documentation, rich examples, or strong design intent hide the fact that the skill cannot enter the runtime.
+
 ### 1. Positioning
 What is the object, what problem does it mainly solve, and where are its boundaries?
 
@@ -114,6 +125,7 @@ When Stage 2 applies, what should be adopted directly, redesigned first, or reje
 ### Step 1 — Define the object
 Explain:
 - what the object actually is;
+- whether it passes the basic runtime/loadability contract, if applicable;
 - what problem it mainly solves;
 - what its center of gravity is;
 - where it works best;

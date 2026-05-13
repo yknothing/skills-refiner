@@ -52,6 +52,7 @@ detect_home_dir() {
 STALE_DAYS=180
 JSON_ONLY=false
 NO_WRITE=false
+MAX_DESCRIPTION_LENGTH=1024
 
 # Colors
 RED='\033[0;31m'
@@ -161,7 +162,11 @@ get_frontmatter_text() {
             sub(/^[[:space:]]+/, "", line)
             print line
         }
-    ' "$file" 2>/dev/null | head -c 1000
+    ' "$file" 2>/dev/null
+}
+
+utf8_byte_length() {
+    LC_ALL=C printf '%s' "$1" | wc -c | tr -d ' '
 }
 
 get_metadata_value() {
@@ -429,8 +434,17 @@ scan_directory() {
             flags+=("backup_remnant")
         fi
 
+        local desc_length desc_utf8_bytes desc_over_limit
+        desc_length=${#desc_full}
+        desc_utf8_bytes=$(utf8_byte_length "$desc_full")
+        desc_over_limit=false
+        if [ "$desc_length" -gt "$MAX_DESCRIPTION_LENGTH" ]; then
+            desc_over_limit=true
+        fi
+
         [ -z "$name" ] && flags+=("no_name")
         [ -z "$desc" ] && flags+=("no_description")
+        $desc_over_limit && flags+=("description_too_long:${desc_length}>${MAX_DESCRIPTION_LENGTH}")
 
         [ "$word_count" -lt 30 ] && flags+=("very_small")
         [ "$word_count" -gt 5000 ] && flags+=("very_large")
@@ -479,7 +493,7 @@ scan_directory() {
         local when_to_use when_to_use_preview disable_model_invocation user_invocable model effort context agent shell_value
         local allowed_tools_json paths_json hook_events_json_value has_hooks extra_keys_json fm_keys_json openai_yaml openai_yaml_exists
         local allow_implicit_invocation tool_dependencies_count
-        local desc_length desc_truncated when_to_use_length when_to_use_truncated allowed_tools_count paths_count
+        local desc_truncated when_to_use_length when_to_use_truncated allowed_tools_count paths_count
 
         when_to_use=$(get_frontmatter_text "$skill_file" "when_to_use")
         when_to_use_preview="${when_to_use:0:200}"
@@ -498,7 +512,6 @@ scan_directory() {
         fm_keys_json=$(frontmatter_keys_json "$skill_file")
         extra_keys_json=$(echo "$fm_keys_json" | jq 'map(. as $key | select((["name","description","when_to_use","disable-model-invocation","user-invocable","allowed-tools","model","effort","context","agent","paths","shell","hooks"] | index($key)) | not))')
 
-        desc_length=${#desc_full}
         desc_truncated=false
         [ "$desc_length" -gt 200 ] && desc_truncated=true
         when_to_use_length=${#when_to_use}
@@ -520,6 +533,7 @@ scan_directory() {
         local entry_json
         entry_json=$(jq -n \
             --arg name "${name:-$entry_name}" \
+            --arg frontmatter_name "$name" \
             --arg dir_name "$entry_name" \
             --arg location "$dir_label" \
             --arg entry_type "$entry_type" \
@@ -549,8 +563,11 @@ scan_directory() {
             --argjson mtime "$mtime" \
             --argjson age "$age_days" \
             --argjson stale_days "$STALE_DAYS" \
+            --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" \
             --argjson desc_length "$desc_length" \
+            --argjson desc_utf8_bytes "$desc_utf8_bytes" \
             --argjson desc_truncated "$desc_truncated" \
+            --argjson desc_over_limit "$desc_over_limit" \
             --argjson when_to_use_length "$when_to_use_length" \
             --argjson when_to_use_truncated "$when_to_use_truncated" \
             --argjson allowed_tools "$allowed_tools_json" \
@@ -576,10 +593,24 @@ scan_directory() {
                 description: $desc,
                 frontmatter: {
                     contract: "name_description_only",
-                    name: $name,
+                    name: $frontmatter_name,
                     description: $desc,
+                    max_description_length: $max_description_length,
                     description_length: $desc_length,
+                    description_utf8_bytes: $desc_utf8_bytes,
                     description_truncated: $desc_truncated
+                },
+                runtime_contract: {
+                    loader: "agent-skills",
+                    loadable: (($frontmatter_name != "") and ($desc != "") and ($desc_over_limit | not)),
+                    load_blockers: ([
+                        if $frontmatter_name == "" then "missing_name" else empty end,
+                        if $desc == "" then "missing_description" else empty end,
+                        if $desc_over_limit then "description_too_long" else empty end
+                    ]),
+                    max_description_length: $max_description_length,
+                    description_length: $desc_length,
+                    description_utf8_bytes: $desc_utf8_bytes
                 },
                 claude_code: {
                     when_to_use_length: $when_to_use_length,
@@ -647,7 +678,7 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" '{metadata:{schema_version:"skill-scan.v2", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, scope:"agent-recognized-directories"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], name_collisions:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v2", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], runtime_load_blockers:[], name_collisions:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
@@ -677,6 +708,19 @@ main() {
     all_data=$(echo "$all_data" | jq '
         def is_backup_or_archive:
             (.dir_name | test("\\.backup\\.|\\.disabled|\\.tmp|\\.old|\\.archive"));
+        .runtime_load_blockers = (
+            .skills + .skill_links
+            | unique_by(.canonical_skill_file)
+            | map(select(.runtime_contract.loadable == false) | {
+                name,
+                location,
+                type,
+                canonical_skill_file,
+                load_blockers: .runtime_contract.load_blockers,
+                description_length: .runtime_contract.description_length,
+                max_description_length: .runtime_contract.max_description_length
+            })
+        ) |
         .name_collisions = (
             [.skills[] | select(is_backup_or_archive | not)]
             | sort_by(.name)
@@ -752,14 +796,15 @@ main() {
     fi
     echo ""
 
-    local broken_count security_count backup_count critical_count advisory_count
+    local broken_count security_count load_blocker_count backup_count critical_count advisory_count
     broken_count=$(echo "$all_data" | jq '.broken_symlinks | length')
     security_count=$(echo "$all_data" | jq '[.skills[] | select(any(.flags[]?; . == "pipe_to_shell" or . == "dangerous_cmd" or . == "possible_secret"))] | length')
+    load_blocker_count=$(echo "$all_data" | jq '.runtime_load_blockers | length')
     backup_count=$(echo "$all_data" | jq '[.skills[] | select(any(.flags[]?; startswith("backup")))] | length')
-    critical_count=$((broken_count + security_count + collision_count))
+    critical_count=$((broken_count + security_count + load_blocker_count + collision_count))
     advisory_count=$backup_count
     echo -e "${BOLD}── Severity Summary ──${NC}"
-    echo "  Critical signals:     $critical_count (broken symlinks: $broken_count, security review flags: $security_count, active collisions: $collision_count)"
+    echo "  Critical signals:     $critical_count (load blockers: $load_blocker_count, broken symlinks: $broken_count, security review flags: $security_count, active collisions: $collision_count)"
     echo "  Advisory signals:     $advisory_count (backup/archive remnants)"
     echo "  Informational signals: topology, provenance, size, and age distributions below"
     echo -e "  ${DIM}Signals are not verdicts; validate high-priority paths directly before cleanup.${NC}"
@@ -775,9 +820,15 @@ main() {
         printf "  ${DIM}%-30s %-20s %-8s %s${NC}\n" "----" "--------" "-----" "-----"
         echo "$flagged" | jq -r '.[] | "\(.name)|\(.location)|\(.word_count)|\(.flags | join(", "))"' | while IFS='|' read -r name loc words flags; do
             local color="$YELLOW"
-            echo "$flags" | grep -qE 'dangerous_|pipe_to_shell|possible_secret' && color="$RED"
+            echo "$flags" | grep -qE 'dangerous_|pipe_to_shell|possible_secret|description_too_long|no_name|no_description' && color="$RED"
             printf "  ${color}%-30s${NC} %-20s %-8s %s\n" "${name:0:30}" "${loc:0:20}" "$words" "$flags"
         done
+        echo ""
+    fi
+
+    if [ "$load_blocker_count" -gt 0 ]; then
+        echo -e "${RED}${BOLD}── Runtime Load Blockers ──${NC}"
+        echo "$all_data" | jq -r '.runtime_load_blockers[] | "  \(.name) in \(.location) -> \(.load_blockers | join(", ")) (\(.canonical_skill_file))"'
         echo ""
     fi
 

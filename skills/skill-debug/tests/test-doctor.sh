@@ -12,6 +12,7 @@ trap cleanup EXIT
 
 export HOME="$SANDBOX"
 mkdir -p "$HOME/.agents/skills/minimal-skill"
+mkdir -p "$HOME/.agents/skills/overlong-skill"
 mkdir -p "$HOME/.agents/debug"
 : >"$HOME/.agents/debug/activation.jsonl"
 cat >"$HOME/.agents/skills/minimal-skill/SKILL.md" <<'EOF'
@@ -24,6 +25,17 @@ description: smoke test skill for doctor harness
 
 Smoke test body.
 EOF
+OVERLONG_DESC=$(printf 'x%.0s' {1..1030})
+cat >"$HOME/.agents/skills/overlong-skill/SKILL.md" <<EOF
+---
+name: overlong-skill
+description: $OVERLONG_DESC
+---
+
+# overlong-skill
+
+Smoke test body for doctor runtime load blocker reporting.
+EOF
 
 export SKILLS_REFINER_TOOLS_ROOT="$REPO_ROOT/skills"
 
@@ -35,6 +47,8 @@ echo "$JSON" | jq -e '.steps.dashboard.status == "ok"' >/dev/null
 echo "$JSON" | jq -e '.dashboard | type == "object"' >/dev/null
 echo "$JSON" | jq -e '.hygiene | type == "object"' >/dev/null
 echo "$JSON" | jq -e '.hygiene.skills | length >= 1' >/dev/null
+echo "$JSON" | jq -e '.hygiene.runtime_load_blockers | length == 1' >/dev/null
+echo "$JSON" | jq -e '.hygiene.runtime_load_blockers[0].load_blockers | index("description_too_long")' >/dev/null
 echo "$JSON" | jq -e '.probe | type == "object"' >/dev/null
 echo "$JSON" | jq -e 'has("probe_terminal_report") | not' >/dev/null
 
@@ -46,5 +60,6 @@ echo "$NO_LOG_JSON" | jq -e '.hygiene.skills | length >= 1' >/dev/null
 
 ZH_OUTPUT=$(bash "$DOCTOR" --cwd "$REPO_ROOT" --days 7 --lang zh)
 echo "$ZH_OUTPUT" | grep -q "只读快照"
+echo "$ZH_OUTPUT" | grep -q "load_blockers=1"
 
 echo "[OK] skills-refiner-doctor smoke test passed."

@@ -32,6 +32,8 @@ This repository addresses both:
 
 Together with a skill-creation tool such as `skill-creator`, they form a complete skill lifecycle: creation → testing → design audit → governance → observability → interpretation.
 
+The first governance question is now deliberately blunt: can the skill load at all? `skill-scan.sh` treats missing frontmatter fields and descriptions longer than the 1024-character loader limit as runtime load blockers, before softer design review begins.
+
 ## The four skills
 
 ### 1) `skills-refiner` — design-level audit
@@ -79,6 +81,7 @@ Combine with `skill-hygiene` for a full governance workflow: probe discovery →
 Across all four skills:
 
 - **AI judges, scripts collect.** Shell scripts gather structured data without making decisions. The AI interprets evidence using expertise and context. Scripts must not strip AI's judgment capability.
+- **Loadability before elegance.** A skill that cannot satisfy the runtime loader contract is a blocker, no matter how polished its docs or workflow are.
 - **Conservative by default.** If evidence is unclear, flag observations — do not recommend removal or action. Only act when evidence is unambiguous.
 - **Respect the topology.** The standard model is: canonical skills in `~/.agents/skills/`, symlinked to agent directories (`.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, etc.). Symlinks are distribution links, not duplicates. Standalone project repos are not broken global skills.
 - **Treat installs as deployment artifacts.** This repository is the source of truth. Global installed skills may drift; compare hashes/commits before treating an installed skill as current.
