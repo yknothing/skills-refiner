@@ -11,41 +11,14 @@
 
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="$SCRIPT_DIR/../../lib/common.sh"
+[ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$COMMON_SH"
+
 detect_home_dir() {
-    if [ -n "${HOME:-}" ]; then
-        printf '%s\n' "$HOME"
-        return 0
-    fi
-
-    local user home
-    user=$(id -un 2>/dev/null || whoami 2>/dev/null || true)
-
-    if [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
-        home=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6; exit}')
-        if [ -n "$home" ]; then
-            printf '%s\n' "$home"
-            return 0
-        fi
-    fi
-
-    if [ -n "$user" ] && command -v dscl >/dev/null 2>&1; then
-        home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
-        if [ -n "$home" ]; then
-            printf '%s\n' "$home"
-            return 0
-        fi
-    fi
-
-    if [ -n "$user" ]; then
-        for home in "/Users/$user" "/home/$user"; do
-            if [ -d "$home" ]; then
-                printf '%s\n' "$home"
-                return 0
-            fi
-        done
-    fi
-
-    return 1
+    sr_detect_home_dir
 }
 
 HOME_DIR=""
@@ -74,18 +47,18 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-TRACE_START="<!-- SKILL-DEBUG-TRACE-START -->"
-TRACE_END="<!-- SKILL-DEBUG-TRACE-END -->"
+TRACE_START="<!-- SKILL-DEBUG-TRACE-START v1 -->"
+TRACE_END="<!-- SKILL-DEBUG-TRACE-END v1 -->"
 
 # ── Helpers ───────────────────────────────────────────────────────────
 has_trace() {
-    grep -q "$TRACE_START" "$1" 2>/dev/null
+    sr_skill_has_trace "$1"
 }
 
 get_skill_name() {
     local file="$1"
     local name
-    name=$(sed -n '/^---$/,/^---$/p' "$file" 2>/dev/null | grep "^name:" | head -1 | sed 's/^name:[[:space:]]*//')
+    name=$(sr_get_frontmatter_field "$file" "name")
     if [ -z "$name" ]; then
         name=$(basename "$(dirname "$file")")
     fi
@@ -94,11 +67,20 @@ get_skill_name() {
 
 resolve_canonical_file() {
     local file="$1"
-    local dir base resolved_dir
-    dir=$(dirname "$file")
-    base=$(basename "$file")
-    resolved_dir=$(cd -P "$dir" 2>/dev/null && pwd) || return 1
-    printf '%s/%s\n' "$resolved_dir" "$base"
+    sr_canonical_file "$file"
+}
+
+write_preserving_metadata() {
+    local source_tmp="$1" target="$2"
+    local ref_tmp
+    ref_tmp=$(mktemp) || return 1
+    touch -r "$target" "$ref_tmp" 2>/dev/null || true
+    cat "$source_tmp" > "$target" || {
+        rm -f "$ref_tmp"
+        return 1
+    }
+    touch -r "$ref_tmp" "$target" 2>/dev/null || true
+    rm -f "$ref_tmp"
 }
 
 # ── Inject Trace ──────────────────────────────────────────────────────
@@ -122,19 +104,53 @@ inject_trace() {
     canonical_skill_file=$(resolve_canonical_file "$skill_file" 2>/dev/null || echo "$skill_file")
 
     # Build the trace block
-    local trace_block
-    trace_block=$(cat << 'TRACEEOF'
-
+    local trace_block trace_template_tmp
+    trace_template_tmp=$(mktemp) || return 1
+    cat > "$trace_template_tmp" << 'TRACEEOF'
 ## Activation Canary Trace (auto-injected by skill-debug)
-<!-- SKILL-DEBUG-TRACE-START -->
+<!-- SKILL-DEBUG-TRACE-START v1 -->
 When this skill is used, run this canary command first:
 ```bash
 _skill_debug_file="__CANONICAL_SKILL_FILE__"
 _skill_debug_hash=""
+_skill_debug_normalized_content() {
+awk '
+  function clean(line) { sub(/\r$/, "", line); return line }
+  {
+    line=clean($0)
+    if (NR == 1) if (substr(line, 1, 3) == "\357\273\277") line=substr(line, 4)
+    if (skip) {
+      if (line ~ /^<!-- SKILL-DEBUG-TRACE-END( v[0-9]+)? -->[[:space:]]*$/) skip=0
+      next
+    }
+    if (pending_header) {
+      if (!in_fence && line ~ /^<!-- SKILL-DEBUG-TRACE-START( v[0-9]+)? -->[[:space:]]*$/) {
+        skip=1
+        pending_header=0
+        next
+      }
+      print pending_header_text
+      pending_header=0
+    }
+    if (line ~ /^```/) { in_fence = !in_fence; print line; next }
+    if (!in_fence && line ~ /^## Activation (Canary )?Trace \(auto-injected by skill-debug\)[[:space:]]*$/) {
+      pending_header=1
+      pending_header_text=line
+      next
+    }
+    if (!in_fence && line ~ /^<!-- SKILL-DEBUG-TRACE-START( v[0-9]+)? -->[[:space:]]*$/) {
+      skip=1
+      next
+    }
+    print line
+  }
+  END { if (pending_header) print pending_header_text }
+' "$_skill_debug_file" 2>/dev/null
+}
 if command -v sha256sum >/dev/null 2>&1; then
-  _skill_debug_hash=$(sha256sum "$_skill_debug_file" 2>/dev/null | awk '{print $1}')
+  _skill_debug_hash=$(_skill_debug_normalized_content | sha256sum | awk '{print $1}')
 elif command -v shasum >/dev/null 2>&1; then
-  _skill_debug_hash=$(shasum -a 256 "$_skill_debug_file" 2>/dev/null | awk '{print $1}')
+  _skill_debug_hash=$(_skill_debug_normalized_content | shasum -a 256 | awk '{print $1}')
 fi
 if command -v sha256sum >/dev/null 2>&1; then
   _skill_debug_id=$(printf '%s|%s' "$_skill_debug_file" "$_skill_debug_hash" | sha256sum | awk '{print $1}')
@@ -145,9 +161,10 @@ else
 fi
 mkdir -p ~/.agents/debug && echo '{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"__SKILL_NAME__","identity_key":"'"$_skill_debug_id"'","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
 ```
-<!-- SKILL-DEBUG-TRACE-END -->
+<!-- SKILL-DEBUG-TRACE-END v1 -->
 TRACEEOF
-)
+    trace_block=$(cat "$trace_template_tmp")
+    rm -f "$trace_template_tmp"
 
     # Replace placeholder with actual skill name
     trace_block="${trace_block//__SKILL_NAME__/$skill_name}"
@@ -155,24 +172,27 @@ TRACEEOF
 
     # Find the end of frontmatter and inject after it
     local fm_end
-    fm_end=$(awk '/^---$/{c++; if(c==2){print NR; exit}}' "$skill_file")
+    fm_end=$(awk '{
+        line=$0
+        sub(/\r$/, "", line)
+        if (NR == 1) if (substr(line, 1, 3) == "\357\273\277") line=substr(line, 4)
+        if (line ~ /^---[[:space:]]*$/) { c++; if(c==2){print NR; exit} }
+    }' "$skill_file")
 
+    local tmp
+    tmp=$(mktemp) || return 1
     if [ -n "$fm_end" ]; then
         # Insert after the second --- line
-        local tmp
-        tmp=$(mktemp)
         head -n "$fm_end" "$skill_file" > "$tmp"
         echo "$trace_block" >> "$tmp"
         tail -n "+$((fm_end + 1))" "$skill_file" >> "$tmp"
-        mv "$tmp" "$skill_file"
     else
         # No frontmatter, prepend
-        local tmp
-        tmp=$(mktemp)
         echo "$trace_block" > "$tmp"
         cat "$skill_file" >> "$tmp"
-        mv "$tmp" "$skill_file"
     fi
+    write_preserving_metadata "$tmp" "$skill_file"
+    rm -f "$tmp"
 
     echo -e "${GREEN}[INJECTED]${NC} $skill_name → $skill_file"
 }
@@ -194,19 +214,12 @@ strip_trace() {
     local skill_name
     skill_name=$(get_skill_name "$skill_file")
 
-    # Remove everything between trace markers (inclusive), plus the preceding header
+    # Remove real injected trace blocks. Literal examples inside fenced code are kept.
     local tmp
-    tmp=$(mktemp)
-    awk '
-        /## Activation (Canary )?Trace \(auto-injected/ { skip=1; next }
-        /<!-- SKILL-DEBUG-TRACE-START -->/ { skip=1; next }
-        /<!-- SKILL-DEBUG-TRACE-END -->/ { skip=0; next }
-        !skip { print }
-    ' "$skill_file" > "$tmp"
-
-    # Clean up any trailing blank lines from removal
-    sed -i '' -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$tmp" 2>/dev/null || true
-    mv "$tmp" "$skill_file"
+    tmp=$(mktemp) || return 1
+    sr_strip_trace_blocks "$skill_file" > "$tmp"
+    write_preserving_metadata "$tmp" "$skill_file"
+    rm -f "$tmp"
 
     echo -e "${YELLOW}[STRIPPED]${NC} $skill_name → $skill_file"
 }
@@ -252,10 +265,10 @@ show_status() {
 
     echo -e "${BOLD}── Traced Skills ──${NC}"
     # Only scan agent-recognized skill directories, not all of $HOME
-    for _sd in .agents/skills .claude/skills .cursor/skills .codex/skills .warp/skills .gemini/skills .copilot/skills .factory/skills .github/skills .opencode/skills; do
+    while IFS= read -r _sd; do
         [ -d "$HOME_DIR/$_sd" ] || continue
         find "$HOME_DIR/$_sd" -maxdepth 3 -name "SKILL.md" -type f 2>/dev/null
-    done | while IFS= read -r f; do
+    done < <(sr_agent_skill_dirs) | while IFS= read -r f; do
         total=$((total + 1))
         if has_trace "$f"; then
             traced=$((traced + 1))

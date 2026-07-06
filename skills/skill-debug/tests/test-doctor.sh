@@ -7,7 +7,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 DOCTOR="$REPO_ROOT/bin/skills-refiner-doctor.sh"
 
 SANDBOX=$(mktemp -d)
-cleanup() { rm -rf "$SANDBOX"; }
+REPO_SURFACE_SANDBOX=$(mktemp -d)
+cleanup() { rm -rf "$SANDBOX" "$REPO_SURFACE_SANDBOX"; }
 trap cleanup EXIT
 
 export HOME="$SANDBOX"
@@ -39,6 +40,19 @@ EOF
 
 export SKILLS_REFINER_TOOLS_ROOT="$REPO_ROOT/skills"
 
+mkdir -p "$REPO_SURFACE_SANDBOX/.agents/skills"
+cp -R "$REPO_ROOT/skills/skill-debug" "$REPO_SURFACE_SANDBOX/.agents/skills/"
+cp -R "$REPO_ROOT/skills/skill-hygiene" "$REPO_SURFACE_SANDBOX/.agents/skills/"
+cp -R "$REPO_ROOT/skills/skills-appreciation" "$REPO_SURFACE_SANDBOX/.agents/skills/"
+cp -R "$REPO_ROOT/skills/skills-refiner" "$REPO_SURFACE_SANDBOX/.agents/skills/"
+REPO_SCAN=$(HOME="$REPO_SURFACE_SANDBOX" bash "$REPO_ROOT/skills/skill-hygiene/bin/skill-scan.sh" --json)
+for skill_name in skill-debug skill-hygiene skills-appreciation skills-refiner; do
+    echo "$REPO_SCAN" | jq -e --arg n "$skill_name" '.skills[] | select(.name == $n and .runtime_contract.loadable == true)' >/dev/null
+done
+echo "$REPO_SCAN" | jq -e '[.skills[] | select(.runtime_contract.description_length > 1024)] | length == 0' >/dev/null
+[ -f "$REPO_ROOT/skills/skills-appreciation/references/editorial-checklist.md" ]
+[ -f "$REPO_ROOT/skills/skills-refiner/references/skill-creator-collaboration.md" ]
+
 JSON=$(bash "$DOCTOR" --json --cwd "$REPO_ROOT" --days 7)
 echo "$JSON" | jq -e '.schema == "skills-refiner.doctor.v1"' >/dev/null
 echo "$JSON" | jq -e '.product_version == "2.0"' >/dev/null
@@ -54,12 +68,15 @@ echo "$JSON" | jq -e 'has("probe_terminal_report") | not' >/dev/null
 
 rm -f "$HOME/.agents/debug/activation.jsonl"
 NO_LOG_JSON=$(bash "$DOCTOR" --json --cwd "$REPO_ROOT" --days 7)
+echo "$NO_LOG_JSON" | jq -e '.steps.probe.status == "ok"' >/dev/null
 echo "$NO_LOG_JSON" | jq -e '.steps.dashboard.status == "no_data"' >/dev/null
+echo "$NO_LOG_JSON" | jq -e '.steps.hygiene.status == "ok"' >/dev/null
 echo "$NO_LOG_JSON" | jq -e '.dashboard.error == "no_activation_log"' >/dev/null
 echo "$NO_LOG_JSON" | jq -e '.hygiene.skills | length >= 1' >/dev/null
 
 ZH_OUTPUT=$(bash "$DOCTOR" --cwd "$REPO_ROOT" --days 7 --lang zh)
 echo "$ZH_OUTPUT" | grep -q "只读快照"
+echo "$ZH_OUTPUT" | grep -q "没有 activation log（无数据，不是失败）"
 echo "$ZH_OUTPUT" | grep -q "load_blockers=1"
 
 echo "[OK] skills-refiner-doctor smoke test passed."

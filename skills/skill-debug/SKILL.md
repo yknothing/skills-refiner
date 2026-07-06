@@ -121,16 +121,16 @@ How it works:
 
 ```markdown
 ## Activation Canary Trace (auto-injected by skill-debug)
-<!-- SKILL-DEBUG-TRACE-START -->
+<!-- SKILL-DEBUG-TRACE-START v1 -->
 When this skill is used, run this canary command first:
 \`\`\`bash
-echo '{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"SKILL_NAME","identity_key":"PATH_PLUS_HASH","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
+echo '{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"SKILL_NAME","identity_key":"PATH_PLUS_NORMALIZED_HASH","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
 \`\`\`
-<!-- SKILL-DEBUG-TRACE-END -->
+<!-- SKILL-DEBUG-TRACE-END v1 -->
 ```
 
 - The trace is a standard bash block that can be observed if the agent follows the injected instruction
-- Each new event includes a local identity key derived from canonical `SKILL.md` path plus content hash, so same-name variants are not collapsed
+- Each new event includes a local identity key derived from canonical `SKILL.md` path plus normalized content hash. Auto-injected canary blocks are excluded from that hash, so inject/strip cycles do not orphan prior observations.
 - Minimal overhead: one hash calculation and one `echo` append per observed canary
 - All traces are clearly marked for on-disk removal
 - Presence means the canary command was followed. Absence is inconclusive; it is not proof that the skill was not discovered, loaded, or useful.

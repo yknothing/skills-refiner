@@ -24,6 +24,19 @@ assert_eq() {
     fi
 }
 
+hash_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    else
+        shasum -a 256 "$file" | awk '{print $1}'
+    fi
+}
+
+file_mode() {
+    stat -c "%a" "$1" 2>/dev/null || stat -f "%Lp" "$1" 2>/dev/null
+}
+
 safe_delete_tree() {
     local target="$1" tmp_root="${TMPDIR:-/tmp}"
     tmp_root="${tmp_root%/}"
@@ -68,6 +81,31 @@ Do something useful.
 EOF
 }
 
+create_self_documenting_skill() {
+    local dir="$SANDBOX/$1"
+    mkdir -p "$dir"
+    cat > "$dir/SKILL.md" << 'EOF'
+---
+name: self-doc-skill
+description: Use when testing trace marker examples in documentation.
+---
+
+# self-doc-skill
+
+```markdown
+## Activation Canary Trace (auto-injected by skill-debug)
+<!-- SKILL-DEBUG-TRACE-START v1 -->
+When this skill is used, run this canary command first:
+```bash
+echo canary
+```
+<!-- SKILL-DEBUG-TRACE-END v1 -->
+```
+
+The fenced marker example above is documentation, not an injected trace.
+EOF
+}
+
 # ── Tests ─────────────────────────────────────────────────────────────
 run_tests() {
     echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
@@ -82,7 +120,7 @@ run_tests() {
 
     HOME="$SANDBOX" bash "$TRACE_SCRIPT" --inject "$skill_file" > /dev/null 2>&1
     local has_marker
-    has_marker=$(grep -c "SKILL-DEBUG-TRACE-START" "$skill_file")
+    has_marker=$(grep -c '^<!-- SKILL-DEBUG-TRACE-START v1 -->$' "$skill_file")
     assert_eq "Trace marker injected" "1" "$has_marker"
 
     local has_skill_name
@@ -114,12 +152,12 @@ run_tests() {
 
     # Test 2: Idempotency — inject again should skip
     echo -e "${BOLD}── Idempotency ──${NC}"
-    local before_lines
-    before_lines=$(wc -l < "$skill_file" | tr -d ' ')
+    local before_hash
+    before_hash=$(hash_file "$skill_file")
     HOME="$SANDBOX" bash "$TRACE_SCRIPT" --inject "$skill_file" > /dev/null 2>&1
-    local after_lines
-    after_lines=$(wc -l < "$skill_file" | tr -d ' ')
-    assert_eq "Second inject is no-op (same line count)" "$before_lines" "$after_lines"
+    local after_hash
+    after_hash=$(hash_file "$skill_file")
+    assert_eq "Second inject is byte-for-byte no-op" "$before_hash" "$after_hash"
 
     echo ""
 
@@ -136,6 +174,23 @@ run_tests() {
     has_instructions=$(grep -c "## Instructions" "$skill_file")
     assert_eq "Original content preserved after strip" "1" "$has_instructions"
 
+    local stripped_content
+    stripped_content=$(cat "$skill_file")
+    local expected_content
+    expected_content=$(cat << 'EOF'
+---
+name: test-skill
+description: Use when testing trace injection.
+---
+
+# test-skill
+
+## Instructions
+Do something useful.
+EOF
+)
+    assert_eq "Inject then strip restores original content" "$expected_content" "$stripped_content"
+
     echo ""
 
     # Test 4: Strip on clean skill is no-op
@@ -151,7 +206,56 @@ run_tests() {
 
     echo ""
 
-    # Test 5: Inject on non-existent file
+    # Test 5: Documentation examples are not treated as injected traces
+    echo -e "${BOLD}── Self Documentation Safety ──${NC}"
+    create_self_documenting_skill "self-doc"
+    local self_doc_file="$SANDBOX/self-doc/SKILL.md"
+    local self_doc_before
+    self_doc_before=$(hash_file "$self_doc_file")
+    HOME="$SANDBOX" bash "$TRACE_SCRIPT" --strip "$self_doc_file" > /dev/null 2>&1
+    local self_doc_after
+    self_doc_after=$(hash_file "$self_doc_file")
+    assert_eq "Strip ignores fenced trace marker examples" "$self_doc_before" "$self_doc_after"
+
+    HOME="$SANDBOX" bash "$TRACE_SCRIPT" --inject "$self_doc_file" > /dev/null 2>&1
+    local self_doc_markers
+    self_doc_markers=$(grep -c '^<!-- SKILL-DEBUG-TRACE-START v1 -->$' "$self_doc_file")
+    assert_eq "Inject adds one real marker and keeps documentation marker" "2" "$self_doc_markers"
+
+    HOME="$SANDBOX" bash "$TRACE_SCRIPT" --strip "$self_doc_file" > /dev/null 2>&1
+    local self_doc_markers_after
+    self_doc_markers_after=$(grep -c '^<!-- SKILL-DEBUG-TRACE-START v1 -->$' "$self_doc_file")
+    assert_eq "Strip removes only real marker" "1" "$self_doc_markers_after"
+
+    echo ""
+
+    # Test 6: CRLF/BOM frontmatter is still recognized for insertion point
+    echo -e "${BOLD}── Frontmatter Edge Cases ──${NC}"
+    local crlf_dir="$SANDBOX/crlf-skill"
+    mkdir -p "$crlf_dir"
+    printf '\357\273\277---\r\nname: crlf-skill\r\ndescription: Use when testing CRLF frontmatter.\r\n---\r\n\r\n# crlf-skill\r\n' > "$crlf_dir/SKILL.md"
+    HOME="$SANDBOX" bash "$TRACE_SCRIPT" --inject "$crlf_dir/SKILL.md" > /dev/null 2>&1
+    local crlf_marker_line
+    crlf_marker_line=$(grep -n '^<!-- SKILL-DEBUG-TRACE-START v1 -->$' "$crlf_dir/SKILL.md" | cut -d: -f1)
+    assert_eq "CRLF/BOM trace inserted after frontmatter" "6" "$crlf_marker_line"
+
+    echo ""
+
+    # Test 7: Inject preserves permissions
+    echo -e "${BOLD}── File Metadata ──${NC}"
+    create_test_skill "mode-skill"
+    local mode_file="$SANDBOX/mode-skill/SKILL.md"
+    chmod 640 "$mode_file"
+    local mode_before
+    mode_before=$(file_mode "$mode_file")
+    HOME="$SANDBOX" bash "$TRACE_SCRIPT" --inject "$mode_file" > /dev/null 2>&1
+    local mode_after
+    mode_after=$(file_mode "$mode_file")
+    assert_eq "Inject preserves file mode" "$mode_before" "$mode_after"
+
+    echo ""
+
+    # Test 8: Inject on non-existent file
     echo -e "${BOLD}── Error Handling ──${NC}"
     local err_output
     err_output=$(HOME="$SANDBOX" bash "$TRACE_SCRIPT" --inject "/nonexistent/SKILL.md" 2>&1)

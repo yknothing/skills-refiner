@@ -11,42 +11,15 @@
 
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="$SCRIPT_DIR/../../lib/common.sh"
+[ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$COMMON_SH"
+
 # ── Config ────────────────────────────────────────────────────────────
 detect_home_dir() {
-    if [ -n "${HOME:-}" ]; then
-        printf '%s\n' "$HOME"
-        return 0
-    fi
-
-    local user home
-    user=$(id -un 2>/dev/null || whoami 2>/dev/null || true)
-
-    if [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
-        home=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6; exit}')
-        if [ -n "$home" ]; then
-            printf '%s\n' "$home"
-            return 0
-        fi
-    fi
-
-    if [ -n "$user" ] && command -v dscl >/dev/null 2>&1; then
-        home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
-        if [ -n "$home" ]; then
-            printf '%s\n' "$home"
-            return 0
-        fi
-    fi
-
-    if [ -n "$user" ]; then
-        for home in "/Users/$user" "/home/$user"; do
-            if [ -d "$home" ]; then
-                printf '%s\n' "$home"
-                return 0
-            fi
-        done
-    fi
-
-    return 1
+    sr_detect_home_dir
 }
 
 STALE_DAYS=180
@@ -107,19 +80,10 @@ REPORT_JSON="$REPORT_DIR/scan-$TIMESTAMP.json"
 
 # Agent-recognized directories to scan. These are active consumption surfaces,
 # not arbitrary workspace/project directories.
-AGENT_DIRS=(
-    "$HOME_DIR/.agents/skills"
-    "$HOME_DIR/.claude/skills"
-    "$HOME_DIR/.cursor/skills"
-    "$HOME_DIR/.cursor/skills-cursor"
-    "$HOME_DIR/.codex/skills"
-    "$HOME_DIR/.warp/skills"
-    "$HOME_DIR/.gemini/skills"
-    "$HOME_DIR/.copilot/skills"
-    "$HOME_DIR/.factory/skills"
-    "$HOME_DIR/.github/skills"
-    "$HOME_DIR/.opencode/skills"
-)
+AGENT_DIRS=()
+while IFS= read -r _skill_dir; do
+    AGENT_DIRS+=("$HOME_DIR/$_skill_dir")
+done < <(sr_agent_skill_dirs)
 
 # ── Helpers ───────────────────────────────────────────────────────────
 if ! command -v jq >/dev/null 2>&1; then
@@ -129,40 +93,12 @@ fi
 
 get_frontmatter() {
     local file="$1" key="$2"
-    awk -v key="$key" '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && index($0, key ":") == 1 {
-            sub("^" key ":[[:space:]]*", "")
-            gsub(/^['\''\"]|['\''\"]$/, "")
-            print
-            exit
-        }
-    ' "$file" 2>/dev/null | head -c 300
+    sr_get_frontmatter_field "$file" "$key"
 }
 
 get_frontmatter_text() {
     local file="$1" key="$2"
-    awk -v key="$key" '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && $0 ~ "^[A-Za-z0-9_-]+:" {
-            if (capture) { exit }
-            if (index($0, key ":") == 1) {
-                value=$0
-                sub("^" key ":[[:space:]]*", "", value)
-                gsub(/^['\''\"]|['\''\"]$/, "", value)
-                if (value == "|" || value == ">") { capture=1; next }
-                print value
-                exit
-            }
-        }
-        capture {
-            line=$0
-            sub(/^[[:space:]]+/, "", line)
-            print line
-        }
-    ' "$file" 2>/dev/null
+    sr_get_frontmatter_text "$file" "$key"
 }
 
 utf8_byte_length() {
@@ -171,81 +107,22 @@ utf8_byte_length() {
 
 get_metadata_value() {
     local file="$1" key="$2"
-    awk -v key="$key" '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && $0 == "metadata:" { in_meta=1; next }
-        in_meta && $0 ~ /^[^[:space:]]/ { exit }
-        in_meta && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
-            sub("^[[:space:]]+" key ":[[:space:]]*", "")
-            gsub(/^['\''\"]|['\''\"]$/, "")
-            print
-            exit
-        }
-    ' "$file" 2>/dev/null | head -c 300
+    sr_get_metadata_value "$file" "$key"
 }
 
 frontmatter_keys_json() {
     local file="$1"
-    awk '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && $0 ~ /^[A-Za-z0-9_-]+:/ {
-            key=$0
-            sub(/:.*/, "", key)
-            print key
-        }
-    ' "$file" 2>/dev/null | jq -R 'select(length > 0)' | jq -s .
+    sr_frontmatter_keys_json "$file"
 }
 
 frontmatter_list_json() {
     local file="$1" key="$2"
-    awk -v key="$key" '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && $0 ~ "^[A-Za-z0-9_-]+:" {
-            if (capture) { exit }
-            if (index($0, key ":") == 1) {
-                value=$0
-                sub("^" key ":[[:space:]]*", "", value)
-                gsub(/^\[/, "", value)
-                gsub(/\]$/, "", value)
-                gsub(/,/, " ", value)
-                gsub(/^['\''\"]|['\''\"]$/, "", value)
-                if (value != "") {
-                    n=split(value, items, /[[:space:]]+/)
-                    for (i=1; i<=n; i++) if (items[i] != "") print items[i]
-                    exit
-                }
-                capture=1
-                next
-            }
-        }
-        capture && $0 ~ /^[[:space:]]*-[[:space:]]*/ {
-            item=$0
-            sub(/^[[:space:]]*-[[:space:]]*/, "", item)
-            gsub(/^['\''\"]|['\''\"]$/, "", item)
-            if (item != "") print item
-            next
-        }
-        capture && $0 ~ /^[^[:space:]]/ { exit }
-    ' "$file" 2>/dev/null | jq -R 'select(length > 0)' | jq -s .
+    sr_frontmatter_list_json "$file" "$key"
 }
 
 hook_events_json() {
     local file="$1"
-    awk '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && $0 == "hooks:" { in_hooks=1; next }
-        in_hooks && $0 ~ /^[^[:space:]]/ { exit }
-        in_hooks && $0 ~ /^[[:space:]]{2}[A-Za-z0-9_-]+:/ {
-            event=$0
-            sub(/^[[:space:]]+/, "", event)
-            sub(/:.*/, "", event)
-            print event
-        }
-    ' "$file" 2>/dev/null | jq -R 'select(length > 0)' | jq -s 'unique'
+    sr_hook_events_json "$file"
 }
 
 yaml_section_scalar() {
@@ -292,13 +169,7 @@ iso_from_epoch() {
 
 hash_file() {
     local file="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file" 2>/dev/null | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
-    else
-        echo ""
-    fi
+    sr_hash_skill_file "$file"
 }
 
 git_root_for_dir() {
@@ -332,12 +203,7 @@ source_kind_for_entry() {
 
 resolve_symlink_target() {
     local path="$1" target="$2"
-    local base_dir target_dir target_name resolved_dir
-    base_dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd) || return 1
-    target_dir=$(dirname "$target")
-    target_name=$(basename "$target")
-    resolved_dir=$(cd "$base_dir/$target_dir" 2>/dev/null && pwd) || return 1
-    printf '%s/%s\n' "$resolved_dir" "$target_name"
+    sr_resolve_symlink_target "$path" "$target"
 }
 
 canonical_dir_for_entry() {
@@ -345,7 +211,7 @@ canonical_dir_for_entry() {
     if [ "$entry_type" = "symlink" ]; then
         resolve_symlink_target "$path" "$link_target" 2>/dev/null || return 1
     else
-        cd "$path" 2>/dev/null && pwd
+        sr_canonical_dir "$path"
     fi
 }
 

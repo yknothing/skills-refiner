@@ -153,6 +153,7 @@ bash bin/skills-refiner-doctor.sh --help
 - `skills/skill-debug/tests/test-observability-regressions.sh` — 保守语义回归测试
 
 **辅助材料：**
+- `skills/lib/common.sh` — 共享的文件系统、frontmatter、拓扑、canonical path 与 normalized hash helper
 - `bin/skills-refiner-doctor.sh` — 贡献者包装脚本，转发至 `skills/skill-debug/bin/skills-refiner-doctor.sh`
 - `examples/` — 四个 skill 的用法示例
 - `evals/` — 评测量表与锚点评析（9 cases，2 rubrics）

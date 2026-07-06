@@ -163,6 +163,18 @@ description: Use when testing Cursor skill surface reporting.
 A Cursor native skill for probe tests.
 EOF
     echo '{"mcpServers":{}}' > "$SANDBOX/.cursor/mcp.json"
+
+    mkdir -p "$SANDBOX/vendor/absolute-linked-skill" "$SANDBOX/.opencode/skills"
+    cat > "$SANDBOX/vendor/absolute-linked-skill/SKILL.md" << 'EOF'
+---
+name: absolute-linked-skill
+description: Use when testing absolute symlink discovery.
+---
+
+# absolute-linked-skill
+A skill exposed through an absolute symlink.
+EOF
+    ln -s "$SANDBOX/vendor/absolute-linked-skill" "$SANDBOX/.opencode/skills/absolute-linked-skill"
 }
 
 # ── Tests ─────────────────────────────────────────────────────────────
@@ -181,6 +193,7 @@ run_tests() {
 
     assert_contains "Finds global-skill" "$output" "global-skill"
     assert_contains "Finds claude-native" "$output" "claude-native"
+    assert_contains "Finds absolute symlink skill" "$output" "absolute-linked-skill"
     assert_contains "Shows global count" "$output" "Global Skills"
     assert_contains "States best-effort local mode" "$output" "best-effort local filesystem diagnostic"
 
@@ -236,6 +249,13 @@ run_tests() {
     exit_code=$?
     assert_eq "Handles empty directories without crash" "0" "$exit_code"
 
+    local json_output
+    json_output=$(HOME="$SANDBOX" bash "$PROBE_SCRIPT" --cwd "$SANDBOX" --json 2>&1)
+    local absolute_canonical
+    absolute_canonical="$(cd -P "$SANDBOX/vendor/absolute-linked-skill" && pwd)/SKILL.md"
+    assert_eq "JSON absolute symlink canonical path" "$absolute_canonical" "$(echo "$json_output" | jq -r '.entries[] | select(.name == "absolute-linked-skill") | .canonical_skill_file')"
+    assert_eq "JSON counts absolute symlink distribution" "1" "$(echo "$json_output" | jq '[.entries[] | select(.name == "absolute-linked-skill" and .type == "symlink")] | length')"
+
     echo ""
 
     # Test 7: Doctor mode reports native platform signals without taking them over
@@ -256,6 +276,14 @@ run_tests() {
     assert_contains "Doctor detects Cursor Agent terminal" "$doctor_output" "Cursor native context"
     assert_contains "Doctor reports Cursor rules" "$doctor_output" "rules:"
     assert_contains "Doctor reports Cursor mcp config" "$doctor_output" "mcp config:"
+    assert_contains "Doctor treats missing activation log as no-data" "$doctor_output" "No activation log found. This is no-data, not a doctor failure."
+    assert_not_contains "Doctor does not emit arithmetic error" "$doctor_output" "integer expression expected"
+
+    mkdir -p "$SANDBOX/.agents/debug"
+    : > "$SANDBOX/.agents/debug/activation.jsonl"
+    local empty_log_doctor_output
+    empty_log_doctor_output=$(HOME="$SANDBOX" bash "$PROBE_SCRIPT" --cwd "$SANDBOX" --doctor 2>&1)
+    assert_not_contains "Empty activation log does not produce 0 newline 0 arithmetic error" "$empty_log_doctor_output" "integer expression expected"
 
     echo ""
 

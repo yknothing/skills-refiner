@@ -158,6 +158,7 @@ Version note: the current product line is `skills-refiner 2.0`. JSON fields such
 - `skills/skill-debug/tests/test-observability-regressions.sh` — regression tests for conservative observability semantics
 
 **Supporting materials:**
+- `skills/lib/common.sh` — shared filesystem, frontmatter, topology, canonical path, and normalized hash helpers
 - `bin/skills-refiner-doctor.sh` — contributor wrapper → `skills/skill-debug/bin/skills-refiner-doctor.sh`
 - `examples/` — usage examples for all four skills
 - `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)

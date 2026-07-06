@@ -10,41 +10,14 @@
 
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="$SCRIPT_DIR/../../lib/common.sh"
+[ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$COMMON_SH"
+
 detect_home_dir() {
-    if [ -n "${HOME:-}" ]; then
-        printf '%s\n' "$HOME"
-        return 0
-    fi
-
-    local user home
-    user=$(id -un 2>/dev/null || whoami 2>/dev/null || true)
-
-    if [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
-        home=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6; exit}')
-        if [ -n "$home" ]; then
-            printf '%s\n' "$home"
-            return 0
-        fi
-    fi
-
-    if [ -n "$user" ] && command -v dscl >/dev/null 2>&1; then
-        home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
-        if [ -n "$home" ]; then
-            printf '%s\n' "$home"
-            return 0
-        fi
-    fi
-
-    if [ -n "$user" ]; then
-        for home in "/Users/$user" "/home/$user"; do
-            if [ -d "$home" ]; then
-                printf '%s\n' "$home"
-                return 0
-            fi
-        done
-    fi
-
-    return 1
+    sr_detect_home_dir
 }
 
 DAYS=30
@@ -60,9 +33,10 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # Skill directories
-SKILL_DIRS=(".warp/skills" ".agents/skills" ".claude/skills" ".codex/skills"
-            ".cursor/skills" ".gemini/skills" ".copilot/skills" ".factory/skills"
-            ".github/skills" ".opencode/skills")
+SKILL_DIRS=()
+while IFS= read -r _skill_dir; do
+    SKILL_DIRS+=("$_skill_dir")
+done < <(sr_agent_skill_dirs)
 
 # ── Parse Args ────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -102,70 +76,34 @@ LOG_FILE="$DEBUG_DIR/activation.jsonl"
 get_skill_name() {
     local file="$1"
     local name
-    name=$(sed -n '/^---$/,/^---$/p' "$file" 2>/dev/null | grep "^name:" | head -1 | sed 's/^name:[[:space:]]*//')
+    name=$(sr_get_frontmatter_field "$file" "name")
     [ -z "$name" ] && name=$(basename "$(dirname "$file")")
     echo "$name"
 }
 
 get_frontmatter() {
     local file="$1" key="$2"
-    awk -v key="$key" '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && index($0, key ":") == 1 {
-            sub("^" key ":[[:space:]]*", "")
-            gsub(/^['\''\"]|['\''\"]$/, "")
-            print
-            exit
-        }
-    ' "$file" 2>/dev/null | head -c 300
+    sr_get_frontmatter_field "$file" "$key"
 }
 
 get_metadata_value() {
     local file="$1" key="$2"
-    awk -v key="$key" '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && $0 == "metadata:" { in_meta=1; next }
-        in_meta && $0 ~ /^[^[:space:]]/ { exit }
-        in_meta && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
-            sub("^[[:space:]]+" key ":[[:space:]]*", "")
-            gsub(/^['\''\"]|['\''\"]$/, "")
-            print
-            exit
-        }
-    ' "$file" 2>/dev/null | head -c 300
+    sr_get_metadata_value "$file" "$key"
 }
 
 hash_string() {
     local value="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        printf '%s' "$value" | sha256sum | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
-    else
-        printf '%s' "$value" | cksum | awk '{print $1}'
-    fi
+    sr_hash_string "$value"
 }
 
 hash_file() {
     local file="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file" 2>/dev/null | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
-    else
-        echo ""
-    fi
+    sr_hash_skill_file "$file"
 }
 
 canonical_file() {
     local file="$1"
-    local dir base resolved_dir
-    dir=$(dirname "$file")
-    base=$(basename "$file")
-    resolved_dir=$(cd -P "$dir" 2>/dev/null && pwd) || return 1
-    printf '%s/%s\n' "$resolved_dir" "$base"
+    sr_canonical_file "$file"
 }
 
 source_kind_for_entry() {

@@ -8,6 +8,10 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DASHBOARD_SCRIPT="$SCRIPT_DIR/bin/skill-dashboard.sh"
+TRACE_SCRIPT="$SCRIPT_DIR/bin/skill-trace.sh"
+COMMON_SH="$SCRIPT_DIR/../lib/common.sh"
+# shellcheck source=../../lib/common.sh
+. "$COMMON_SH"
 PASS=0
 FAIL=0
 
@@ -37,28 +41,17 @@ assert_contains() {
 
 hash_string() {
     local value="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        printf '%s' "$value" | sha256sum | awk '{print $1}'
-    else
-        printf '%s' "$value" | shasum -a 256 | awk '{print $1}'
-    fi
+    sr_hash_string "$value"
 }
 
 hash_file() {
     local file="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file" | awk '{print $1}'
-    else
-        shasum -a 256 "$file" | awk '{print $1}'
-    fi
+    sr_hash_skill_file "$file"
 }
 
 canonical_file() {
     local file="$1"
-    local dir base
-    dir=$(cd -P "$(dirname "$file")" && pwd)
-    base=$(basename "$file")
-    printf '%s/%s\n' "$dir" "$base"
+    sr_canonical_file "$file"
 }
 
 identity_for() {
@@ -251,6 +244,42 @@ EOF
     local top_count
     top_count=$(echo "$json_output" | jq '.frequency[0].count')
     assert_eq "skill-a has 3 activations" "3" "$top_count"
+
+    echo ""
+
+    # Test 6: Canary injection does not change installed identity
+    echo -e "${BOLD}── Canary Identity Stability ──${NC}"
+    mkdir -p "$SANDBOX/.agents/skills/skill-d"
+    cat > "$SANDBOX/.agents/skills/skill-d/SKILL.md" << 'EOF'
+---
+name: skill-d
+description: Test skill D.
+---
+# skill-d
+EOF
+    local skill_d_file skill_d_clean_id skill_d_after_inject_id canary_script canary_identity
+    skill_d_file=$(canonical_file "$SANDBOX/.agents/skills/skill-d/SKILL.md")
+    skill_d_clean_id=$(identity_for "$skill_d_file")
+    CODEX_HOOK_ALLOW_SKILL_TRACE=1 HOME="$SANDBOX" bash "$TRACE_SCRIPT" --inject "$skill_d_file" >/dev/null 2>&1
+    skill_d_after_inject_id=$(identity_for "$skill_d_file")
+    assert_eq "Normalized identity survives trace injection" "$skill_d_clean_id" "$skill_d_after_inject_id"
+
+    mkdir -p "$SANDBOX/project-z"
+    canary_script="$SANDBOX/skill-d-canary.sh"
+    awk '
+        $0 == "<!-- SKILL-DEBUG-TRACE-START v1 -->" { in_trace=1; next }
+        in_trace && $0 == "```bash" { in_code=1; next }
+        in_trace && in_code && $0 == "```" { exit }
+        in_trace && in_code { print }
+    ' "$skill_d_file" > "$canary_script"
+    (cd "$SANDBOX/project-z" && HOME="$SANDBOX" bash "$canary_script")
+    canary_identity=$(tail -n 1 "$SANDBOX/.agents/debug/activation.jsonl" | jq -r '.identity_key')
+    assert_eq "Injected canary command emits installed identity" "$skill_d_after_inject_id" "$canary_identity"
+
+    local injected_json
+    injected_json=$(HOME="$SANDBOX" bash "$DASHBOARD_SCRIPT" --json --all 2>&1)
+    assert_eq "Injected skill canary matches installed identity" "true" "$(echo "$injected_json" | jq 'any(.installed_identities[]; .name == "skill-d" and .observed == true)')"
+    assert_eq "Injected skill not reported as not-observed" "0" "$(echo "$injected_json" | jq '[.not_observed_skills[] | select(.name == "skill-d")] | length')"
 
     echo ""
 

@@ -89,6 +89,25 @@ description: |
 This skill has an overlong block-scalar description so the scanner proves it does not truncate frontmatter before measuring loader contract compliance.
 EOF
 
+    mkdir -p "$SANDBOX/.agents/skills/bom-crlf-skill"
+    printf '\357\273\277---\r\nname: bom-crlf-skill\r\ndescription: Use when testing BOM and CRLF frontmatter parsing.\r\n---\r\n\r\n# bom-crlf-skill\r\n\r\nThis skill should remain loadable even when frontmatter uses Windows line endings.\r\n' > "$SANDBOX/.agents/skills/bom-crlf-skill/SKILL.md"
+
+    mkdir -p "$SANDBOX/.agents/skills/body-delimiter-skill"
+    cat > "$SANDBOX/.agents/skills/body-delimiter-skill/SKILL.md" << 'EOF'
+---
+name: body-delimiter-skill
+description: Use when testing body delimiter handling.
+---
+
+# body-delimiter-skill
+
+The body may contain a Markdown horizontal rule.
+
+---
+
+The scanner should not treat this body delimiter as frontmatter.
+EOF
+
     mkdir -p "$SANDBOX/.agents/skills/no-name-skill"
     cat > "$SANDBOX/.agents/skills/no-name-skill/SKILL.md" << 'EOF'
 ---
@@ -115,6 +134,10 @@ EOF
     write_skill "$SANDBOX/vendor/linked-overlong-skill" "linked-overlong-skill" "$linked_overlong_desc" "This out-of-canonical skill is visible only through a symlink distribution and must still count as a runtime load blocker."
     mkdir -p "$SANDBOX/.cursor/skills"
     ln -s "../../vendor/linked-overlong-skill" "$SANDBOX/.cursor/skills/linked-overlong-skill"
+
+    write_skill "$SANDBOX/vendor/absolute-linked-skill" "absolute-linked-skill" "Use when testing absolute symlink handling." "This skill is visible only through an absolute symlink distribution."
+    mkdir -p "$SANDBOX/.opencode/skills"
+    ln -s "$SANDBOX/vendor/absolute-linked-skill" "$SANDBOX/.opencode/skills/absolute-linked-skill"
 
     write_skill "$SANDBOX/.codex/skills/codex-only" "codex-only" "Use when testing codex-specific skill detection." "An independently installed codex skill."
     mkdir -p "$SANDBOX/.codex/skills/healthy-skill"
@@ -187,7 +210,7 @@ run_tests() {
     fi
 
     echo -e "${BOLD}── Topology ──${NC}"
-    assert_eq "Canonical native count" "7" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
+    assert_eq "Canonical native count" "9" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
     assert_eq "Claude symlink count" "1" "$(echo "$json_output" | jq '.topology[".claude/skills"].symlinks // 0')"
     assert_eq "Claude native count" "1" "$(echo "$json_output" | jq '.topology[".claude/skills"].native // 0')"
     assert_eq "Cursor symlink count" "1" "$(echo "$json_output" | jq '.topology[".cursor/skills"].symlinks // 0')"
@@ -196,9 +219,15 @@ run_tests() {
 
     echo -e "${BOLD}── Symlink Semantics ──${NC}"
     assert_eq "Symlinks excluded from unique skills array" "0" "$(echo "$json_output" | jq '[.skills[] | select(.type == "symlink")] | length')"
-    assert_eq "Symlink distributions preserved in skill_links" "2" "$(echo "$json_output" | jq '.skill_links | length')"
+    assert_eq "Symlink distributions preserved in skill_links" "3" "$(echo "$json_output" | jq '.skill_links | length')"
     assert_eq "Distribution keeps skill name" "healthy-skill" "$(echo "$json_output" | jq -r '.skill_links[0].name // ""')"
-    assert_eq "Distribution records canonical file" "$SANDBOX/.agents/skills/healthy-skill/SKILL.md" "$(echo "$json_output" | jq -r '.skill_links[0].canonical_skill_file // ""')"
+    local healthy_canonical
+    healthy_canonical="$(cd -P "$SANDBOX/.agents/skills/healthy-skill" && pwd)/SKILL.md"
+    assert_eq "Distribution records canonical file" "$healthy_canonical" "$(echo "$json_output" | jq -r '.skill_links[0].canonical_skill_file // ""')"
+    local absolute_canonical
+    absolute_canonical="$(cd -P "$SANDBOX/vendor/absolute-linked-skill" && pwd)/SKILL.md"
+    assert_eq "Absolute symlink resolves to target" "$absolute_canonical" "$(echo "$json_output" | jq -r '.skill_links[] | select(.name == "absolute-linked-skill") | .canonical_skill_file')"
+    assert_eq "Absolute symlink is not broken" "0" "$(echo "$json_output" | jq '[.broken_symlinks[] | select(.dir_name == "absolute-linked-skill")] | length')"
     assert_eq "Broken symlink detected" "1" "$(echo "$json_output" | jq '.broken_symlinks | length')"
     assert_eq "Broken symlink name" "broken-link" "$(echo "$json_output" | jq -r '.broken_symlinks[0].dir_name // ""')"
     echo ""
@@ -215,6 +244,9 @@ run_tests() {
     assert_eq "Pipe-to-shell flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "pipe_to_shell")] | length')"
     assert_eq "Dangerous command flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "dangerous_cmd")] | length')"
     assert_eq "Project repo skill excluded from global scan" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "project-skill")] | length')"
+    assert_eq "BOM/CRLF frontmatter is loadable" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.loadable')"
+    assert_eq "BOM/CRLF frontmatter has no missing field blockers" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.load_blockers[]? | select(. == "missing_name" or . == "missing_description")] | length')"
+    assert_eq "Body delimiter does not break frontmatter" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "body-delimiter-skill") | .runtime_contract.loadable')"
     echo ""
 
     echo -e "${BOLD}── JSON Shape ──${NC}"

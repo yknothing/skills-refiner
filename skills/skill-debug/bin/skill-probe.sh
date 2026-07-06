@@ -4,6 +4,12 @@
 
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="$SCRIPT_DIR/../../lib/common.sh"
+[ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
+# shellcheck source=../../lib/common.sh
+. "$COMMON_SH"
+
 PRODUCT_VERSION="2.0"
 TARGET_CWD="${PWD}"
 VERBOSE=false
@@ -23,36 +29,13 @@ if [ -n "${NO_COLOR:-}" ]; then
     RED=''; YELLOW=''; GREEN=''; CYAN=''; DIM=''; BOLD=''; NC=''
 fi
 
-SKILL_DIRS=(".warp/skills" ".agents/skills" ".claude/skills" ".codex/skills"
-            ".cursor/skills" ".gemini/skills" ".copilot/skills" ".factory/skills"
-            ".github/skills" ".opencode/skills")
+SKILL_DIRS=()
+while IFS= read -r _skill_dir; do
+    SKILL_DIRS+=("$_skill_dir")
+done < <(sr_agent_skill_dirs)
 
 detect_home_dir() {
-    if [ -n "${HOME:-}" ]; then
-        printf '%s\n' "$HOME"
-        return 0
-    fi
-
-    local user home
-    user=$(id -un 2>/dev/null || whoami 2>/dev/null || true)
-
-    if [ -n "$user" ] && command -v getent >/dev/null 2>&1; then
-        home=$(getent passwd "$user" 2>/dev/null | awk -F: '{print $6; exit}')
-        [ -n "$home" ] && { printf '%s\n' "$home"; return 0; }
-    fi
-
-    if [ -n "$user" ] && command -v dscl >/dev/null 2>&1; then
-        home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2; exit}')
-        [ -n "$home" ] && { printf '%s\n' "$home"; return 0; }
-    fi
-
-    if [ -n "$user" ]; then
-        for home in "/Users/$user" "/home/$user"; do
-            [ -d "$home" ] && { printf '%s\n' "$home"; return 0; }
-        done
-    fi
-
-    return 1
+    sr_detect_home_dir
 }
 
 show_help() {
@@ -102,45 +85,31 @@ HOME_DIR="$(detect_home_dir)" || {
 
 get_frontmatter() {
     local file="$1" key="$2"
-    awk -v key="$key" '
-        NR == 1 && $0 == "---" { in_fm=1; next }
-        in_fm && $0 == "---" { exit }
-        in_fm && index($0, key ":") == 1 {
-            sub("^" key ":[[:space:]]*", "")
-            gsub(/^['\''"]|['\''"]$/, "")
-            print
-            exit
-        }
-    ' "$file" 2>/dev/null
+    sr_get_frontmatter_field "$file" "$key"
 }
 
 validate_frontmatter() {
     local file="$1"
     awk '
-        NR == 1 && $0 == "---" { start=1; next }
-        start && $0 == "---" { end=1; exit }
+        {
+            line=$0
+            sub(/\r$/, "", line)
+            if (NR == 1) if (substr(line, 1, 3) == "\357\273\277") line=substr(line, 4)
+        }
+        NR == 1 && line ~ /^---[[:space:]]*$/ { start=1; next }
+        start && line ~ /^---[[:space:]]*$/ { end=1; exit }
         END { exit !(start && end) }
     ' "$file" 2>/dev/null
 }
 
 canonical_file() {
     local file="$1"
-    local dir base resolved_dir
-    dir=$(dirname "$file")
-    base=$(basename "$file")
-    resolved_dir=$(cd -P "$dir" 2>/dev/null && pwd) || return 1
-    printf '%s/%s\n' "$resolved_dir" "$base"
+    sr_canonical_file "$file"
 }
 
 hash_file() {
     local file="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file" 2>/dev/null | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$file" 2>/dev/null | awk '{print $1}'
-    else
-        echo ""
-    fi
+    sr_hash_skill_file "$file"
 }
 
 is_backup_entry_name() {
@@ -521,7 +490,8 @@ main() {
             installed_names=$(printf '%s\n' "${skill_entries[@]}" | awk -v FS="$FIELD_SEP" '{print $1}' | sort -u)
             active_names=$(jq -r '.skill' "$log_file" 2>/dev/null | sort -u)
             not_observed=$(comm -23 <(echo "$installed_names") <(echo "$active_names"))
-            not_observed_count=$(echo "$not_observed" | grep -c . 2>/dev/null || echo 0)
+            not_observed_count=$(echo "$not_observed" | grep -c . 2>/dev/null || true)
+            not_observed_count=${not_observed_count:-0}
 
             if [ "$not_observed_count" -gt 0 ]; then
                 echo -e "  ${YELLOW}Installed but no canary recorded:${NC} $not_observed_count"
