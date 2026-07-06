@@ -252,7 +252,7 @@ run_tests() {
     echo -e "${BOLD}── JSON Shape ──${NC}"
     echo "$json_output" | jq . >/dev/null 2>&1
     assert_eq "JSON output is valid" "0" "$?"
-    assert_eq "JSON has schema version" "skill-scan.v2" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
+    assert_eq "JSON has schema version" "skill-scan.v3" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
     assert_eq "JSON has topology key" "true" "$(echo "$json_output" | jq 'has("topology")')"
     assert_eq "JSON has skills key" "true" "$(echo "$json_output" | jq 'has("skills")')"
     assert_eq "JSON has skill_links key" "true" "$(echo "$json_output" | jq 'has("skill_links")')"
@@ -262,7 +262,7 @@ run_tests() {
     echo ""
 
     echo -e "${BOLD}── Provenance and Version Facts ──${NC}"
-    assert_eq "Content hash collected" "64" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".agents/skills" and .name == "healthy-skill") | .content_sha256 | length')"
+    assert_eq "Content hash collected" "64" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".agents/skills" and .name == "healthy-skill") | .normalized_content_sha256 | length')"
     assert_eq "Metadata version remains auxiliary fact" "2.0.0" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .declared_version')"
     assert_eq "Frontmatter contract is name/description only" "name_description_only" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .frontmatter.contract')"
     assert_eq "License excluded from first-class frontmatter" "false" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .frontmatter | has("license")')"

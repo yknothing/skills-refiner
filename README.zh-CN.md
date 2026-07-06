@@ -84,7 +84,7 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 - **先可加载，再谈优雅。** 不能满足运行时加载契约的 skill 是阻断问题，即使文档和工作流写得再完整也一样。
 - **默认保守。** 证据不清时只标注观察，不建议删除或贸然动作。
 - **尊重拓扑。** 常见模型：`~/.agents/skills/` 为原始来源，软链接到 `.claude/skills/`、`.cursor/skills/`、`.codex/skills/` 等为分发，不是重复。独立项目仓库不是「坏掉的全局 skill」。
-- **把安装目录当部署产物。** 本仓库为事实来源（source of truth）；全局安装可能漂移，对比哈希/提交后再当作当前版本。
+- **把安装目录当部署产物。** 本仓库为事实来源（source of truth）；全局安装可能漂移，对比哈希/提交后再当作当前版本。哈希对比请两侧都使用扫描器的 `normalized_content_sha256`（已剔除 canary 块/CRLF/BOM），不要用注入 canary 后文件的原始 `sha256sum`。
 - **原生信号优先。** 在具备 Claude Code OpenTelemetry、Codex skill 元数据、Cursor Rules/Skills/MCP、SDK 追踪等处优先使用平台能力；探针是本地补充，不是平台追踪替代品。
 - **判断扎根证据。** 区分直接证据、推断与未决不确定性。
 - **缩小输入面。** 尽量从上下文推断模式、深度与语言。
@@ -127,7 +127,7 @@ bash bin/skills-refiner-doctor.sh --help
 
 可选环境变量：`SKILLS_REFINER_TOOLS_ROOT` — 包含 `skill-debug/` 与 `skill-hygiene/` 的目录（布局与 `~/.agents/skills` 相同）。
 
-版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v1`、`skill-dashboard.identity.v1`、`skill-scan.v2` 等字段是 JSON schema / 事件协议版本，不是产品发布号。
+版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v1`、`skill-dashboard.identity.v2`、`skill-scan.v3` 等字段是 JSON schema / 事件协议版本，不是产品发布号。
 
 ## 仓库布局
 
@@ -153,7 +153,7 @@ bash bin/skills-refiner-doctor.sh --help
 - `skills/skill-debug/tests/test-observability-regressions.sh` — 保守语义回归测试
 
 **辅助材料：**
-- `skills/lib/common.sh` — 共享的文件系统、frontmatter、拓扑、canonical path 与 normalized hash helper
+- `skills/skill-debug/lib/common.sh` — 共享的文件系统、frontmatter、拓扑、canonical path 与 normalized hash helper（随 skill-debug 一起安装；skill-hygiene 依赖它）
 - `bin/skills-refiner-doctor.sh` — 贡献者包装脚本，转发至 `skills/skill-debug/bin/skills-refiner-doctor.sh`
 - `examples/` — 四个 skill 的用法示例
 - `evals/` — 评测量表与锚点评析（9 cases，2 rubrics）

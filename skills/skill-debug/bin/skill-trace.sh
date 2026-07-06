@@ -12,9 +12,9 @@
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="$SCRIPT_DIR/../../lib/common.sh"
+COMMON_SH="$SCRIPT_DIR/../lib/common.sh"
 [ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
-# shellcheck source=../../lib/common.sh
+# shellcheck source=../lib/common.sh
 . "$COMMON_SH"
 
 detect_home_dir() {
@@ -103,7 +103,10 @@ inject_trace() {
     local canonical_skill_file
     canonical_skill_file=$(resolve_canonical_file "$skill_file" 2>/dev/null || echo "$skill_file")
 
-    # Build the trace block
+    # Build the trace block. The identity computation lives in
+    # skill-canary.sh (single implementation sourced from lib/common.sh), so
+    # injected files stay small and never freeze a copy of the normalization
+    # algorithm.
     local trace_block trace_template_tmp
     trace_template_tmp=$(mktemp) || return 1
     cat > "$trace_template_tmp" << 'TRACEEOF'
@@ -111,64 +114,22 @@ inject_trace() {
 <!-- SKILL-DEBUG-TRACE-START v1 -->
 When this skill is used, run this canary command first:
 ```bash
-_skill_debug_file="__CANONICAL_SKILL_FILE__"
-_skill_debug_hash=""
-_skill_debug_normalized_content() {
-awk '
-  function clean(line) { sub(/\r$/, "", line); return line }
-  {
-    line=clean($0)
-    if (NR == 1) if (substr(line, 1, 3) == "\357\273\277") line=substr(line, 4)
-    if (skip) {
-      if (line ~ /^<!-- SKILL-DEBUG-TRACE-END( v[0-9]+)? -->[[:space:]]*$/) skip=0
-      next
-    }
-    if (pending_header) {
-      if (!in_fence && line ~ /^<!-- SKILL-DEBUG-TRACE-START( v[0-9]+)? -->[[:space:]]*$/) {
-        skip=1
-        pending_header=0
-        next
-      }
-      print pending_header_text
-      pending_header=0
-    }
-    if (line ~ /^```/) { in_fence = !in_fence; print line; next }
-    if (!in_fence && line ~ /^## Activation (Canary )?Trace \(auto-injected by skill-debug\)[[:space:]]*$/) {
-      pending_header=1
-      pending_header_text=line
-      next
-    }
-    if (!in_fence && line ~ /^<!-- SKILL-DEBUG-TRACE-START( v[0-9]+)? -->[[:space:]]*$/) {
-      skip=1
-      next
-    }
-    print line
-  }
-  END { if (pending_header) print pending_header_text }
-' "$_skill_debug_file" 2>/dev/null
-}
-if command -v sha256sum >/dev/null 2>&1; then
-  _skill_debug_hash=$(_skill_debug_normalized_content | sha256sum | awk '{print $1}')
-elif command -v shasum >/dev/null 2>&1; then
-  _skill_debug_hash=$(_skill_debug_normalized_content | shasum -a 256 | awk '{print $1}')
-fi
-if command -v sha256sum >/dev/null 2>&1; then
-  _skill_debug_id=$(printf '%s|%s' "$_skill_debug_file" "$_skill_debug_hash" | sha256sum | awk '{print $1}')
-elif command -v shasum >/dev/null 2>&1; then
-  _skill_debug_id=$(printf '%s|%s' "$_skill_debug_file" "$_skill_debug_hash" | shasum -a 256 | awk '{print $1}')
+_skill_debug_helper="__CANARY_HELPER__"
+if [ -f "$_skill_debug_helper" ]; then
+  bash "$_skill_debug_helper" "__CANONICAL_SKILL_FILE__"
 else
-  _skill_debug_id="$_skill_debug_file|$_skill_debug_hash"
+  mkdir -p ~/.agents/debug && echo '{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary_degraded","skill":"__SKILL_NAME__","identity_key":"","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
 fi
-mkdir -p ~/.agents/debug && echo '{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"__SKILL_NAME__","identity_key":"'"$_skill_debug_id"'","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
 ```
 <!-- SKILL-DEBUG-TRACE-END v1 -->
 TRACEEOF
     trace_block=$(cat "$trace_template_tmp")
     rm -f "$trace_template_tmp"
 
-    # Replace placeholder with actual skill name
+    # Replace placeholders with inject-time values
     trace_block="${trace_block//__SKILL_NAME__/$skill_name}"
     trace_block="${trace_block//__CANONICAL_SKILL_FILE__/$canonical_skill_file}"
+    trace_block="${trace_block//__CANARY_HELPER__/$SCRIPT_DIR/skill-canary.sh}"
 
     # Find the end of frontmatter and inject after it
     local fm_end

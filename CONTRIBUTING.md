@@ -35,7 +35,7 @@ evals/                    # Evaluation rubrics and cases
 
 - All scripts must work on both macOS and Linux. Test with both `stat -f` (macOS) and `stat -c` (Linux) variants.
 - Resolve HOME without `eval`: prefer `$HOME`, then `getent passwd`, then macOS `dscl`, then common home roots; fail clearly if no home directory can be determined.
-- Keep shared filesystem, frontmatter, topology, canonical path, and normalized hash behavior in `skills/lib/common.sh`; do not fork those facts across individual scripts.
+- Keep shared filesystem, frontmatter, topology, canonical path, and normalized hash behavior in `skills/skill-debug/lib/common.sh` (it ships inside the skill-debug skill so per-skill installs carry it); do not fork those facts across individual scripts.
 - Include `--help` / `-h` support in all user-facing scripts.
 - Use `set -o pipefail` but not `set -e` (handled by callers).
 - Require `jq` for JSON processing. Check availability gracefully.

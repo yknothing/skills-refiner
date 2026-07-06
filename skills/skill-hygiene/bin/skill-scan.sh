@@ -12,9 +12,11 @@
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="$SCRIPT_DIR/../../lib/common.sh"
-[ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
-# shellcheck source=../../lib/common.sh
+# Shared helpers ship inside the skill-debug skill so they survive per-skill
+# installation (installers only copy directories that contain a SKILL.md).
+COMMON_SH="$SCRIPT_DIR/../../skill-debug/lib/common.sh"
+[ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; echo "[ERROR] skill-hygiene requires the skill-debug skill to be installed alongside it (it provides the shared helper library)." >&2; exit 1; }
+# shellcheck source=../../skill-debug/lib/common.sh
 . "$COMMON_SH"
 
 # ── Config ────────────────────────────────────────────────────────────
@@ -346,11 +348,11 @@ scan_directory() {
             flags_json=$(printf '%s\n' "${flags[@]}" | jq -R . | jq -s .)
         fi
 
-        local risk_json content_sha256 git_root git_remote git_branch source_kind
+        local risk_json normalized_content_sha256 git_root git_remote git_branch source_kind
         risk_json=$(printf '%s\n' "${flags[@]}" | jq -R 'select(. == "pipe_to_shell" or . == "dangerous_cmd" or . == "possible_secret") | {id: ., severity: "review_required"}' | jq -s .)
         [ -z "$risk_json" ] && risk_json='[]'
 
-        content_sha256=$(hash_file "$skill_file")
+        normalized_content_sha256=$(hash_file "$skill_file")
         git_root=$(git_root_for_dir "$canonical_dir")
         git_remote=$(git_remote_for_root "$git_root")
         git_branch=$(git_branch_for_root "$git_root")
@@ -410,7 +412,7 @@ scan_directory() {
             --arg desc "${desc:0:200}" \
             --arg declared_version "$declared_version" \
             --arg metadata_version "$metadata_version" \
-            --arg content_sha256 "$content_sha256" \
+            --arg normalized_content_sha256 "$normalized_content_sha256" \
             --arg mtime_iso "$mtime_iso" \
             --arg source_kind "$source_kind" \
             --arg git_root "$git_root" \
@@ -505,7 +507,7 @@ scan_directory() {
                 extra_frontmatter_keys: $extra_keys,
                 declared_version: $declared_version,
                 metadata_version: $metadata_version,
-                content_sha256: $content_sha256,
+                normalized_content_sha256: $normalized_content_sha256,
                 word_count: $words,
                 age_days: $age,
                 freshness: {
@@ -544,7 +546,7 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v2", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], runtime_load_blockers:[], name_collisions:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v3", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories", hash_normalization:"strip-canary-crlf-bom.v1"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], runtime_load_blockers:[], name_collisions:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
@@ -596,13 +598,13 @@ main() {
                 real_directory_count: length,
                 distinct_canonical_dirs: ([.[].canonical_dir] | unique | length),
                 distinct_versions: ([.[].declared_version | select(length > 0)] | unique),
-                distinct_hashes: ([.[].content_sha256 | select(length > 0)] | unique),
+                distinct_hashes: ([.[].normalized_content_sha256 | select(length > 0)] | unique),
                 entries: [.[] | {
                     location,
                     canonical_dir,
                     canonical_skill_file,
                     declared_version,
-                    content_sha256,
+                    normalized_content_sha256,
                     provenance
                 }]
             })

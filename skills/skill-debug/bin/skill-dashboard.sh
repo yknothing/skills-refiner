@@ -11,9 +11,9 @@
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="$SCRIPT_DIR/../../lib/common.sh"
+COMMON_SH="$SCRIPT_DIR/../lib/common.sh"
 [ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
-# shellcheck source=../../lib/common.sh
+# shellcheck source=../lib/common.sh
 . "$COMMON_SH"
 
 detect_home_dir() {
@@ -130,12 +130,12 @@ get_installed_identities() {
             local skill_file="$entry/SKILL.md"
             [ -f "$skill_file" ] || continue
 
-            local name canonical_skill_file canonical_dir content_sha256 identity_key entry_type top_version metadata_version declared_version provenance_kind row_json
+            local name canonical_skill_file canonical_dir normalized_content_sha256 identity_key entry_type top_version metadata_version declared_version provenance_kind row_json
             name=$(get_skill_name "$skill_file")
             canonical_skill_file=$(canonical_file "$skill_file" 2>/dev/null || echo "$skill_file")
             canonical_dir=$(dirname "$canonical_skill_file")
-            content_sha256=$(hash_file "$canonical_skill_file")
-            identity_key=$(hash_string "$canonical_skill_file|$content_sha256")
+            normalized_content_sha256=$(hash_file "$canonical_skill_file")
+            identity_key=$(hash_string "$canonical_skill_file|$normalized_content_sha256")
             entry_type="directory"
             [ -L "$entry" ] && entry_type="symlink"
             top_version=$(get_frontmatter "$canonical_skill_file" "version")
@@ -151,10 +151,10 @@ get_installed_identities() {
                 --arg source_skill_file "$skill_file" \
                 --arg canonical_skill_file "$canonical_skill_file" \
                 --arg canonical_dir "$canonical_dir" \
-                --arg content_sha256 "$content_sha256" \
+                --arg normalized_content_sha256 "$normalized_content_sha256" \
                 --arg declared_version "$declared_version" \
                 --arg provenance_kind "$provenance_kind" \
-                '{identity_key:$identity_key, name:$name, location:$location, type:$entry_type, source_skill_file:$source_skill_file, canonical_skill_file:$canonical_skill_file, canonical_dir:$canonical_dir, content_sha256:$content_sha256, declared_version:$declared_version, provenance_kind:$provenance_kind}')
+                '{identity_key:$identity_key, name:$name, location:$location, type:$entry_type, source_skill_file:$source_skill_file, canonical_skill_file:$canonical_skill_file, canonical_dir:$canonical_dir, normalized_content_sha256:$normalized_content_sha256, declared_version:$declared_version, provenance_kind:$provenance_kind}')
             rows=$(echo "$rows" | jq --argjson row "$row_json" '. + [$row]')
         done
     done
@@ -269,7 +269,7 @@ main() {
             --argjson contexts "$context_json" \
             --argjson legacy_ambiguous "$legacy_ambiguous_json" \
             '{
-                schema_version: "skill-dashboard.identity.v1",
+                schema_version: "skill-dashboard.identity.v2",
                 period_days: $days,
                 total_events: $total_events,
                 installed_skills: $installed_count,

@@ -80,7 +80,7 @@ Key facts now include:
 - `runtime_contract` — hard loader facts such as missing `name`, missing `description`, or `description` longer than the 1024-character loader limit
 - `claude_code` — bounded Claude Code invocation signals such as model/user invocation controls, tool/path counts, and hook event names
 - `openai` — bounded `agents/openai.yaml` facts: file presence, implicit-invocation policy, and tool dependency count; not runtime behavior proof
-- `content_sha256` — local normalized content identity for same-name comparison without network access. Auto-injected skill-debug canary blocks are excluded from this hash.
+- `normalized_content_sha256` — local normalized content identity for same-name comparison without network access. Canary blocks, CRLF, and BOM are excluded from this hash, so it will differ from a raw `sha256sum` of the file whenever a canary is injected; compare normalized values with normalized values.
 - `freshness` — mtime, age, stale threshold, and `is_stale` as a signal
 - `provenance` — local source signals such as canonical-global, symlink-distribution, native-agent, and git remote when directly available
 - `risk_indicators` — structured review-required security signals

@@ -124,14 +124,21 @@ How it works:
 <!-- SKILL-DEBUG-TRACE-START v1 -->
 When this skill is used, run this canary command first:
 \`\`\`bash
-echo '{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary","skill":"SKILL_NAME","identity_key":"PATH_PLUS_NORMALIZED_HASH","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
+_skill_debug_helper="/abs/path/to/skill-debug/bin/skill-canary.sh"
+if [ -f "$_skill_debug_helper" ]; then
+  bash "$_skill_debug_helper" "/abs/path/to/SKILL.md"
+else
+  mkdir -p ~/.agents/debug && echo '{...,"trace_kind":"canary_degraded","identity_key":"",...}' >> ~/.agents/debug/activation.jsonl
+fi
 \`\`\`
 <!-- SKILL-DEBUG-TRACE-END v1 -->
 ```
 
-- The trace is a standard bash block that can be observed if the agent follows the injected instruction
-- Each new event includes a local identity key derived from canonical `SKILL.md` path plus normalized content hash. Auto-injected canary blocks are excluded from that hash, so inject/strip cycles do not orphan prior observations.
-- Minimal overhead: one hash calculation and one `echo` append per observed canary
+- The trace is a short bash block that can be observed if the agent follows the injected instruction
+- The block delegates to `bin/skill-canary.sh`, the single implementation of identity hashing. Injected files never carry a frozen copy of the normalization algorithm, so the algorithm can evolve without orphaning previously injected canaries.
+- Each event includes a local identity key derived from canonical `SKILL.md` path plus normalized content hash. Auto-injected canary blocks are excluded from that hash, so inject/strip cycles do not orphan prior observations.
+- If the helper is missing (for example skill-debug was uninstalled after injection), the block appends a degraded name-only event (`trace_kind: "canary_degraded"`, empty `identity_key`) instead of failing silently.
+- Minimal overhead: one hash calculation and one append per observed canary
 - All traces are clearly marked for on-disk removal
 - Presence means the canary command was followed. Absence is inconclusive; it is not proof that the skill was not discovered, loaded, or useful.
 

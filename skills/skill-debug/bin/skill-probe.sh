@@ -5,9 +5,9 @@
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="$SCRIPT_DIR/../../lib/common.sh"
+COMMON_SH="$SCRIPT_DIR/../lib/common.sh"
 [ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
-# shellcheck source=../../lib/common.sh
+# shellcheck source=../lib/common.sh
 . "$COMMON_SH"
 
 PRODUCT_VERSION="2.0"
@@ -282,7 +282,7 @@ append_entry_json() {
         --arg description "$desc" \
         --arg type "$entry_type" \
         --arg canonical_skill_file "$canonical_path" \
-        --arg content_sha256 "$content_hash" \
+        --arg normalized_content_sha256 "$content_hash" \
         '$entries + [{
             scope:$scope,
             source:$source,
@@ -291,7 +291,7 @@ append_entry_json() {
             description:$description,
             type:$type,
             canonical_skill_file:$canonical_skill_file,
-            content_sha256:$content_sha256
+            normalized_content_sha256:$normalized_content_sha256
         }]'
 }
 
@@ -310,7 +310,7 @@ build_conflicts_json() {
         })
         | map(. + {
             active_real_count: (.active_real_entries | length),
-            active_hashes: ([.active_real_entries[].content_sha256 | select(length > 0)] | unique),
+            active_hashes: ([.active_real_entries[].normalized_content_sha256 | select(length > 0)] | unique),
             has_project_variant: ([.active_real_entries[] | select(.scope == "project")] | length > 0)
         })
         | map(. + {
@@ -357,7 +357,7 @@ main() {
 
     if $JSON_MODE; then
         jq -n \
-            --arg schema "skill-probe.v2" \
+            --arg schema "skill-probe.v3" \
             --arg product_version "$PRODUCT_VERSION" \
             --arg cwd "$TARGET_CWD" \
             --arg git_root "$git_root" \
@@ -446,7 +446,7 @@ main() {
     if [ "$active_conflict_count" -gt 0 ]; then
         echo "$conflicts_json" | jq -r '.[] | select(.classification == "active_conflict") | .name' | while IFS= read -r dup_name; do
             echo -e "  ${YELLOW}!${NC} ${BOLD}$dup_name${NC} - active real directories have different content/version surfaces:"
-            echo "$entries_json" | jq -r --arg n "$dup_name" '.[] | select(.name == $n) | "\(.scope)|\(.source)|\(.type)|\(.path)|\(.canonical_skill_file)|\(.content_sha256)"' | while IFS='|' read -r scope source entry_type path canonical_path content_hash; do
+            echo "$entries_json" | jq -r --arg n "$dup_name" '.[] | select(.name == $n) | "\(.scope)|\(.source)|\(.type)|\(.path)|\(.canonical_skill_file)|\(.normalized_content_sha256)"' | while IFS='|' read -r scope source entry_type path canonical_path content_hash; do
                 echo -e "    ${DIM}[$scope/$source/$entry_type]${NC} $path"
                 echo -e "      ${DIM}canonical: $canonical_path${NC}"
                 [ -n "$content_hash" ] && echo -e "      ${DIM}sha256: ${content_hash:0:12}${NC}"

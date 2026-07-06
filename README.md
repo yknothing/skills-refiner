@@ -84,7 +84,7 @@ Across all four skills:
 - **Loadability before elegance.** A skill that cannot satisfy the runtime loader contract is a blocker, no matter how polished its docs or workflow are.
 - **Conservative by default.** If evidence is unclear, flag observations — do not recommend removal or action. Only act when evidence is unambiguous.
 - **Respect the topology.** The standard model is: canonical skills in `~/.agents/skills/`, symlinked to agent directories (`.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, etc.). Symlinks are distribution links, not duplicates. Standalone project repos are not broken global skills.
-- **Treat installs as deployment artifacts.** This repository is the source of truth. Global installed skills may drift; compare hashes/commits before treating an installed skill as current.
+- **Treat installs as deployment artifacts.** This repository is the source of truth. Global installed skills may drift; compare hashes/commits before treating an installed skill as current. For hash comparison use the scanner’s `normalized_content_sha256` on both sides (it excludes canary blocks/CRLF/BOM), not a raw `sha256sum` of a canary-injected file.
 - **Use native signals first.** Prefer Claude Code OpenTelemetry, Codex skill metadata, Cursor Rules/Skills/MCP surfaces, and SDK-native traces where they exist. Canary tracing is a local fallback, not a platform trace.
 - **Ground judgment in evidence.** Distinguish direct evidence, inference, and uncertainty. Avoid generic praise, inflated claims, or rote rules.
 - **Keep the input surface small.** Infer mode, depth, and language from context when possible.
@@ -132,7 +132,7 @@ bash bin/skills-refiner-doctor.sh --help
 
 Optional env: `SKILLS_REFINER_TOOLS_ROOT` — directory that contains `skill-debug/` and `skill-hygiene/` (same layout as `~/.agents/skills`).
 
-Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v1`, `skill-dashboard.identity.v1`, and `skill-scan.v2` are schema versions, not product release numbers.
+Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v1`, `skill-dashboard.identity.v2`, and `skill-scan.v3` are schema versions, not product release numbers.
 
 ## Repository layout
 
@@ -158,7 +158,7 @@ Version note: the current product line is `skills-refiner 2.0`. JSON fields such
 - `skills/skill-debug/tests/test-observability-regressions.sh` — regression tests for conservative observability semantics
 
 **Supporting materials:**
-- `skills/lib/common.sh` — shared filesystem, frontmatter, topology, canonical path, and normalized hash helpers
+- `skills/skill-debug/lib/common.sh` — shared filesystem, frontmatter, topology, canonical path, and normalized hash helpers (ships inside skill-debug so per-skill installs carry it; skill-hygiene depends on it)
 - `bin/skills-refiner-doctor.sh` — contributor wrapper → `skills/skill-debug/bin/skills-refiner-doctor.sh`
 - `examples/` — usage examples for all four skills
 - `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)

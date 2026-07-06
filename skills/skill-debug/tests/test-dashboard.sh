@@ -9,8 +9,8 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DASHBOARD_SCRIPT="$SCRIPT_DIR/bin/skill-dashboard.sh"
 TRACE_SCRIPT="$SCRIPT_DIR/bin/skill-trace.sh"
-COMMON_SH="$SCRIPT_DIR/../lib/common.sh"
-# shellcheck source=../../lib/common.sh
+COMMON_SH="$SCRIPT_DIR/lib/common.sh"
+# shellcheck source=../lib/common.sh
 . "$COMMON_SH"
 PASS=0
 FAIL=0
