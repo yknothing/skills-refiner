@@ -127,9 +127,13 @@ run_tests() {
     has_skill_name=$(grep -c '"test-skill"' "$skill_file")
     assert_eq "Correct skill name in trace" "1" "$has_skill_name"
 
-    local has_canary_kind
-    has_canary_kind=$(grep -c '"trace_kind":"canary"' "$skill_file")
-    assert_eq "Trace is labeled as canary" "1" "$has_canary_kind"
+    local has_canary_helper
+    has_canary_helper=$(grep -c 'skill-canary.sh' "$skill_file")
+    assert_eq "Trace calls canary helper" "1" "$has_canary_helper"
+
+    local has_degraded_kind
+    has_degraded_kind=$(grep -c '"trace_kind":"canary_degraded"' "$skill_file")
+    assert_eq "Trace has degraded fallback" "1" "$has_degraded_kind"
 
     local has_identity_schema
     has_identity_schema=$(grep -c '"trace_schema":"skill-debug.identity.v1"' "$skill_file")

@@ -17,6 +17,7 @@ skills/
         ├── test-trace.sh
         ├── test-probe.sh
         ├── test-dashboard.sh
+        ├── test-install-layout.sh
         └── test-observability-regressions.sh
 examples/                 # Usage examples for all four skills
 evals/                    # Evaluation rubrics and cases
@@ -57,6 +58,7 @@ bash skills/skill-debug/tests/test-doctor.sh
 bash skills/skill-debug/tests/test-trace.sh
 bash skills/skill-debug/tests/test-probe.sh
 bash skills/skill-debug/tests/test-dashboard.sh
+bash skills/skill-debug/tests/test-install-layout.sh
 bash skills/skill-debug/tests/test-observability-regressions.sh
 ```
 
