@@ -234,30 +234,36 @@ run_tests() {
 
     echo -e "${BOLD}── Flags and Scope ──${NC}"
     assert_eq "Backup remnant flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "backup_remnant")] | length')"
-    assert_eq "Missing name flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "no_name")] | length')"
-    assert_eq "Overlong real-directory descriptions flagged" "2" "$(echo "$json_output" | jq '[.skills[] | select(any(.flags[]?; startswith("description_too_long:")))] | length')"
-    assert_eq "Overlong descriptions include symlink distributions" "3" "$(echo "$json_output" | jq '[.skills[], .skill_links[]] | map(select(any(.runtime_contract.load_blockers[]?; . == "description_too_long"))) | length')"
-    assert_eq "Unique load blockers include symlink-only targets" "4" "$(echo "$json_output" | jq '[.skills + .skill_links | unique_by(.canonical_skill_file)[] | select(.runtime_contract.loadable == false)] | length')"
-    assert_eq "Missing name is a load blocker" "1" "$(echo "$json_output" | jq '[.skills[] | select(any(.runtime_contract.load_blockers[]?; . == "missing_name"))] | length')"
+    assert_eq "Unobserved name is flagged without claiming absence" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "name_not_observed")] | length')"
+    assert_eq "Overlong real-directory description signals collected" "2" "$(echo "$json_output" | jq '[.skills[] | select(any(.flags[]?; startswith("description_too_long:") or startswith("description_length_over_limit_unverified:")))] | length')"
+    assert_eq "Proven overlong descriptions include symlink distributions" "2" "$(echo "$json_output" | jq '[.skills[], .skill_links[]] | map(select(any(.runtime_contract.load_blockers[]?; . == "description_too_long"))) | length')"
+    assert_eq "Unique load blockers include symlink-only targets" "2" "$(echo "$json_output" | jq '[.skills + .skill_links | unique_by(.canonical_skill_file)[] | select(.runtime_contract.status == "fail" and .runtime_contract.loadable == false)] | length')"
+    assert_eq "Unobserved name remains unknown instead of false fail" "1" "$(echo "$json_output" | jq '[.skills[] | select(.dir_name == "no-name-skill" and .runtime_contract.status == "unknown" and .runtime_contract.loadable == null and (.runtime_contract.unverified_requirements | index("name_not_observed_by_lightweight_parser")))] | length')"
+    assert_eq "Block scalar over-limit signal remains unknown" "1" "$(echo "$json_output" | jq '[.skills[] | select(.name == "overlong-block-description" and .runtime_contract.status == "unknown" and (.runtime_contract.unverified_requirements | index("description_length_over_limit_parser_not_authoritative")))] | length')"
     assert_eq "Single-line description length is not pre-truncated" "1030" "$(echo "$json_output" | jq '.skills[] | select(.name == "overlong-description") | .frontmatter.description_length')"
     assert_eq "Block description length is not pre-truncated" "1052" "$(echo "$json_output" | jq '.skills[] | select(.name == "overlong-block-description") | .frontmatter.description_length')"
     assert_eq "Pipe-to-shell flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "pipe_to_shell")] | length')"
     assert_eq "Dangerous command flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "dangerous_cmd")] | length')"
     assert_eq "Project repo skill excluded from global scan" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "project-skill")] | length')"
-    assert_eq "BOM/CRLF frontmatter is loadable" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.loadable')"
+    assert_eq "BOM/CRLF static preflight remains unknown" "unknown" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.status')"
+    assert_eq "BOM/CRLF static preflight does not claim loadable" "true" "$(echo "$json_output" | jq '.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.loadable == null')"
     assert_eq "BOM/CRLF frontmatter has no missing field blockers" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.load_blockers[]? | select(. == "missing_name" or . == "missing_description")] | length')"
-    assert_eq "Body delimiter does not break frontmatter" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "body-delimiter-skill") | .runtime_contract.loadable')"
+    assert_eq "Body delimiter static preflight remains unknown" "unknown" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "body-delimiter-skill") | .runtime_contract.status')"
+    assert_eq "Static preflight never claims runtime verification" "true" "$(echo "$json_output" | jq 'all(.skills[]; .runtime_contract.runtime_verified == false)')"
+    assert_eq "Runtime status stays inside pass/fail/unknown enum" "true" "$(echo "$json_output" | jq 'all(.skills[]; (.runtime_contract.status as $status | (["pass", "fail", "unknown"] | index($status)) != null))')"
+    assert_eq "Static preflight emits no unverified pass" "0" "$(echo "$json_output" | jq '[.skills[] | select(.runtime_contract.status == "pass")] | length')"
     echo ""
 
     echo -e "${BOLD}── JSON Shape ──${NC}"
     echo "$json_output" | jq . >/dev/null 2>&1
     assert_eq "JSON output is valid" "0" "$?"
-    assert_eq "JSON has schema version" "skill-scan.v3" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
+    assert_eq "JSON has schema version" "skill-scan.v4" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
+    assert_eq "JSON declares static preflight validation mode" "static-preflight" "$(echo "$json_output" | jq -r '.metadata.runtime_validation_mode')"
     assert_eq "JSON has topology key" "true" "$(echo "$json_output" | jq 'has("topology")')"
     assert_eq "JSON has skills key" "true" "$(echo "$json_output" | jq 'has("skills")')"
     assert_eq "JSON has skill_links key" "true" "$(echo "$json_output" | jq 'has("skill_links")')"
     assert_eq "JSON has runtime_load_blockers key" "true" "$(echo "$json_output" | jq 'has("runtime_load_blockers")')"
-    assert_eq "Runtime load blockers are elevated" "4" "$(echo "$json_output" | jq '.runtime_load_blockers | length')"
+    assert_eq "Runtime load blockers are elevated" "2" "$(echo "$json_output" | jq '.runtime_load_blockers | length')"
     assert_eq "JSON-only mode does not write report files" "0" "$report_count"
     echo ""
 
@@ -280,6 +286,43 @@ run_tests() {
     assert_eq "Codex UI metadata values do not leak" "0" "$(echo "$json_output" | jq '[.. | strings | select(. == "Healthy Skill" or . == "Tests OpenAI metadata surface." or . == "Use healthy-skill for scan tests." or . == "icon.txt")] | length')"
     assert_eq "Codex implicit invocation policy collected" "false" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .openai.allow_implicit_invocation')"
     assert_eq "Codex tool dependencies counted" "1" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .openai.tool_dependencies_count')"
+    echo ""
+
+    echo -e "${BOLD}── Parser and Locale Honesty ──${NC}"
+    mkdir -p "$SANDBOX/.agents/skills/quoted-key-skill" "$SANDBOX/.agents/skills/cjk-length-skill" "$SANDBOX/.agents/skills/trailing-space-skill"
+    cat > "$SANDBOX/.agents/skills/quoted-key-skill/SKILL.md" << 'EOF'
+---
+"name": quoted-key-skill
+'description': Use when testing valid YAML quoted keys.
+---
+# quoted-key-skill
+EOF
+    local cjk_description locale_json c_locale_json
+    cjk_description=$(printf '技%.0s' {1..600})
+    cat > "$SANDBOX/.agents/skills/cjk-length-skill/SKILL.md" << EOF
+---
+name: cjk-length-skill
+description: $cjk_description
+---
+# cjk-length-skill
+EOF
+    local trailing_spaces
+    trailing_spaces=$(printf ' %.0s' {1..1030})
+    printf '%s\n' '---' 'name: trailing-space-skill' "description: short$trailing_spaces" '---' '# trailing-space-skill' > "$SANDBOX/.agents/skills/trailing-space-skill/SKILL.md"
+    locale_json=$(HOME="$SANDBOX" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    c_locale_json=$(LC_ALL=C HOME="$SANDBOX" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Quoted YAML keys are observed" "quoted-key-skill" "$(echo "$locale_json" | jq -r '.skills[] | select(.dir_name == "quoted-key-skill") | .frontmatter.name')"
+    assert_eq "Quoted YAML keys do not produce false fail" "unknown" "$(echo "$locale_json" | jq -r '.skills[] | select(.dir_name == "quoted-key-skill") | .runtime_contract.status')"
+    assert_eq "CJK length is locale-independent" "600:600" "$(printf '%s\n%s\n' "$locale_json" "$c_locale_json" | jq -sr 'map(.skills[] | select(.dir_name == "cjk-length-skill") | .runtime_contract.description_length) | map(tostring) | join(":")')"
+    assert_eq "C locale CJK preflight does not false fail" "unknown" "$(echo "$c_locale_json" | jq -r '.skills[] | select(.dir_name == "cjk-length-skill") | .runtime_contract.status')"
+    assert_eq "YAML trailing spaces do not inflate description length" "5:unknown" "$(echo "$locale_json" | jq -r '.skills[] | select(.dir_name == "trailing-space-skill") | [.runtime_contract.description_length, .runtime_contract.status] | map(tostring) | join(":")')"
+    echo ""
+
+    echo -e "${BOLD}── CLI Contract ──${NC}"
+    local unknown_option_rc
+    HOME="$SANDBOX" bash "$SCAN_SCRIPT" --definitely-unknown >/dev/null 2>&1
+    unknown_option_rc=$?
+    assert_eq "Unknown scan option returns usage error" "2" "$unknown_option_rc"
     echo ""
 
     echo -e "${BOLD}══════════════════════════════════════════${NC}"

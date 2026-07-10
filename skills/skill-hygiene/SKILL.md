@@ -18,10 +18,11 @@ You are a senior agent-skills governance advisor. Your role is to help users und
 
 When you have **shell access** and the user asks for a skills health check, inventory, or governance triage (without insisting on paste-only mode):
 
-- Prefer running **read-only** collectors directly (`skills-refiner-doctor.sh`, `skill-scan.sh`, `skill-probe.sh`, `skill-dashboard.sh`) instead of asking the user to copy-paste outputs — unless the environment forbids shell execution or the user opts out.
+- Prefer running the self-contained, **read-only** `skill-scan.sh` collector directly instead of asking the user to copy-paste output — unless the environment forbids shell execution or the user opts out.
+- Use `skills-refiner-doctor.sh`, `skill-probe.sh`, or `skill-dashboard.sh` only when `skill-debug` is also installed. `skill-hygiene` does not require `skill-debug` for its own scan.
 - **Never** run `skill-trace.sh --inject`, `--inject-dir`, `--strip`, or `--strip-dir` without **explicit user confirmation** (those modify `SKILL.md` files on disk).
 
-Convenient bundle:
+Optional combined bundle (requires `skill-debug`):
 
 ```bash
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
@@ -77,7 +78,7 @@ Accurate local statistics are limited to facts the filesystem can prove: skill f
 
 Key facts now include:
 - `frontmatter` — local discovery contract facts: name and description, exact description length, UTF-8 byte length, and capped preview metadata
-- `runtime_contract` — hard loader facts such as missing `name`, missing `description`, or `description` longer than the 1024-character loader limit
+- `runtime_contract` — tri-state loader evidence. `fail` means a blocker was proven; `unknown` means static preflight found no blocker but did not execute the real runtime loader; `pass` is reserved for explicit runtime-validator evidence. In static mode, `loadable` is `false` for `fail` and `null` for `unknown`, never optimistically `true`. `unverified_requirements` records fields the lightweight parser did not observe without falsely claiming they are absent.
 - `claude_code` — bounded Claude Code invocation signals such as model/user invocation controls, tool/path counts, and hook event names
 - `openai` — bounded `agents/openai.yaml` facts: file presence, implicit-invocation policy, and tool dependency count; not runtime behavior proof
 - `normalized_content_sha256` — local normalized content identity for same-name comparison without network access. Canary blocks, CRLF, and BOM are excluded from this hash, so it will differ from a raw `sha256sum` of the file whenever a canary is injected; compare normalized values with normalized values.
@@ -95,10 +96,11 @@ When reviewing scan results, apply your judgment across these dimensions. Not al
 
 ### 1. Runtime Loadability
 Can the skill be loaded before any design judgment starts?
-- Is `runtime_contract.loadable` true?
+- Is `runtime_contract.status` `fail`, `unknown`, or an explicitly runtime-verified `pass`?
 - Are required frontmatter fields present?
 - Is `description` within the loader limit?
-- If this layer fails, report it as a critical blocker before evaluating design quality.
+- If this layer is `fail`, report it as a critical blocker before evaluating design quality.
+- If it is `unknown`, say that runtime loadability remains unverified; do not upgrade absence of static blockers into a pass.
 
 ### 2. Frontmatter & Discoverability
 Is the skill well-described? Can an agent find it when it's relevant?

@@ -72,28 +72,49 @@ resolve_canonical_file() {
 
 write_preserving_metadata() {
     local source_tmp="$1" target="$2"
-    local ref_tmp
-    ref_tmp=$(mktemp) || return 1
-    touch -r "$target" "$ref_tmp" 2>/dev/null || true
-    cat "$source_tmp" > "$target" || {
-        rm -f "$ref_tmp"
+    local target_dir atomic_tmp
+    target_dir=$(dirname "$target")
+    atomic_tmp=$(mktemp "$target_dir/.skill-trace.XXXXXX") || return 1
+    cp -p "$target" "$atomic_tmp" 2>/dev/null || {
+        rm -f "$atomic_tmp"
         return 1
     }
-    touch -r "$ref_tmp" "$target" 2>/dev/null || true
-    rm -f "$ref_tmp"
+    cat "$source_tmp" > "$atomic_tmp" || {
+        rm -f "$atomic_tmp"
+        return 1
+    }
+    touch -r "$target" "$atomic_tmp" 2>/dev/null || {
+        rm -f "$atomic_tmp"
+        return 1
+    }
+    mv -f "$atomic_tmp" "$target" || {
+        rm -f "$atomic_tmp"
+        return 1
+    }
+}
+
+shell_quote() {
+    printf '%q' "$1"
 }
 
 # ── Inject Trace ──────────────────────────────────────────────────────
 inject_trace() {
     local skill_file="$1"
+    TRACE_RESULT="fail"
 
     if [ ! -f "$skill_file" ]; then
         echo -e "${RED}[ERROR]${NC} File not found: $skill_file"
         return 1
     fi
 
+    if ! sr_validate_trace_structure "$skill_file"; then
+        echo -e "${RED}[ERROR]${NC} Malformed trace markers; refusing to modify: $skill_file"
+        return 1
+    fi
+
     if has_trace "$skill_file"; then
         echo -e "${DIM}[SKIP]${NC} Already has trace: $skill_file"
+        TRACE_RESULT="skip"
         return 0
     fi
 
@@ -107,114 +128,212 @@ inject_trace() {
     # skill-canary.sh (single implementation sourced from lib/common.sh), so
     # injected files stay small and never freeze a copy of the normalization
     # algorithm.
-    local trace_block trace_template_tmp
-    trace_template_tmp=$(mktemp) || return 1
-    cat > "$trace_template_tmp" << 'TRACEEOF'
-## Activation Canary Trace (auto-injected by skill-debug)
-<!-- SKILL-DEBUG-TRACE-START v1 -->
-When this skill is used, run this canary command first:
-```bash
-_skill_debug_helper="__CANARY_HELPER__"
-if [ -f "$_skill_debug_helper" ]; then
-  bash "$_skill_debug_helper" "__CANONICAL_SKILL_FILE__"
-else
-  mkdir -p ~/.agents/debug && echo '{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary_degraded","skill":"__SKILL_NAME__","identity_key":"","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","cwd":"'$(pwd)'"}' >> ~/.agents/debug/activation.jsonl
-fi
-```
-<!-- SKILL-DEBUG-TRACE-END v1 -->
-TRACEEOF
-    trace_block=$(cat "$trace_template_tmp")
-    rm -f "$trace_template_tmp"
-
-    # Replace placeholders with inject-time values
-    trace_block="${trace_block//__SKILL_NAME__/$skill_name}"
-    trace_block="${trace_block//__CANONICAL_SKILL_FILE__/$canonical_skill_file}"
-    trace_block="${trace_block//__CANARY_HELPER__/$SCRIPT_DIR/skill-canary.sh}"
+    local trace_block helper_literal skill_file_literal skill_name_literal original_eof_state
+    helper_literal=$(shell_quote "$SCRIPT_DIR/skill-canary.sh")
+    skill_file_literal=$(shell_quote "$canonical_skill_file")
+    skill_name_literal=$(shell_quote "$skill_name")
+    original_eof_state=$(sr_file_eof_state "$canonical_skill_file") || {
+        echo -e "${RED}[ERROR]${NC} Failed to inspect EOF state: $skill_file"
+        return 1
+    }
+    trace_block=$(printf '%s\n' \
+        '## Activation Canary Trace (auto-injected by skill-debug)' \
+        '<!-- SKILL-DEBUG-TRACE-START v1 -->' \
+        "<!-- SKILL-DEBUG-ORIGINAL-EOF $original_eof_state -->" \
+        'When this skill is used, run this canary command first:' \
+        '```bash' \
+        '_skill_debug_json_escape() { LC_ALL=C awk '\''BEGIN { ORS=""; controls=""; for (i=1; i<=31; i++) controls=controls sprintf("%c", i) } { if (NR > 1) printf "\\n"; for (i=1; i<=length($0); i++) { ch=substr($0, i, 1); if (ch == "\\") printf "\\\\"; else if (ch == "\"") printf "\\\""; else { control=index(controls, ch); if (control > 0) printf "\\u%04x", control; else printf "%s", ch } } }'\''; }; _skill_debug_helper='"$helper_literal"'; _skill_debug_name='"$skill_name_literal" \
+        'if [ -f "$_skill_debug_helper" ]; then' \
+        '  bash "$_skill_debug_helper" '"$skill_file_literal" \
+        'else' \
+        '  _skill_debug_mode() { stat -c '\''%a'\'' "$1" 2>/dev/null || stat -f '\''%Lp'\'' "$1" 2>/dev/null; }; _skill_debug_name_json=$(printf '\''%s'\'' "$_skill_debug_name" | _skill_debug_json_escape); _skill_debug_cwd_json=$(pwd | _skill_debug_json_escape); _skill_debug_dir=~/.agents/debug; _skill_debug_log=$_skill_debug_dir/activation.jsonl; _skill_debug_platform=$(uname -s 2>/dev/null || true); case "$_skill_debug_platform:$_skill_debug_dir" in MINGW*:*|MSYS*:*|CYGWIN*:*|Linux:/mnt/?/*) printf '\''%s\n'\'' "[ERROR] Canary logging requires enforceable POSIX file permissions; on Windows use WSL 2 with HOME on its Linux filesystem." >&2; false ;; Darwin:*|Linux:*) umask 077; [ ! -L "$HOME" ] && [ ! -L "$HOME/.agents" ] && [ ! -L "$_skill_debug_dir" ] && mkdir -p "$_skill_debug_dir" && [ -d "$_skill_debug_dir" ] && [ ! -L "$_skill_debug_dir" ] && chmod 700 "$_skill_debug_dir" && [ "$(_skill_debug_mode "$_skill_debug_dir")" = 700 ] && [ ! -L "$_skill_debug_log" ] && { [ -e "$_skill_debug_log" ] || (set -o noclobber; : > "$_skill_debug_log") 2>/dev/null; } && [ -f "$_skill_debug_log" ] && [ ! -L "$_skill_debug_log" ] && chmod 600 "$_skill_debug_log" && [ "$(_skill_debug_mode "$_skill_debug_log")" = 600 ] && printf '\''{"event":"skill_canary_observed","trace_schema":"skill-debug.identity.v1","trace_kind":"canary_degraded","skill":"%s","identity_key":"","ts":"%s","cwd":"%s"}\n'\'' "$_skill_debug_name_json" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_skill_debug_cwd_json" >> "$_skill_debug_log" ;; *) printf '\''%s\n'\'' "[ERROR] Canary logging is unsupported on this platform." >&2; false ;; esac' \
+        'fi' \
+        '```' \
+        '<!-- SKILL-DEBUG-TRACE-END v1 -->')
 
     # Find the end of frontmatter and inject after it
     local fm_end
-    fm_end=$(awk '{
+    if ! fm_end=$(awk '{
         line=$0
         sub(/\r$/, "", line)
         if (NR == 1) if (substr(line, 1, 3) == "\357\273\277") line=substr(line, 4)
         if (line ~ /^---[[:space:]]*$/) { c++; if(c==2){print NR; exit} }
-    }' "$skill_file")
+    }' "$skill_file"); then
+        echo -e "${RED}[ERROR]${NC} Failed to locate frontmatter boundary: $skill_file"
+        return 1
+    fi
 
     local tmp
     tmp=$(mktemp) || return 1
     if [ -n "$fm_end" ]; then
         # Insert after the second --- line
-        head -n "$fm_end" "$skill_file" > "$tmp"
-        echo "$trace_block" >> "$tmp"
-        tail -n "+$((fm_end + 1))" "$skill_file" >> "$tmp"
+        if ! head -n "$fm_end" "$skill_file" > "$tmp"; then
+            rm -f "$tmp"
+            echo -e "${RED}[ERROR]${NC} Failed to read frontmatter: $skill_file"
+            return 1
+        fi
+        local head_eof_state
+        head_eof_state=$(sr_file_eof_state "$tmp") || {
+            rm -f "$tmp"
+            echo -e "${RED}[ERROR]${NC} Failed to inspect transformed frontmatter: $skill_file"
+            return 1
+        }
+        if [ "$head_eof_state" != "newline" ]; then
+            printf '\n' >> "$tmp" || { rm -f "$tmp"; return 1; }
+        fi
+        if ! printf '%s\n' "$trace_block" >> "$tmp"; then
+            rm -f "$tmp"
+            return 1
+        fi
+        if ! tail -n "+$((fm_end + 1))" "$skill_file" >> "$tmp"; then
+            rm -f "$tmp"
+            echo -e "${RED}[ERROR]${NC} Failed to read skill body: $skill_file"
+            return 1
+        fi
     else
         # No frontmatter, prepend
-        echo "$trace_block" > "$tmp"
-        cat "$skill_file" >> "$tmp"
+        if ! printf '%s\n' "$trace_block" > "$tmp" || ! cat "$skill_file" >> "$tmp"; then
+            rm -f "$tmp"
+            echo -e "${RED}[ERROR]${NC} Failed to build traced content: $skill_file"
+            return 1
+        fi
     fi
-    write_preserving_metadata "$tmp" "$skill_file"
+    if ! write_preserving_metadata "$tmp" "$canonical_skill_file"; then
+        rm -f "$tmp"
+        echo -e "${RED}[ERROR]${NC} Failed to atomically update: $skill_file"
+        return 1
+    fi
     rm -f "$tmp"
 
+    TRACE_RESULT="success"
     echo -e "${GREEN}[INJECTED]${NC} $skill_name → $skill_file"
 }
 
 # ── Strip Trace ───────────────────────────────────────────────────────
 strip_trace() {
     local skill_file="$1"
+    TRACE_RESULT="fail"
 
     if [ ! -f "$skill_file" ]; then
         echo -e "${RED}[ERROR]${NC} File not found: $skill_file"
         return 1
     fi
 
+    if ! sr_validate_trace_structure "$skill_file"; then
+        echo -e "${RED}[ERROR]${NC} Malformed trace markers; refusing to modify: $skill_file"
+        return 1
+    fi
+
     if ! has_trace "$skill_file"; then
         echo -e "${DIM}[SKIP]${NC} No trace found: $skill_file"
+        TRACE_RESULT="skip"
         return 0
     fi
 
     local skill_name
     skill_name=$(get_skill_name "$skill_file")
 
+    local canonical_skill_file
+    canonical_skill_file=$(resolve_canonical_file "$skill_file" 2>/dev/null || echo "$skill_file")
+
     # Remove real injected trace blocks. Literal examples inside fenced code are kept.
     local tmp
     tmp=$(mktemp) || return 1
-    sr_strip_trace_blocks "$skill_file" > "$tmp"
-    write_preserving_metadata "$tmp" "$skill_file"
+    if ! sr_strip_trace_blocks "$skill_file" > "$tmp"; then
+        rm -f "$tmp"
+        echo -e "${RED}[ERROR]${NC} Failed to transform traced content: $skill_file"
+        return 1
+    fi
+    if ! write_preserving_metadata "$tmp" "$canonical_skill_file"; then
+        rm -f "$tmp"
+        echo -e "${RED}[ERROR]${NC} Failed to atomically update: $skill_file"
+        return 1
+    fi
     rm -f "$tmp"
 
+    TRACE_RESULT="success"
     echo -e "${YELLOW}[STRIPPED]${NC} $skill_name → $skill_file"
 }
 
 # ── Directory Operations ──────────────────────────────────────────────
 inject_dir() {
     local dir="$1"
-    local count=0
+    local success=0 skipped=0 failed=0
+
+    if [ ! -d "$dir" ]; then
+        echo -e "${RED}[ERROR]${NC} Directory not found: $dir" >&2
+        return 2
+    fi
+
+    local files_tmp
+    files_tmp=$(mktemp) || return 1
+    if ! find "$dir" -maxdepth 3 -name "SKILL.md" -type f >"$files_tmp" 2>/dev/null; then
+        rm -f "$files_tmp"
+        echo -e "${RED}[ERROR]${NC} Failed to enumerate skill files: $dir" >&2
+        echo -e "${GREEN}Done.${NC} success=0 skipped=0 failed=1"
+        return 1
+    fi
 
     echo -e "${BOLD}Injecting traces into: $dir${NC}"
     while IFS= read -r f; do
-        inject_trace "$f"
-        count=$((count + 1))
-    done < <(find "$dir" -maxdepth 3 -name "SKILL.md" -type f 2>/dev/null)
+        if inject_trace "$f"; then
+            case "$TRACE_RESULT" in
+                success) success=$((success + 1)) ;;
+                skip) skipped=$((skipped + 1)) ;;
+            esac
+        else
+            failed=$((failed + 1))
+        fi
+    done < "$files_tmp"
+    rm -f "$files_tmp"
 
-    echo -e "\n${GREEN}Done.${NC} Processed $count skill files."
+    echo -e "\n${GREEN}Done.${NC} success=$success skipped=$skipped failed=$failed"
+    [ "$failed" -eq 0 ] || return 1
 }
 
 strip_dir() {
     local dir="$1"
-    local count=0
+    local success=0 skipped=0 failed=0
+
+    if [ ! -d "$dir" ]; then
+        echo -e "${RED}[ERROR]${NC} Directory not found: $dir" >&2
+        return 2
+    fi
+
+    local files_tmp
+    files_tmp=$(mktemp) || return 1
+    if ! find "$dir" -maxdepth 3 -name "SKILL.md" -type f >"$files_tmp" 2>/dev/null; then
+        rm -f "$files_tmp"
+        echo -e "${RED}[ERROR]${NC} Failed to enumerate skill files: $dir" >&2
+        echo -e "${YELLOW}Done.${NC} success=0 skipped=0 failed=1"
+        return 1
+    fi
 
     echo -e "${BOLD}Stripping traces from: $dir${NC}"
     while IFS= read -r f; do
-        strip_trace "$f"
-        count=$((count + 1))
-    done < <(find "$dir" -maxdepth 3 -name "SKILL.md" -type f 2>/dev/null)
+        if strip_trace "$f"; then
+            case "$TRACE_RESULT" in
+                success) success=$((success + 1)) ;;
+                skip) skipped=$((skipped + 1)) ;;
+            esac
+        else
+            failed=$((failed + 1))
+        fi
+    done < "$files_tmp"
+    rm -f "$files_tmp"
 
-    echo -e "\n${YELLOW}Done.${NC} Processed $count skill files."
+    echo -e "\n${YELLOW}Done.${NC} success=$success skipped=$skipped failed=$failed"
+    [ "$failed" -eq 0 ] || return 1
 }
 
 # ── Status ────────────────────────────────────────────────────────────
 show_status() {
     init_home_paths || exit 2
+
+    if [ -f "$LOG_FILE" ] && ! command -v jq >/dev/null 2>&1; then
+        echo "[ERROR] jq is required to read an existing activation log." >&2
+        return 127
+    fi
 
     echo -e "${BOLD}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}║        Skill Trace Status v2.0           ║${NC}"
@@ -264,27 +383,41 @@ show_status() {
 }
 
 # ── Main ──────────────────────────────────────────────────────────────
+show_help() {
+    echo "skill-trace.sh — Skill activation trace manager"
+    echo ""
+    echo "Usage:"
+    echo "  --inject <SKILL.md>     Inject trace into one skill"
+    echo "  --inject-dir <dir>      Inject into all skills in directory"
+    echo "  --strip <SKILL.md>      Remove trace from one skill"
+    echo "  --strip-dir <dir>       Remove all traces in directory"
+    echo "  --status                Show trace status and log info"
+    echo "  --rotate                Rotate activation log file"
+}
+
 case "${1:-}" in
     --inject)
-        [ -z "$2" ] && { echo "Usage: skill-trace.sh --inject <SKILL.md>"; exit 1; }
+        [ "$#" -eq 2 ] || { echo "Usage: skill-trace.sh --inject <SKILL.md>" >&2; exit 2; }
         inject_trace "$2"
         ;;
     --inject-dir)
-        [ -z "$2" ] && { echo "Usage: skill-trace.sh --inject-dir <directory>"; exit 1; }
+        [ "$#" -eq 2 ] || { echo "Usage: skill-trace.sh --inject-dir <directory>" >&2; exit 2; }
         inject_dir "$2"
         ;;
     --strip)
-        [ -z "$2" ] && { echo "Usage: skill-trace.sh --strip <SKILL.md>"; exit 1; }
+        [ "$#" -eq 2 ] || { echo "Usage: skill-trace.sh --strip <SKILL.md>" >&2; exit 2; }
         strip_trace "$2"
         ;;
     --strip-dir)
-        [ -z "$2" ] && { echo "Usage: skill-trace.sh --strip-dir <directory>"; exit 1; }
+        [ "$#" -eq 2 ] || { echo "Usage: skill-trace.sh --strip-dir <directory>" >&2; exit 2; }
         strip_dir "$2"
         ;;
     --status)
+        [ "$#" -eq 1 ] || { echo "Usage: skill-trace.sh --status" >&2; exit 2; }
         show_status
         ;;
     --rotate)
+        [ "$#" -eq 1 ] || { echo "Usage: skill-trace.sh --rotate" >&2; exit 2; }
         init_home_paths || exit 2
         if [ -f "$LOG_FILE" ]; then
             rotated="$DEBUG_DIR/activation-$(date +%Y%m%d-%H%M%S).jsonl"
@@ -294,15 +427,12 @@ case "${1:-}" in
             echo "No log file to rotate."
         fi
         ;;
+    --help|-h|"")
+        [ "$#" -le 1 ] || { echo "Usage: skill-trace.sh --help" >&2; exit 2; }
+        show_help
+        ;;
     *)
-        echo "skill-trace.sh — Skill activation trace manager"
-        echo ""
-        echo "Usage:"
-        echo "  --inject <SKILL.md>     Inject trace into one skill"
-        echo "  --inject-dir <dir>      Inject into all skills in directory"
-        echo "  --strip <SKILL.md>      Remove trace from one skill"
-        echo "  --strip-dir <dir>       Remove all traces in directory"
-        echo "  --status                Show trace status and log info"
-        echo "  --rotate                Rotate activation log file"
+        echo "[ERROR] Unknown option: $1" >&2
+        exit 2
         ;;
 esac

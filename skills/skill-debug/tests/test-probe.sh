@@ -287,6 +287,15 @@ run_tests() {
 
     echo ""
 
+    # Test 8: Unknown options fail closed
+    echo -e "${BOLD}── CLI Contract ──${NC}"
+    local unknown_option_rc
+    HOME="$SANDBOX" bash "$PROBE_SCRIPT" --definitely-unknown >/dev/null 2>&1
+    unknown_option_rc=$?
+    assert_eq "Unknown probe option returns usage error" "2" "$unknown_option_rc"
+
+    echo ""
+
     # Summary
     echo -e "${BOLD}══════════════════════════════════════════${NC}"
     local total=$((PASS + FAIL))

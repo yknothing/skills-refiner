@@ -12,12 +12,14 @@
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Shared helpers ship inside the skill-debug skill so they survive per-skill
-# installation (installers only copy directories that contain a SKILL.md).
-COMMON_SH="$SCRIPT_DIR/../../skill-debug/lib/common.sh"
-[ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; echo "[ERROR] skill-hygiene requires the skill-debug skill to be installed alongside it (it provides the shared helper library)." >&2; exit 1; }
-# shellcheck source=../../skill-debug/lib/common.sh
+# Governance skills are independently installable, so each executable skill
+# ships the same runtime helper inside its own directory. The installed-layout
+# contract test keeps the mirrored copies byte-identical.
+COMMON_SH="$SCRIPT_DIR/../lib/common.sh"
+[ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
+# shellcheck source=../lib/common.sh
 . "$COMMON_SH"
+sr_require_sha256 || exit $?
 
 # ── Config ────────────────────────────────────────────────────────────
 detect_home_dir() {
@@ -68,7 +70,7 @@ while [[ $# -gt 0 ]]; do
         --json) JSON_ONLY=true; shift ;;
         --no-write) NO_WRITE=true; shift ;;
         --help|-h) show_help; exit 0 ;;
-        *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
+        *) echo "[ERROR] Unknown option: $1" >&2; exit 2 ;;
     esac
 done
 
@@ -105,6 +107,94 @@ get_frontmatter_text() {
 
 utf8_byte_length() {
     LC_ALL=C printf '%s' "$1" | wc -c | tr -d ' '
+}
+
+utf8_codepoint_length() {
+    LC_ALL=C printf '%s' "$1" | LC_ALL=C od -An -v -tu1 | LC_ALL=C awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                byte=$i + 0
+                if (invalid) continue
+                if (expected > 0) {
+                    if (byte < next_min || byte > next_max) {
+                        invalid=1
+                        continue
+                    }
+                    expected--
+                    next_min=128
+                    next_max=191
+                    continue
+                }
+                if (byte <= 127) {
+                    count++
+                } else if (byte >= 194 && byte <= 223) {
+                    count++; expected=1; next_min=128; next_max=191
+                } else if (byte == 224) {
+                    count++; expected=2; next_min=160; next_max=191
+                } else if (byte >= 225 && byte <= 236) {
+                    count++; expected=2; next_min=128; next_max=191
+                } else if (byte == 237) {
+                    count++; expected=2; next_min=128; next_max=159
+                } else if (byte >= 238 && byte <= 239) {
+                    count++; expected=2; next_min=128; next_max=191
+                } else if (byte == 240) {
+                    count++; expected=3; next_min=144; next_max=191
+                } else if (byte >= 241 && byte <= 243) {
+                    count++; expected=3; next_min=128; next_max=191
+                } else if (byte == 244) {
+                    count++; expected=3; next_min=128; next_max=143
+                } else {
+                    invalid=1
+                }
+            }
+        }
+        END {
+            if (invalid || expected != 0) exit 1
+            print count + 0
+        }
+    '
+}
+
+frontmatter_scalar_kind() {
+    local file="$1" key="$2"
+    LC_ALL=C awk -v key="$key" '
+        function top_key(line, raw, first, last) {
+            if (line ~ /^[[:space:]]/ || line !~ /:/) return ""
+            raw=line
+            sub(/:.*/, "", raw)
+            sub(/[[:space:]]+$/, "", raw)
+            first=substr(raw, 1, 1)
+            last=substr(raw, length(raw), 1)
+            if ((first == "\"" && last == "\"") || (first == "\047" && last == "\047")) {
+                raw=substr(raw, 2, length(raw) - 2)
+            }
+            return raw
+        }
+        {
+            line=$0
+            sub(/\r$/, "", line)
+            if (NR == 1 && substr(line, 1, 3) == "\357\273\277") line=substr(line, 4)
+        }
+        NR == 1 && line ~ /^---[[:space:]]*$/ { in_fm=1; next }
+        in_fm && line ~ /^---[[:space:]]*$/ { in_fm=0; closed=1; next }
+        in_fm && top_key(line) == key {
+            seen++
+            value=line
+            sub(/^[^:]*:[[:space:]]*/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            first=substr(value, 1, 1)
+            if (value == "") kind="empty"
+            else if (value ~ /^[|>][+-]?$/) kind="block"
+            else if (first == "\"" || first == "\047") kind="quoted"
+            else if (value ~ /[#&*!|>{}\[\]]/ || value ~ /:[[:space:]]/) kind="complex"
+            else kind="plain-simple"
+        }
+        END {
+            if (!closed || seen == 0) print "unobserved"
+            else if (seen > 1) print "complex"
+            else print kind
+        }
+    ' "$file" 2>/dev/null
 }
 
 get_metadata_value() {
@@ -286,7 +376,7 @@ scan_directory() {
         local name desc_full desc top_version metadata_version declared_version word_count mtime mtime_iso now age_days
         name=$(get_frontmatter "$skill_file" "name")
         desc_full=$(get_frontmatter_text "$skill_file" "description")
-        desc="${desc_full:0:200}"
+        desc="$desc_full"
         top_version=$(get_frontmatter "$skill_file" "version")
         metadata_version=$(get_metadata_value "$skill_file" "version")
         declared_version="${metadata_version:-$top_version}"
@@ -302,17 +392,39 @@ scan_directory() {
             flags+=("backup_remnant")
         fi
 
-        local desc_length desc_utf8_bytes desc_over_limit
-        desc_length=${#desc_full}
+        local desc_length desc_length_json desc_length_valid desc_utf8_bytes desc_length_over_limit desc_over_limit desc_scalar_kind runtime_status runtime_loadable_json
+        desc_length=""
+        desc_length_json="null"
+        desc_length_valid=false
+        if desc_length=$(utf8_codepoint_length "$desc_full"); then
+            desc_length_json="$desc_length"
+            desc_length_valid=true
+        fi
         desc_utf8_bytes=$(utf8_byte_length "$desc_full")
+        desc_scalar_kind=$(frontmatter_scalar_kind "$skill_file" "description")
+        desc_length_over_limit=false
         desc_over_limit=false
-        if [ "$desc_length" -gt "$MAX_DESCRIPTION_LENGTH" ]; then
-            desc_over_limit=true
+        if $desc_length_valid && [ "$desc_length" -gt "$MAX_DESCRIPTION_LENGTH" ]; then
+            desc_length_over_limit=true
+            if [ "$desc_scalar_kind" = "plain-simple" ]; then
+                desc_over_limit=true
+            fi
         fi
 
-        [ -z "$name" ] && flags+=("no_name")
-        [ -z "$desc" ] && flags+=("no_description")
-        $desc_over_limit && flags+=("description_too_long:${desc_length}>${MAX_DESCRIPTION_LENGTH}")
+        runtime_status="unknown"
+        runtime_loadable_json="null"
+        if $desc_over_limit; then
+            runtime_status="fail"
+            runtime_loadable_json="false"
+        fi
+
+        [ -z "$name" ] && flags+=("name_not_observed")
+        [ -z "$desc" ] && flags+=("description_not_observed")
+        if $desc_over_limit; then
+            flags+=("description_too_long:${desc_length}>${MAX_DESCRIPTION_LENGTH}")
+        elif $desc_length_over_limit; then
+            flags+=("description_length_over_limit_unverified:${desc_length}>${MAX_DESCRIPTION_LENGTH}")
+        fi
 
         [ "$word_count" -lt 30 ] && flags+=("very_small")
         [ "$word_count" -gt 5000 ] && flags+=("very_large")
@@ -364,7 +476,7 @@ scan_directory() {
         local desc_truncated when_to_use_length when_to_use_truncated allowed_tools_count paths_count
 
         when_to_use=$(get_frontmatter_text "$skill_file" "when_to_use")
-        when_to_use_preview="${when_to_use:0:200}"
+        when_to_use_preview="$when_to_use"
         disable_model_invocation=$(get_frontmatter "$skill_file" "disable-model-invocation")
         user_invocable=$(get_frontmatter "$skill_file" "user-invocable")
         model=$(get_frontmatter "$skill_file" "model")
@@ -381,8 +493,8 @@ scan_directory() {
         extra_keys_json=$(echo "$fm_keys_json" | jq 'map(. as $key | select((["name","description","when_to_use","disable-model-invocation","user-invocable","allowed-tools","model","effort","context","agent","paths","shell","hooks"] | index($key)) | not))')
 
         desc_truncated=false
-        [ "$desc_length" -gt 200 ] && desc_truncated=true
-        when_to_use_length=${#when_to_use}
+        $desc_length_valid && [ "$desc_length" -gt 200 ] && desc_truncated=true
+        when_to_use_length=$(utf8_codepoint_length "$when_to_use" 2>/dev/null || echo 0)
         when_to_use_truncated=false
         [ "$when_to_use_length" -gt 200 ] && when_to_use_truncated=true
         allowed_tools_count=$(echo "$allowed_tools_json" | jq 'length')
@@ -409,7 +521,7 @@ scan_directory() {
             --arg source_skill_file "$source_skill_file" \
             --arg canonical_skill_file "$canonical_skill_file" \
             --arg canonical_dir "$canonical_dir" \
-            --arg desc "${desc:0:200}" \
+            --arg desc "$desc" \
             --arg declared_version "$declared_version" \
             --arg metadata_version "$metadata_version" \
             --arg normalized_content_sha256 "$normalized_content_sha256" \
@@ -427,12 +539,16 @@ scan_directory() {
             --arg agent "$agent" \
             --arg shell "$shell_value" \
             --arg allow_implicit_invocation "$allow_implicit_invocation" \
+            --arg runtime_status "$runtime_status" \
+            --arg description_scalar_kind "$desc_scalar_kind" \
             --argjson words "$word_count" \
             --argjson mtime "$mtime" \
             --argjson age "$age_days" \
             --argjson stale_days "$STALE_DAYS" \
             --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" \
-            --argjson desc_length "$desc_length" \
+            --argjson desc_length "$desc_length_json" \
+            --argjson desc_length_valid "$desc_length_valid" \
+            --argjson desc_length_over_limit "$desc_length_over_limit" \
             --argjson desc_utf8_bytes "$desc_utf8_bytes" \
             --argjson desc_truncated "$desc_truncated" \
             --argjson desc_over_limit "$desc_over_limit" \
@@ -447,6 +563,7 @@ scan_directory() {
             --argjson extra_keys "$extra_keys_json" \
             --argjson openai_yaml_exists "$openai_yaml_exists" \
             --argjson tool_dependencies_count "$tool_dependencies_count" \
+            --argjson runtime_loadable "$runtime_loadable_json" \
             --argjson flags "$flags_json" \
             --argjson risks "$risk_json" \
             '{
@@ -458,11 +575,11 @@ scan_directory() {
                 source_skill_file: $source_skill_file,
                 canonical_skill_file: $canonical_skill_file,
                 canonical_dir: $canonical_dir,
-                description: $desc,
+                description: $desc[0:200],
                 frontmatter: {
                     contract: "name_description_only",
                     name: $frontmatter_name,
-                    description: $desc,
+                    description: $desc[0:200],
                     max_description_length: $max_description_length,
                     description_length: $desc_length,
                     description_utf8_bytes: $desc_utf8_bytes,
@@ -470,19 +587,29 @@ scan_directory() {
                 },
                 runtime_contract: {
                     loader: "agent-skills",
-                    loadable: (($frontmatter_name != "") and ($desc != "") and ($desc_over_limit | not)),
+                    status: $runtime_status,
+                    loadable: $runtime_loadable,
+                    runtime_verified: false,
+                    validation_method: "conservative-static-frontmatter-preflight",
+                    unknown_reason: (if $runtime_status == "unknown" then "runtime_loader_not_executed" else null end),
                     load_blockers: ([
-                        if $frontmatter_name == "" then "missing_name" else empty end,
-                        if $desc == "" then "missing_description" else empty end,
                         if $desc_over_limit then "description_too_long" else empty end
+                    ]),
+                    unverified_requirements: ([
+                        if $frontmatter_name == "" then "name_not_observed_by_lightweight_parser" else empty end,
+                        if $desc == "" then "description_not_observed_by_lightweight_parser" else empty end,
+                        if ($desc_length_valid | not) then "description_length_not_verified_invalid_utf8" else empty end,
+                        if $desc_length_over_limit and ($desc_over_limit | not) then "description_length_over_limit_parser_not_authoritative" else empty end
                     ]),
                     max_description_length: $max_description_length,
                     description_length: $desc_length,
+                    description_length_valid: $desc_length_valid,
+                    description_scalar_kind: $description_scalar_kind,
                     description_utf8_bytes: $desc_utf8_bytes
                 },
                 claude_code: {
                     when_to_use_length: $when_to_use_length,
-                    when_to_use_preview: $when_to_use_preview,
+                    when_to_use_preview: $when_to_use_preview[0:200],
                     when_to_use_truncated: $when_to_use_truncated,
                     disable_model_invocation: $disable_model_invocation,
                     user_invocable: $user_invocable,
@@ -546,7 +673,7 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v3", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories", hash_normalization:"strip-canary-crlf-bom.v1"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], runtime_load_blockers:[], name_collisions:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v4", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories", hash_normalization:"strip-canary-crlf-bom.v1", runtime_validation_mode:"static-preflight", runtime_status_semantics:"pass=runtime validator confirmed; fail=proven blocker; unknown=runtime loader not executed"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], runtime_load_blockers:[], name_collisions:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
@@ -579,7 +706,7 @@ main() {
         .runtime_load_blockers = (
             .skills + .skill_links
             | unique_by(.canonical_skill_file)
-            | map(select(.runtime_contract.loadable == false) | {
+            | map(select(.runtime_contract.status == "fail") | {
                 name,
                 location,
                 type,
@@ -688,7 +815,7 @@ main() {
         printf "  ${DIM}%-30s %-20s %-8s %s${NC}\n" "----" "--------" "-----" "-----"
         echo "$flagged" | jq -r '.[] | "\(.name)|\(.location)|\(.word_count)|\(.flags | join(", "))"' | while IFS='|' read -r name loc words flags; do
             local color="$YELLOW"
-            echo "$flags" | grep -qE 'dangerous_|pipe_to_shell|possible_secret|description_too_long|no_name|no_description' && color="$RED"
+            echo "$flags" | grep -qE 'dangerous_|pipe_to_shell|possible_secret|description_too_long|name_not_observed|description_not_observed' && color="$RED"
             printf "  ${color}%-30s${NC} %-20s %-8s %s\n" "${name:0:30}" "${loc:0:20}" "$words" "$flags"
         done
         echo ""

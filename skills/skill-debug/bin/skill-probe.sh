@@ -9,6 +9,7 @@ COMMON_SH="$SCRIPT_DIR/../lib/common.sh"
 [ -f "$COMMON_SH" ] || { echo "[ERROR] Missing shared helper: $COMMON_SH" >&2; exit 1; }
 # shellcheck source=../lib/common.sh
 . "$COMMON_SH"
+sr_require_sha256 || exit $?
 
 PRODUCT_VERSION="2.0"
 TARGET_CWD="${PWD}"
@@ -74,7 +75,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h) show_help; exit 0 ;;
-        *) echo "[WARN] Unknown option ignored: $1" >&2; shift ;;
+        *) echo "[ERROR] Unknown option: $1" >&2; exit 2 ;;
     esac
 done
 

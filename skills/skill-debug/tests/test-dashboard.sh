@@ -283,6 +283,15 @@ EOF
 
     echo ""
 
+    # Test 7: Unknown options fail closed
+    echo -e "${BOLD}── CLI Contract ──${NC}"
+    local unknown_option_rc
+    HOME="$SANDBOX" bash "$DASHBOARD_SCRIPT" --definitely-unknown >/dev/null 2>&1
+    unknown_option_rc=$?
+    assert_eq "Unknown dashboard option returns usage error" "2" "$unknown_option_rc"
+
+    echo ""
+
     # Summary
     echo -e "${BOLD}══════════════════════════════════════════${NC}"
     local total=$((PASS + FAIL))

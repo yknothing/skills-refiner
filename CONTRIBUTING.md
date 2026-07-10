@@ -8,16 +8,20 @@ skills/
 ├── skills-appreciation/  # Teaching-grade interpretation skill
 ├── skill-hygiene/        # Installed skill evaluation
 │   ├── bin/skill-scan.sh
+│   ├── lib/common.sh      # Deployment mirror for standalone installs
 │   └── tests/test-scan.sh
 └── skill-debug/          # Skill observability
     ├── bin/skill-probe.sh
     ├── bin/skill-trace.sh
     ├── bin/skill-dashboard.sh
+    ├── lib/common.sh      # Canonical authoring source
     └── tests/
+        ├── test-doctor.sh
         ├── test-trace.sh
         ├── test-probe.sh
         ├── test-dashboard.sh
         ├── test-install-layout.sh
+        ├── test-platform-contract.sh
         └── test-observability-regressions.sh
 examples/                 # Usage examples for all four skills
 evals/                    # Evaluation rubrics and cases
@@ -34,9 +38,11 @@ evals/                    # Evaluation rubrics and cases
 
 ### Shell scripts
 
-- All scripts must work on both macOS and Linux. Test with both `stat -f` (macOS) and `stat -c` (Linux) variants.
+- Full script behavior targets native macOS and POSIX Bash on Linux. WSL 2 with a Linux-filesystem `HOME` is a design-supported target with runtime mode verification, pending a dedicated WSL runner. Windows Git Bash has a narrower contract: real-directory read-only governance and trace transforms are covered, symlink/junction topology is not certified, and canary logging fails closed. Native PowerShell/cmd is not implemented. See `docs/platform-support.md`.
+- Test BSD/GNU differences with both `stat -f` (macOS) and `stat -c` (Linux/Git Bash) variants. Keep shell entrypoints LF-only through `.gitattributes`.
 - Resolve HOME without `eval`: prefer `$HOME`, then `getent passwd`, then macOS `dscl`, then common home roots; fail clearly if no home directory can be determined.
-- Keep shared filesystem, frontmatter, topology, canonical path, and normalized hash behavior in `skills/skill-debug/lib/common.sh` (it ships inside the skill-debug skill so per-skill installs carry it); do not fork those facts across individual scripts.
+- Treat `skills/skill-debug/lib/common.sh` as the canonical authoring source for shared filesystem, frontmatter, topology, canonical path, and normalized-hash behavior.
+- `skills/skill-hygiene/lib/common.sh` is a byte-identical deployment mirror required because skills CLI can install `skill-hygiene` without `skill-debug`. After changing the canonical source, update the mirror in the same change; do not fork behavior. `test-install-layout.sh` fails when the copies differ.
 - Include `--help` / `-h` support in all user-facing scripts.
 - Use `set -o pipefail` but not `set -e` (handled by callers).
 - Require `jq` for JSON processing. Check availability gracefully.
@@ -60,6 +66,8 @@ bash skills/skill-debug/tests/test-probe.sh
 bash skills/skill-debug/tests/test-dashboard.sh
 bash skills/skill-debug/tests/test-install-layout.sh
 bash skills/skill-debug/tests/test-observability-regressions.sh
+bash skills/skill-debug/tests/test-platform-contract.sh
+cmp skills/skill-debug/lib/common.sh skills/skill-hygiene/lib/common.sh
 ```
 
 The `evals/` directory contains human/model review anchors, not an automated release gate. Add an explicit runner before treating evals as required CI.

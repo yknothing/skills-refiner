@@ -49,8 +49,14 @@ bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 The default doctor terminal output is a compact governance summary. Use `--raw`
 only when you need full subtool terminal reports. Use `--lang zh` for Chinese
 terminal labels. JSON output keeps stable English keys and includes
-`product_version: "2.0"`; schema strings such as `skills-refiner.doctor.v1` are
+`product_version: "2.0"`; schema strings such as `skills-refiner.doctor.v2` are
 compatibility versions, not product release numbers.
+
+Selective-install contract: `skill-debug` is self-contained for probe,
+dashboard, trace, and canary operations. `doctor` also uses `skill-hygiene` when
+that skill is installed. Without it, `doctor --json` still returns a valid
+partial object with `steps.hygiene.status: "unavailable"` and exits `1`; do not
+present that partial snapshot as a complete governance scan.
 
 ```bash
 
@@ -117,18 +123,22 @@ bash ~/.agents/skills/skill-debug/bin/skill-trace.sh --strip-dir ~/.agents/skill
 ```
 
 How it works:
-- Injects a lightweight "canary" preamble block into skills:
+- Injects a lightweight "canary" preamble block into skills. The following is
+  conceptual structure, not an executable copy of the generated command:
 
 ```markdown
 ## Activation Canary Trace (auto-injected by skill-debug)
 <!-- SKILL-DEBUG-TRACE-START v1 -->
+<!-- SKILL-DEBUG-ORIGINAL-EOF newline|none -->
 When this skill is used, run this canary command first:
-\`\`\`bash
+\`\`\`text
 _skill_debug_helper="/abs/path/to/skill-debug/bin/skill-canary.sh"
 if [ -f "$_skill_debug_helper" ]; then
   bash "$_skill_debug_helper" "/abs/path/to/SKILL.md"
 else
-  mkdir -p ~/.agents/debug && echo '{...,"trace_kind":"canary_degraded","identity_key":"",...}' >> ~/.agents/debug/activation.jsonl
+  # Generated block uses a compact secure fallback: require real, non-symlink
+  # debug/log paths; set 0700/0600; append one degraded JSON event or fail closed.
+  secure_degraded_append_or_fail_closed
 fi
 \`\`\`
 <!-- SKILL-DEBUG-TRACE-END v1 -->
@@ -138,6 +148,8 @@ fi
 - The block delegates to `bin/skill-canary.sh`, the single implementation of identity hashing. Injected files never carry a frozen copy of the normalization algorithm, so the algorithm can evolve without orphaning previously injected canaries.
 - Each event includes a local identity key derived from canonical `SKILL.md` path plus normalized content hash. Auto-injected canary blocks are excluded from that hash, so inject/strip cycles do not orphan prior observations.
 - If the helper is missing (for example skill-debug was uninstalled after injection), the block appends a degraded name-only event (`trace_kind: "canary_degraded"`, empty `identity_key`) instead of failing silently.
+- Canary writes fail closed if `~/.agents/debug` or `activation.jsonl` is a symlink; the helper never follows those links or changes their targets' permissions.
+- Canary writes also fail closed on Windows Git Bash/MSYS2/Cygwin and when WSL 2 places `HOME` under `/mnt/<drive>`; those environments cannot prove the documented `0700`/`0600` privacy contract. On supported POSIX filesystems the helper rejects symlinked path components and verifies effective modes after `chmod`. WSL 2 with a Linux-filesystem `HOME` is the intended Windows full-observability target, pending dedicated runner certification.
 - Minimal overhead: one hash calculation and one append per observed canary
 - All traces are clearly marked for on-disk removal
 - Presence means the canary command was followed. Absence is inconclusive; it is not proof that the skill was not discovered, loaded, or useful.
@@ -190,8 +202,9 @@ The `--doctor` mode combines:
 
 ## Guardrails
 
-- Trace injection is reversible on disk with `--strip`; current agent sessions may retain already-loaded skill text until the conversation context is refreshed
-- All log data stays local in `~/.agents/debug/`
+- Trace injection is byte-reversible on disk with `--strip`, including files without a final newline; transform or metadata-restoration failures leave the target untouched. Current agent sessions may retain already-loaded skill text until the conversation context is refreshed.
+- All log data stays local in the real (non-symlink) `~/.agents/debug/` directory. The directory is mode `0700` and `activation.jsonl` is mode `0600`.
+- Full shell support is verified natively on macOS. WSL 2 with a Linux-filesystem `HOME` is design-supported but not yet certified on a dedicated runner. Git Bash coverage is limited to real-directory read-only governance and trace file transforms; symlink/junction topology, canary logging, and native PowerShell/cmd are not supported claims.
 - No data is sent externally
 - Dashboard reads only; never modifies skill files
 - Activation logs are append-only JSONL; rotate with `--rotate` flag
