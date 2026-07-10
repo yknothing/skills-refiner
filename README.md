@@ -32,7 +32,7 @@ This repository addresses both:
 
 Together with a skill-creation tool such as `skill-creator`, they form a complete skill lifecycle: creation → testing → design audit → governance → observability → interpretation.
 
-The first governance question is now deliberately blunt: can the skill load at all? `skill-scan.sh` treats missing frontmatter fields and descriptions longer than the 1024-character loader limit as runtime load blockers, before softer design review begins.
+The first governance question is now deliberately blunt: can static evidence prove a load blocker? `skill-scan.sh` reports a reliably parsed description longer than the 1024-character limit as `runtime_contract.status: "fail"`. A required field that the lightweight parser does not observe is recorded under `unverified_requirements`, not declared missing. Otherwise status is `"unknown"`, `loadable` is `null`, and `runtime_verified` is `false`—the scanner does not pretend it executed an agent's real loader or a complete YAML validator.
 
 ## The four skills
 
@@ -98,8 +98,8 @@ Across all four skills:
 
 **Governance & Observability:**
 - No false alarms. A skill with zero observed activations may simply not have been needed. Treat "not observed" as an observation, not a verdict.
-- All operations are reversible. Trace injection can be stripped. Scans never modify skill files; use `--json` or `--no-write` for stdout-only/no-report runs. Dashboard never modifies skill files.
-- All data stays local. No data is sent externally.
+- All operations are reversible. Trace injection can be stripped byte-for-byte, including files without a final newline. Scans never modify skill files; use `--json` or `--no-write` for stdout-only/no-report runs. Dashboard never modifies skill files.
+- All data stays local. No data is sent externally. Canary logs use a non-symlink `~/.agents/debug/` directory (`0700`) and `activation.jsonl` (`0600`); symlinked log paths are rejected rather than followed or chmodded.
 
 **Statistics accuracy contract:**
 - Exact local statistics: skill file inventory, canonical paths, symlink distribution links, broken symlinks, content hashes, same-name/content/version collisions, report freshness, and recorded canary JSONL events.
@@ -108,13 +108,39 @@ Across all four skills:
 
 ## Installation
 
-Install with the [skills CLI](https://github.com/vercel-labs/skills):
+Install all four skills globally with the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
-npx skills add yknothing/skills-refiner
+npx skills add yknothing/skills-refiner --skill skills-refiner --skill skills-appreciation --skill skill-hygiene --skill skill-debug -g
 ```
 
 Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https://github.com/vercel-labs/skills#supported-agents).
+
+The governance scripts require Bash, `jq`, and a SHA-256 implementation. Native
+macOS supports the full toolchain. Windows WSL 2 with `HOME` on the WSL Linux
+filesystem is the full-toolchain target: canary writes re-check actual modes and
+fail closed, but dedicated WSL runner certification is still pending. Windows
+Git Bash covers real-directory read-only governance and trace file transforms;
+symlink/junction topology is not certified, and canary logging is rejected.
+Native PowerShell/cmd is not implemented. See the
+[platform support contract](docs/platform-support.md) for exact boundaries.
+
+Each skill is independently installable. For example:
+
+```bash
+# Design audit only (no runtime dependency on the other skills)
+npx skills add yknothing/skills-refiner --skill skills-refiner -g
+
+# Standalone installed-skill scanner
+npx skills add yknothing/skills-refiner --skill skill-hygiene -g
+
+# Complete governance bundle: observability + aggregate hygiene snapshot
+npx skills add yknothing/skills-refiner --skill skill-debug --skill skill-hygiene -g
+```
+
+`skill-debug` works by itself for probe, dashboard, and trace operations. Its
+aggregate `doctor` command reports `hygiene` as structured `unavailable` and
+returns a partial-result exit code (`1`) until `skill-hygiene` is also installed.
 
 ### One-shot health snapshot (`doctor`)
 
@@ -132,7 +158,7 @@ bash bin/skills-refiner-doctor.sh --help
 
 Optional env: `SKILLS_REFINER_TOOLS_ROOT` — directory that contains `skill-debug/` and `skill-hygiene/` (same layout as `~/.agents/skills`).
 
-Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v1`, `skill-dashboard.identity.v2`, and `skill-scan.v3` are schema versions, not product release numbers.
+Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, and `skill-scan.v4` are schema versions, not product release numbers. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v4 replaces optimistic static `loadable: true` claims with `status: "unknown"` and `loadable: null` unless a blocker is proven.
 
 ## Repository layout
 
@@ -155,11 +181,14 @@ Version note: the current product line is `skills-refiner 2.0`. JSON fields such
 - `skills/skill-debug/tests/test-trace.sh` — integration tests
 - `skills/skill-debug/tests/test-probe.sh` — integration tests for discovery probe
 - `skills/skill-debug/tests/test-dashboard.sh` — integration tests for dashboard
+- `skills/skill-debug/tests/test-install-layout.sh` — selective installed-layout contract
+- `skills/skill-debug/tests/test-platform-contract.sh` — macOS/Windows path, CRLF, and permission-boundary contract
 - `skills/skill-debug/tests/test-observability-regressions.sh` — regression tests for conservative observability semantics
 
 **Supporting materials:**
-- `skills/skill-debug/lib/common.sh` — shared filesystem, frontmatter, topology, canonical path, and normalized hash helpers (ships inside skill-debug so per-skill installs carry it; skill-hygiene depends on it)
+- `skills/{skill-debug,skill-hygiene}/lib/common.sh` — mirrored runtime helpers; each executable governance skill ships its own copy so selective installs remain self-contained (the installed-layout test enforces byte equality)
 - `bin/skills-refiner-doctor.sh` — contributor wrapper → `skills/skill-debug/bin/skills-refiner-doctor.sh`
+- `docs/platform-support.md` — explicit macOS, Windows WSL 2, Git Bash, and native PowerShell support boundaries
 - `examples/` — usage examples for all four skills
 - `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)
 
@@ -212,7 +241,7 @@ The `evals/` directory contains anchor-based evaluations for the analysis skills
 
 Cases 08–09 test the collaboration scenario with skill-creator.
 
-The governance skills (`skill-hygiene`, `skill-debug`) are validated through integration tests that create sandboxed skill topologies and verify scanner/tracer correctness. `skills/skill-debug/tests/test-doctor.sh` smoke-tests the read-only `skills-refiner-doctor.sh` bundle under an isolated `HOME`.
+The governance skills (`skill-hygiene`, `skill-debug`) are validated through integration tests that create sandboxed skill topologies and verify scanner/tracer correctness. `skills/skill-debug/tests/test-doctor.sh` smoke-tests the read-only `skills-refiner-doctor.sh` bundle under an isolated `HOME`; `test-platform-contract.sh` gates spaced paths, BOM/CRLF round trips, and Windows permission failures. GitHub Actions runs the full suite on macOS and Ubuntu plus the bounded Git Bash contract on `windows-latest`.
 
 ## Contributing
 

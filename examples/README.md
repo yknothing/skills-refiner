@@ -133,7 +133,7 @@ Expected behavior:
 - runs discovery probe, activation dashboard, and hygiene scan, then prints a compact governance summary;
 - does **not** inject or strip activation traces (those mutate skill files);
 - `--raw` appends full subtool terminal reports for debugging;
-- `--json` emits a single JSON object (`schema: skills-refiner.doctor.v1`) suitable for AI interpretation;
+- `--json` emits a single JSON object (`schema: skills-refiner.doctor.v2`) suitable for AI interpretation; v2 includes the explicit `unavailable` step status for partial selective installs;
 - `product_version: "2.0"` is the release line; schema versions are API compatibility markers.
 
 ### 12) Scan installed skills for health issues

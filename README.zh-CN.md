@@ -32,7 +32,7 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 
 配合 `skill-creator` 等创建工具，可形成完整生命周期：创建 → 测试 → 设计审计 → 治理 → 可观测性 → 解读。
 
-治理的第一问现在必须很直接：这个 skill 能不能被加载？`skill-scan.sh` 会把缺少 frontmatter 必填字段、`description` 超过 1024 字符运行时上限等问题标为加载阻断，再进入更软的设计评审。
+治理的第一问现在必须更精确：静态证据能否证明存在加载阻断？`skill-scan.sh` 只会把可靠解析到且超过 1024 字符上限的 `description` 标为 `runtime_contract.status: "fail"`。轻量解析器没有观察到的必填字段会进入 `unverified_requirements`，不会被直接宣判为缺失。其余情况是 `"unknown"`、`loadable: null`、`runtime_verified: false`；scanner 不会假装自己执行过 agent 的真实 loader 或完整 YAML validator。
 
 ## 四个 skill
 
@@ -94,7 +94,7 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 
 **分析与解读：** 偏好可见的推理结构；强的赏析文章应兼具技术博客的严谨、教材的清晰与成稿可读性。
 
-**治理与可观测性：** 不误报；零观测不等于没用。「未观测」是观察，不是裁决。操作可逆：探针可剥离；扫描默认不改 skill 文件（`--json` / `--no-write` 控制）；dashboard 只读。
+**治理与可观测性：** 不误报；零观测不等于没用。「未观测」是观察，不是裁决。操作可逆：探针可逐字节剥离，包括末尾无换行的文件；扫描默认不改 skill 文件（`--json` / `--no-write` 控制）；dashboard 只读。Canary 日志只写入非软链接的 `~/.agents/debug/`（`0700`）与 `activation.jsonl`（`0600`）；遇到软链接日志路径会拒绝写入，不会跟随或修改目标权限。
 
 **统计准确性契约：**
 - **精确本地统计：** skill 清单、原始路径、软链接分发、断链、内容哈希、同名/内容/版本碰撞、报告时间与 JSONL 探针事件等。
@@ -103,13 +103,38 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 
 ## 安装
 
-使用 [skills CLI](https://github.com/vercel-labs/skills)：
+使用 [skills CLI](https://github.com/vercel-labs/skills) 全局安装四个 skill：
 
 ```bash
-npx skills add yknothing/skills-refiner
+npx skills add yknothing/skills-refiner --skill skills-refiner --skill skills-appreciation --skill skill-hygiene --skill skill-debug -g
 ```
 
 适用于 Claude Code、Cursor、Codex、OpenCode 及 [多种 agent](https://github.com/vercel-labs/skills#supported-agents)。
+
+治理脚本依赖 Bash、`jq` 与 SHA-256 实现。macOS 原生环境支持完整工具链。
+`HOME` 位于 WSL Linux 文件系统的 Windows WSL 2 是完整工具链目标：canary
+会复核实际 mode 并 fail closed，但专用 WSL runner 认证仍待完成。Windows
+Git Bash 只覆盖真实目录/复制布局的只读治理与 trace 文件变换；
+symlink/junction 拓扑尚未认证，canary 写日志会被拒绝。原生 PowerShell/cmd
+尚未实现。精确边界见
+[平台支持契约](docs/platform-support.md)。
+
+四个 skill 均可独立选择安装。例如：
+
+```bash
+# 只安装设计审计能力（不依赖其他 skill 的运行时文件）
+npx skills add yknothing/skills-refiner --skill skills-refiner -g
+
+# 独立安装已安装 skill 扫描器
+npx skills add yknothing/skills-refiner --skill skill-hygiene -g
+
+# 完整治理组合：可观测性 + hygiene 聚合快照
+npx skills add yknothing/skills-refiner --skill skill-debug --skill skill-hygiene -g
+```
+
+`skill-debug` 单独安装时，probe、dashboard 与 trace 均可运行。聚合
+`doctor` 会把 `hygiene` 明确标记为结构化 `unavailable`，并以部分结果
+退出码（`1`）结束；安装 `skill-hygiene` 后即可获得完整聚合结果。
 
 ### 一键健康快照（`doctor`）
 
@@ -127,7 +152,7 @@ bash bin/skills-refiner-doctor.sh --help
 
 可选环境变量：`SKILLS_REFINER_TOOLS_ROOT` — 包含 `skill-debug/` 与 `skill-hygiene/` 的目录（布局与 `~/.agents/skills` 相同）。
 
-版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v1`、`skill-dashboard.identity.v2`、`skill-scan.v3` 等字段是 JSON schema / 事件协议版本，不是产品发布号。
+版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v4` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v4 不再用静态预检乐观声称 `loadable: true`，未证明阻断时改为 `status: "unknown"` 与 `loadable: null`。
 
 ## 仓库布局
 
@@ -150,11 +175,14 @@ bash bin/skills-refiner-doctor.sh --help
 - `skills/skill-debug/tests/test-trace.sh` — 集成测试
 - `skills/skill-debug/tests/test-probe.sh` — probe 集成测试
 - `skills/skill-debug/tests/test-dashboard.sh` — dashboard 集成测试
+- `skills/skill-debug/tests/test-install-layout.sh` — 选择性安装布局契约
+- `skills/skill-debug/tests/test-platform-contract.sh` — macOS/Windows 路径、CRLF 与权限边界契约
 - `skills/skill-debug/tests/test-observability-regressions.sh` — 保守语义回归测试
 
 **辅助材料：**
-- `skills/skill-debug/lib/common.sh` — 共享的文件系统、frontmatter、拓扑、canonical path 与 normalized hash helper（随 skill-debug 一起安装；skill-hygiene 依赖它）
+- `skills/{skill-debug,skill-hygiene}/lib/common.sh` — 镜像的运行时 helper；两个可执行治理 skill 各自携带一份，保证选择性安装自包含（installed-layout 测试强制校验字节一致）
 - `bin/skills-refiner-doctor.sh` — 贡献者包装脚本，转发至 `skills/skill-debug/bin/skills-refiner-doctor.sh`
+- `docs/platform-support.md` — macOS、Windows WSL 2、Git Bash 与原生 PowerShell 的明确支持边界
 - `examples/` — 四个 skill 的用法示例
 - `evals/` — 评测量表与锚点评析（9 cases，2 rubrics）
 
@@ -207,7 +235,7 @@ bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
 
 Cases 08–09 覆盖与 skill-creator 协作场景。
 
-治理类 skill（`skill-hygiene`、`skill-debug`）通过沙箱拓扑下的集成测试验证扫描器/追踪器行为；`skills/skill-debug/tests/test-doctor.sh` 在隔离 `HOME` 下对只读 `skills-refiner-doctor.sh` 做冒烟验证。
+治理类 skill（`skill-hygiene`、`skill-debug`）通过沙箱拓扑下的集成测试验证扫描器/追踪器行为；`skills/skill-debug/tests/test-doctor.sh` 在隔离 `HOME` 下对只读 `skills-refiner-doctor.sh` 做冒烟验证，`test-platform-contract.sh` 则覆盖带空格路径、BOM/CRLF 往返恢复与 Windows 权限失败边界。GitHub Actions 在 macOS/Ubuntu 跑全量套件，并在 `windows-latest` 跑有界的 Git Bash 契约。
 
 ## 贡献
 
