@@ -1,0 +1,81 @@
+name: governance-tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: governance-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unix-integration:
+    name: full suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform_family: macos
+          - os: ubuntu-latest
+            platform_family: linux
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install dependencies on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew list jq >/dev/null 2>&1 || brew install jq
+          brew list shellcheck >/dev/null 2>&1 || brew install shellcheck
+
+      - name: Install dependencies on Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq shellcheck
+
+      - name: Run governance integration tests
+        env:
+          EXPECTED_PLATFORM_FAMILY: ${{ matrix.platform_family }}
+        run: |
+          bash skills/skill-hygiene/tests/test-scan.sh
+          bash skills/skill-debug/tests/test-doctor.sh
+          bash skills/skill-debug/tests/test-trace.sh
+          bash skills/skill-debug/tests/test-probe.sh
+          bash skills/skill-debug/tests/test-dashboard.sh
+          bash skills/skill-debug/tests/test-install-layout.sh
+          bash skills/skill-debug/tests/test-observability-regressions.sh
+          bash skills/skill-debug/tests/test-platform-contract.sh
+          cmp skills/skill-debug/lib/common.sh skills/skill-hygiene/lib/common.sh
+
+      - name: Run shell static checks
+        run: |
+          find skills -type f -name '*.sh' -print0 | xargs -0 -n 1 bash -n
+          find skills -type f -name '*.sh' -print0 | xargs -0 shellcheck --severity=error
+
+  windows-git-bash:
+    name: Windows Git Bash contract
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install jq
+        shell: powershell
+        run: choco install jq -y --no-progress
+
+      - name: Verify Windows compatibility boundary
+        env:
+          EXPECTED_PLATFORM_FAMILY: windows-posix
+        run: |
+          find skills -type f -name '*.sh' -print0 | xargs -0 -n 1 bash -n
+          cmp skills/skill-debug/lib/common.sh skills/skill-hygiene/lib/common.sh
+          bash skills/skill-debug/tests/test-platform-contract.sh
