@@ -1,20 +1,42 @@
 import {
+  BATCH_ERROR_CODES,
   SCHEMAS,
+  buildBatchBinding,
+  buildBatchError,
+  buildBatchPlan,
+  buildBatchResult,
+  buildInitialBatchState,
   canonicalJson,
+  deriveBatchSummaryOverallStatus,
   sha256Json,
   transactionStorageKey,
+  validateBatchBinding,
+  validateBatchPlan,
+  validateBatchSummary,
+  validateBatchState,
   validatePlan,
+  validateTransactionBatchStatus,
   validateTransactionResult,
 } from './cleanup-contract.mjs';
 import {
   MacosAdapterError,
+  acquireBatchLock,
   acquireTransactionLock,
+  advanceBatchStateRecord,
   advanceTransactionStateRecord,
+  advanceTransactionStateUnderBatchLease,
   discoverTransactionRecords,
+  initializeBatchRecords,
+  initializeBatchTransactionRecords,
   initializeTransactionRecords,
+  isolateStaleBatchLock,
   isolateStaleTransactionLock,
+  probeBatchRecords,
+  probeBatchTransactionRecords,
+  probeTransactionKind,
   probeTransactionRecords,
   reconcileTransactionLocation,
+  releaseBatchLock,
   releaseTransactionLock,
   renameExclusive,
   restoreExclusive,
@@ -78,6 +100,14 @@ export class CleanupTransactionError extends Error {
     this.name = 'CleanupTransactionError';
     this.code = code;
     this.status = status;
+  }
+}
+
+export class CleanupBatchError extends CleanupTransactionError {
+  constructor(code, status, batch = {}) {
+    super(code, 'cleanup batch failed', status);
+    this.name = 'CleanupBatchError';
+    Object.assign(this, batch);
   }
 }
 
@@ -148,13 +178,37 @@ function fail(code, status = 'blocked') {
 function normalizedTransactionError(error) {
   if (error instanceof CleanupTransactionError) return error;
   if (error instanceof MacosAdapterError) {
-    return new CleanupTransactionError(
+    const normalized = new CleanupTransactionError(
       error.reason,
       'cleanup transaction failed',
       error.code === 'recovery_required' ? 'recovery_required' : error.code,
     );
+    normalized.mutationOccurred = error.mutationMayHaveOccurred === true;
+    normalized.mutationOutcome = error.mutationMayHaveOccurred === true
+      ? 'unknown'
+      : 'unchanged';
+    return normalized;
   }
   return null;
+}
+
+function joinMutationTruth(command, ...truths) {
+  if (!['apply', 'undo'].includes(command)) {
+    throw new TypeError('mutation truth command is unsupported');
+  }
+  const unknown = truths.some((truth) => truth?.mutationOutcome === 'unknown');
+  const mutationOccurred = unknown || truths.some((truth) => (
+    truth?.mutationOccurred === true
+      || ['moved', 'restored'].includes(truth?.mutationOutcome)
+  ));
+  if (unknown) return { mutationOccurred: true, mutationOutcome: 'unknown' };
+  if (mutationOccurred) {
+    return {
+      mutationOccurred: true,
+      mutationOutcome: command === 'undo' ? 'restored' : 'moved',
+    };
+  }
+  return { mutationOccurred: false, mutationOutcome: 'unchanged' };
 }
 
 function releaseAfterDeterministicFailure(transaction, owner, error) {
@@ -286,7 +340,48 @@ function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function validateState(state, manifest) {
+function validateTransactionOwner(owner, manifest) {
+  const lockKeys = [
+    'nonce',
+    'pid',
+    'plan_hash',
+    'process_start_sec',
+    'process_start_usec',
+    'transaction_id',
+  ];
+  return Object.keys(owner).length === lockKeys.length
+    && lockKeys.every((key) => Object.hasOwn(owner, key))
+    && /^[0-9a-f]{64}$/u.test(owner.nonce ?? '')
+    && Number.isSafeInteger(owner.pid) && owner.pid > 0
+    && Number.isSafeInteger(owner.process_start_sec) && owner.process_start_sec >= 0
+    && Number.isSafeInteger(owner.process_start_usec) && owner.process_start_usec >= 0
+    && owner.plan_hash === manifest.plan_hash
+    && owner.transaction_id === manifest.transaction_id;
+}
+
+function validateBatchOwner(owner, manifest, binding) {
+  const lockKeys = [
+    'batch_id',
+    'nonce',
+    'pid',
+    'plan_hash',
+    'process_start_sec',
+    'process_start_usec',
+    'scope',
+  ];
+  return isObject(binding)
+    && Object.keys(owner).length === lockKeys.length
+    && lockKeys.every((key) => Object.hasOwn(owner, key))
+    && owner.scope === 'batch'
+    && owner.batch_id === binding.batch_id
+    && owner.plan_hash === manifest.plan_hash
+    && /^[0-9a-f]{64}$/u.test(owner.nonce ?? '')
+    && Number.isSafeInteger(owner.pid) && owner.pid > 0
+    && Number.isSafeInteger(owner.process_start_sec) && owner.process_start_sec >= 0
+    && Number.isSafeInteger(owner.process_start_usec) && owner.process_start_usec >= 0;
+}
+
+function validateState(state, manifest, { ownerScope = 'transaction', binding = null } = {}) {
   const keys = [
     'schema_version',
     'transaction_id',
@@ -320,22 +415,10 @@ function validateState(state, manifest) {
     fail('transaction_state_invalid', 'recovery_required');
   }
   if (state.lock !== null) {
-    const lockKeys = [
-      'nonce',
-      'pid',
-      'plan_hash',
-      'process_start_sec',
-      'process_start_usec',
-      'transaction_id',
-    ];
-    if (Object.keys(state.lock).length !== lockKeys.length
-        || lockKeys.some((key) => !Object.hasOwn(state.lock, key))
-        || !/^[0-9a-f]{64}$/u.test(state.lock.nonce ?? '')
-        || !Number.isSafeInteger(state.lock.pid) || state.lock.pid <= 0
-        || !Number.isSafeInteger(state.lock.process_start_sec) || state.lock.process_start_sec < 0
-        || !Number.isSafeInteger(state.lock.process_start_usec) || state.lock.process_start_usec < 0
-        || state.lock.plan_hash !== manifest.plan_hash
-        || state.lock.transaction_id !== manifest.transaction_id) {
+    const validOwner = ownerScope === 'batch'
+      ? validateBatchOwner(state.lock, manifest, binding)
+      : validateTransactionOwner(state.lock, manifest);
+    if (!validOwner) {
       fail('transaction_state_invalid', 'recovery_required');
     }
   }
@@ -375,6 +458,105 @@ function validateStoredRecords(records, expectedPlan, transactionId) {
     item: storedItem,
     manifest: records.manifest,
     state: records.state,
+  };
+}
+
+function validateStoredBatchRecords(records, expectedPlan, batchPlan, transactionId) {
+  try {
+    validateBatchPlan(batchPlan, expectedPlan);
+    validateBatchBinding(records.binding, batchPlan);
+  } catch {
+    fail('batch_binding_invalid', 'recovery_required');
+  }
+  if (records.binding.transaction_id !== transactionId) {
+    fail('batch_binding_invalid', 'recovery_required');
+  }
+  try {
+    validatePlan(records.plan);
+  } catch {
+    fail('stored_plan_invalid', 'recovery_required');
+  }
+  const expectedItem = itemForTransaction(expectedPlan, transactionId);
+  const storedItem = itemForTransaction(records.plan, transactionId);
+  if (records.plan.plan_hash !== expectedPlan.plan_hash
+      || records.plan.platform !== expectedPlan.platform
+      || storedItem.item_hash !== expectedItem.item_hash
+      || records.binding.item_id !== expectedItem.item_id
+      || records.binding.item_hash !== expectedItem.item_hash
+      || records.binding.execution_identity_hash !== expectedItem.execution_identity.identity_hash) {
+    fail('stored_plan_mismatch', 'recovery_required');
+  }
+  const expectedManifest = manifestFor(records.plan, storedItem);
+  if (canonicalJson(records.manifest) !== canonicalJson(expectedManifest)) {
+    fail('transaction_manifest_mismatch', 'recovery_required');
+  }
+  validateState(records.state, expectedManifest, {
+    ownerScope: 'batch',
+    binding: records.binding,
+  });
+  return {
+    plan: records.plan,
+    item: storedItem,
+    manifest: records.manifest,
+    state: records.state,
+    binding: records.binding,
+  };
+}
+
+function batchTransactionFromRecords(home, records, expectedPlan, batchPlan, transactionId) {
+  return {
+    home,
+    initialization: 'existing',
+    lock: records.lock,
+    ...validateStoredBatchRecords(
+      records,
+      expectedPlan,
+      batchPlan,
+      transactionId,
+    ),
+  };
+}
+
+function initializeBatchTransaction({
+  home,
+  plan,
+  batchPlan,
+  item,
+}) {
+  const manifest = manifestFor(plan, item);
+  const state = initialStateFor(plan, item);
+  const binding = buildBatchBinding(batchPlan, item.item_id);
+  let initialization;
+  try {
+    initialization = initializeBatchTransactionRecords({
+      home,
+      transactionId: item.transaction_id,
+      plan,
+      manifest,
+      state,
+      binding,
+      executionIdentity: item.execution_identity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) {
+      throw normalizedTransactionError(error);
+    }
+    throw error;
+  }
+  let records;
+  try {
+    records = probeBatchTransactionRecords({
+      home,
+      transactionId: item.transaction_id,
+      executionIdentity: item.execution_identity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) throw normalizedTransactionError(error);
+    throw error;
+  }
+  return {
+    ...batchTransactionFromRecords(home, records, plan, batchPlan, item.transaction_id),
+    initialization: initialization.result,
   };
 }
 
@@ -469,6 +651,92 @@ export function advanceTransactionState(transaction, next, {
     ...transaction,
     state: validateState(records.state, transaction.manifest),
   };
+}
+
+function advanceBatchTransactionState(transaction, next, {
+  batchPlan,
+  owner,
+  outcome = null,
+  updatedAt = new Date().toISOString(),
+} = {}) {
+  if (!transaction || !isObject(transaction.state) || !isObject(transaction.manifest)
+      || !isObject(transaction.binding)) {
+    fail('transaction_state_invalid', 'recovery_required');
+  }
+  assertTransactionTransition(transaction.state.state, next);
+  if (!owner) fail('state_lease_mismatch', 'recovery_required');
+  try {
+    validateBatchPlan(batchPlan, transaction.plan);
+    validateBatchBinding(transaction.binding, batchPlan);
+  } catch {
+    fail('batch_binding_invalid', 'recovery_required');
+  }
+  const nextState = {
+    ...transaction.state,
+    state: next,
+    sequence: transaction.state.sequence + 1,
+    updated_at: updatedAt,
+    lock: owner,
+    outcome,
+  };
+  validateState(nextState, transaction.manifest, {
+    ownerScope: 'batch',
+    binding: transaction.binding,
+  });
+  let records;
+  try {
+    records = advanceTransactionStateUnderBatchLease({
+      home: transaction.home,
+      batchId: batchPlan.batch_id,
+      itemId: transaction.binding.item_id,
+      itemHash: transaction.binding.item_hash,
+      executionIdentityHash: transaction.binding.execution_identity_hash,
+      transactionId: transaction.binding.transaction_id,
+      planHash: transaction.binding.plan_hash,
+      batchPlan,
+      currentState: transaction.state,
+      nextState,
+      owner,
+      executionIdentity: transaction.manifest.execution_identity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) {
+      throw normalizedTransactionError(error);
+    }
+    throw error;
+  }
+  return batchTransactionFromRecords(
+    transaction.home,
+    records,
+    transaction.plan,
+    batchPlan,
+    transaction.manifest.transaction_id,
+  );
+}
+
+async function publishNextBatchTransactionState(
+  transaction,
+  next,
+  batchPlan,
+  owner,
+  fault,
+  context,
+  outcome = null,
+) {
+  await faultAt(fault, `before_state_${next.toLowerCase()}`, {
+    ...context,
+    state: transaction.state.state,
+  });
+  const advanced = advanceBatchTransactionState(transaction, next, {
+    batchPlan,
+    owner,
+    outcome,
+  });
+  await faultAt(fault, `after_state_${next.toLowerCase()}`, {
+    ...context,
+    state: advanced.state.state,
+  });
+  return advanced;
 }
 
 async function faultAt(fault, phase, state) {
@@ -566,12 +834,12 @@ function nextSafeCommandForStatus(status, transaction) {
   const transactionId = transaction.manifest.transaction_id;
   if (status === 'committed' || status === 'ready_to_resume_undo'
       || status === 'ready_to_finalize_restore') {
-    return `cleanup undo ${transactionId} --confirm ${transactionId}`;
+    return `skills-refiner cleanup undo ${transactionId} --confirm ${transactionId} --json`;
   }
   if (status === 'ready_to_resume_apply' || status === 'ready_to_finalize_commit') {
-    return `cleanup apply --plan PLAN_FILE --confirm ${transaction.manifest.plan_hash}`;
+    return `skills-refiner cleanup apply --plan PLAN_FILE --confirm ${transaction.manifest.plan_hash} --json`;
   }
-  if (status === 'drifted') return 'cleanup review --json';
+  if (status === 'drifted') return 'skills-refiner cleanup review --json';
   return null;
 }
 
@@ -625,6 +893,136 @@ function observeStatusUnderLease(home, transaction) {
   return { transaction: { ...observedTransaction, lock: null }, location };
 }
 
+function batchSummaryStatus(truth) {
+  return deriveBatchSummaryOverallStatus(truth.items);
+}
+
+function assertActiveBatchOwnerConsistent(truth, owner) {
+  for (const observation of truth.observations) {
+    const state = observation.transaction?.state;
+    if (state === undefined) fail('batch_transaction_unavailable', 'recovery_required');
+    if (['CONFIRMED', 'PREPARED', 'APPLYING'].includes(state.state)
+        && canonicalJson(state.lock) !== canonicalJson(owner)) {
+      fail('batch_lock_identity_invalid', 'recovery_required');
+    }
+  }
+}
+
+function statusBatchTransactionInternal({
+  home,
+  transactionId,
+  discoveryRecords,
+}) {
+  const executionIdentity = discoveryRecords.manifest?.execution_identity;
+  let targetRecords;
+  try {
+    targetRecords = probeBatchTransactionRecords({ home, transactionId, executionIdentity });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) fail(error.reason, error.code);
+    throw error;
+  }
+  let binding;
+  try {
+    binding = validateBatchBinding(targetRecords.binding);
+  } catch {
+    fail('batch_binding_invalid', 'recovery_required');
+  }
+  let batchRecords;
+  try {
+    batchRecords = probeBatchRecords({
+      home,
+      batchId: binding.batch_id,
+      executionIdentity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) fail(error.reason, error.code);
+    throw error;
+  }
+  const plan = targetRecords.plan;
+  let batchPlan;
+  try {
+    validatePlan(plan);
+    batchPlan = validateBatchPlan(batchRecords.plan, plan);
+    validateBatchState(batchRecords.state, batchPlan);
+    validateBatchBinding(binding, batchPlan);
+  } catch {
+    fail('batch_records_invalid', 'recovery_required');
+  }
+  const batch = {
+    home,
+    plan,
+    batchPlan,
+    batchState: batchRecords.state,
+    batchLock: batchRecords.lock,
+    executionIdentity,
+  };
+  const truth = rebuildBatchTruth(batch, { summary: true });
+  if (truth.items.some(({ status }) => status === 'RECOVERY_REQUIRED')) {
+    fail('batch_recovery_required', 'recovery_required');
+  }
+  const targetIndex = batchPlan.transaction_map.findIndex((mapping) => (
+    mapping.transaction_id === transactionId
+      && mapping.item_id === binding.item_id
+      && mapping.item_hash === binding.item_hash
+      && mapping.execution_identity_hash === binding.execution_identity_hash
+  ));
+  if (targetIndex < 0) fail('batch_binding_invalid', 'recovery_required');
+
+  if (batchRecords.lock !== null) {
+    assertActiveBatchOwnerConsistent(truth, batchRecords.lock);
+    try {
+      isolateStaleBatchLock({
+        home,
+        batchId: batchPlan.batch_id,
+        planHash: batchPlan.plan_hash,
+        owner: batchRecords.lock,
+        executionIdentity,
+      });
+    } catch (error) {
+      if (error instanceof MacosAdapterError) fail(error.reason, error.code);
+      throw error;
+    }
+    const afterIsolation = probeBatchRecords({
+      home,
+      batchId: batchPlan.batch_id,
+      executionIdentity,
+    });
+    validateBatchRecordSet(afterIsolation, batchPlan, plan);
+    if (afterIsolation.lock !== null
+        || canonicalJson(afterIsolation.state) !== canonicalJson(batchRecords.state)) {
+      fail('batch_lock_isolation_postcondition_failed', 'recovery_required');
+    }
+  }
+
+  const target = truth.observations[targetIndex];
+  if (target.transaction === null || target.location === null) {
+    fail('transaction_state_incoherent', 'recovery_required');
+  }
+  const status = statusForLocation(target.transaction.state.state, target.location);
+  if (status === null) fail('transaction_state_incoherent', 'recovery_required');
+  const transactionResult = publicTransactionResult(
+    'status',
+    status,
+    target.transaction,
+    target.location,
+    false,
+    nextSafeCommandForStatus(status, target.transaction),
+  );
+  const batchSummary = validateBatchSummary({
+    schema_version: SCHEMAS.batchSummary,
+    batch_id: batchPlan.batch_id,
+    plan_hash: batchPlan.plan_hash,
+    overall_status: batchSummaryStatus(truth),
+    items: truth.items,
+  }, batchPlan);
+  return validateTransactionBatchStatus({
+    ...transactionResult,
+    schema_version: SCHEMAS.transactionBatchStatus,
+    batch_id: batchPlan.batch_id,
+    batch_summary: batchSummary,
+  }, batchPlan);
+}
+
 function statusTransactionInternal({
   home = process.env.HOME,
   transactionId,
@@ -638,6 +1036,24 @@ function statusTransactionInternal({
   } catch (error) {
     if (error instanceof MacosAdapterError) fail(error.reason, error.code);
     throw error;
+  }
+  let kind;
+  try {
+    kind = probeTransactionKind({
+      home,
+      transactionId,
+      executionIdentity: records.manifest?.execution_identity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) fail(error.reason, error.code);
+    throw error;
+  }
+  if (kind === 'batch_v2') {
+    return statusBatchTransactionInternal({
+      home,
+      transactionId,
+      discoveryRecords: records,
+    });
   }
   let transaction = transactionFromRecords(home, records, transactionId);
   if (transaction.lock !== null) {
@@ -917,6 +1333,1026 @@ async function applyItemInternal({
   }
 }
 
+function validateBatchRecordSet(records, batchPlan, plan) {
+  try {
+    validateBatchPlan(records.plan, plan);
+    validateBatchState(records.state, batchPlan);
+  } catch {
+    fail('batch_records_invalid', 'recovery_required');
+  }
+  return records;
+}
+
+function initializeBatch({ home, plan }) {
+  const batchPlan = buildBatchPlan(plan);
+  const initialState = buildInitialBatchState(batchPlan);
+  const executionIdentity = plan.items[0].execution_identity;
+  let initialization;
+  try {
+    initialization = initializeBatchRecords({
+      home,
+      batchId: batchPlan.batch_id,
+      plan: batchPlan,
+      state: initialState,
+      executionIdentity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) {
+      throw normalizedTransactionError(error);
+    }
+    throw error;
+  }
+  let records;
+  try {
+    records = probeBatchRecords({
+      home,
+      batchId: batchPlan.batch_id,
+      executionIdentity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) throw normalizedTransactionError(error);
+    throw error;
+  }
+  validateBatchRecordSet(records, batchPlan, plan);
+  const transactions = plan.items.map((item) => initializeBatchTransaction({
+    home,
+    plan,
+    batchPlan,
+    item,
+  }));
+  return {
+    home,
+    plan,
+    batchPlan,
+    batchState: records.state,
+    batchLock: records.lock,
+    executionIdentity,
+    initialization: initialization.result,
+    transactions,
+  };
+}
+
+function observeBatchItem(transaction) {
+  let location;
+  try {
+    location = reconcileTransactionLocation({
+      home: transaction.home,
+      manifest: transaction.manifest,
+    }).location;
+  } catch (error) {
+    const transactionError = normalizedTransactionError(error);
+    if (transactionError === null) throw error;
+    return {
+      transaction,
+      location: 'unknown',
+      status: 'RECOVERY_REQUIRED',
+      summaryStatus: 'RECOVERY_REQUIRED',
+      transactionHasMutated: transactionHasMutated(transaction),
+      error: transactionError,
+    };
+  }
+  const state = transaction.state.state;
+  const mutated = transactionHasMutated(transaction, location);
+  if (state === 'COMMITTED') {
+    return coherentApplyLocation(state, location)
+      ? {
+        transaction,
+        location,
+        status: 'COMMITTED',
+        summaryStatus: location === 'rehydrated' ? 'REHYDRATED' : 'COMMITTED',
+        transactionHasMutated: true,
+        error: null,
+      }
+      : {
+        transaction,
+        location,
+        status: 'RECOVERY_REQUIRED',
+        summaryStatus: 'RECOVERY_REQUIRED',
+        transactionHasMutated: mutated,
+        error: new CleanupTransactionError(
+          'committed_state_incoherent',
+          'cleanup transaction failed',
+          'recovery_required',
+        ),
+      };
+  }
+  if (['PLANNED', 'CONFIRMED', 'PREPARED'].includes(state)) {
+    if (location === 'original') {
+      return {
+        transaction,
+        location,
+        status: state === 'PLANNED' ? 'NOT_STARTED' : 'APPLY_PENDING',
+        summaryStatus: state === 'PLANNED' ? 'NOT_STARTED' : 'APPLY_PENDING',
+        transactionHasMutated: false,
+        error: null,
+      };
+    }
+    if (location === 'original_drift') {
+      return {
+        transaction,
+        location,
+        status: 'DRIFTED',
+        summaryStatus: 'DRIFTED',
+        transactionHasMutated: false,
+        error: new CleanupTransactionError('preflight_identity_drift'),
+      };
+    }
+    return {
+      transaction,
+      location,
+      status: 'RECOVERY_REQUIRED',
+      summaryStatus: 'RECOVERY_REQUIRED',
+      transactionHasMutated: mutated,
+      error: new CleanupTransactionError(
+        'transaction_state_incoherent',
+        'cleanup transaction failed',
+        'recovery_required',
+      ),
+    };
+  }
+  if (state === 'APPLYING' && ['original', 'quarantine', 'rehydrated'].includes(location)) {
+    return {
+      transaction,
+      location,
+      status: location === 'original' ? 'APPLY_PENDING' : 'APPLY_FINALIZE_PENDING',
+      summaryStatus: location === 'rehydrated'
+        ? 'REHYDRATED'
+        : (location === 'original' ? 'APPLY_PENDING' : 'APPLY_FINALIZE_PENDING'),
+      transactionHasMutated: location !== 'original',
+      error: null,
+    };
+  }
+  if (state === 'RESTORE_PREPARED'
+      && ['quarantine', 'rehydrated'].includes(location)) {
+    return {
+      transaction,
+      location,
+      status: 'RESTORE_PENDING',
+      summaryStatus: location === 'rehydrated' ? 'RESTORE_CONFLICT' : 'RESTORE_PENDING',
+      transactionHasMutated: true,
+      error: new CleanupTransactionError('replay_protected'),
+    };
+  }
+  if (state === 'RESTORING') {
+    if (['quarantine', 'rehydrated'].includes(location)) {
+      return {
+        transaction,
+        location,
+        status: 'RESTORE_PENDING',
+        summaryStatus: location === 'rehydrated' ? 'RESTORE_CONFLICT' : 'RESTORE_PENDING',
+        transactionHasMutated: true,
+        error: new CleanupTransactionError('replay_protected'),
+      };
+    }
+    if (location === 'original') {
+      return {
+        transaction,
+        location,
+        status: 'RESTORE_FINALIZE_PENDING',
+        summaryStatus: 'RESTORE_FINALIZE_PENDING',
+        transactionHasMutated: true,
+        error: new CleanupTransactionError('replay_protected'),
+      };
+    }
+  }
+  if (state === 'RESTORED' && location === 'original') {
+    return {
+      transaction,
+      location,
+      status: 'RESTORED',
+      summaryStatus: 'RESTORED',
+      transactionHasMutated: true,
+      error: new CleanupTransactionError('replay_protected'),
+    };
+  }
+  if (state === 'RECOVERY_REQUIRED') {
+    return {
+      transaction,
+      location,
+      status: 'RECOVERY_REQUIRED',
+      summaryStatus: 'RECOVERY_REQUIRED',
+      transactionHasMutated: mutated,
+      error: new CleanupTransactionError(
+        'transaction_recovery_required',
+        'cleanup transaction requires recovery',
+        'recovery_required',
+      ),
+    };
+  }
+  return {
+    transaction,
+    location,
+    status: 'RECOVERY_REQUIRED',
+    summaryStatus: 'RECOVERY_REQUIRED',
+    transactionHasMutated: mutated,
+    error: new CleanupTransactionError(
+      'transaction_state_incoherent',
+      'cleanup transaction failed',
+      'recovery_required',
+    ),
+  };
+}
+
+function rebuildBatchTruth(batch, {
+  summary = false,
+  ignoreLeaseMismatchForReporting = false,
+} = {}) {
+  const observations = batch.plan.items.map((item) => {
+    let records;
+    try {
+      records = probeBatchTransactionRecords({
+        home: batch.home,
+        transactionId: item.transaction_id,
+        executionIdentity: item.execution_identity,
+      });
+    } catch (error) {
+      if (error instanceof MacosAdapterError) {
+        return {
+          transaction: null,
+          location: 'unknown',
+          status: 'RECOVERY_REQUIRED',
+          summaryStatus: 'RECOVERY_REQUIRED',
+          transactionHasMutated: false,
+          error: new CleanupTransactionError(error.reason, 'cleanup transaction failed', 'recovery_required'),
+        };
+      }
+      throw error;
+    }
+    let transaction;
+    try {
+      transaction = batchTransactionFromRecords(
+        batch.home,
+        records,
+        batch.plan,
+        batch.batchPlan,
+        item.transaction_id,
+      );
+    } catch (error) {
+      const transactionError = normalizedTransactionError(error);
+      if (transactionError === null) throw error;
+      return {
+        transaction: null,
+        location: 'unknown',
+        status: 'RECOVERY_REQUIRED',
+        summaryStatus: 'RECOVERY_REQUIRED',
+        transactionHasMutated: false,
+        error: transactionError,
+      };
+    }
+    if (!ignoreLeaseMismatchForReporting
+        && batch.batchLock !== null
+        && canonicalJson(transaction.lock) !== canonicalJson(batch.batchLock)) {
+      return {
+        transaction,
+        location: 'unknown',
+        status: 'RECOVERY_REQUIRED',
+        summaryStatus: 'RECOVERY_REQUIRED',
+        transactionHasMutated: transactionHasMutated(transaction),
+        error: new CleanupTransactionError(
+          'batch_lock_identity_invalid',
+          'cleanup transaction failed',
+          'recovery_required',
+        ),
+      };
+    }
+    return observeBatchItem(transaction);
+  });
+  return {
+    observations,
+    items: observations.map((observation, index) => ({
+      item_id: batch.plan.items[index].item_id,
+      transaction_id: batch.plan.items[index].transaction_id,
+      status: summary ? observation.summaryStatus : observation.status,
+      location: observation.location,
+      transaction_has_mutated: observation.transactionHasMutated,
+    })),
+  };
+}
+
+function rebuildBatchTruthForReporting({ home, plan }) {
+  validatePlan(plan);
+  const batchPlan = buildBatchPlan(plan);
+  return rebuildBatchTruth({
+    home,
+    plan,
+    batchPlan,
+    batchState: null,
+    batchLock: null,
+    executionIdentity: plan.items[0].execution_identity,
+  }, { ignoreLeaseMismatchForReporting: true });
+}
+
+function firstFailedObservation(truth) {
+  const index = truth.observations.findIndex(({ status }) => (
+    ![
+      'NOT_STARTED',
+      'APPLY_PENDING',
+      'APPLY_FINALIZE_PENDING',
+      'COMMITTED',
+    ].includes(status)
+  ));
+  if (index < 0) return null;
+  return { index, observation: truth.observations[index] };
+}
+
+function stopFirstFailureTruth(truth) {
+  const failure = firstFailedObservation(truth);
+  if (failure === null) return truth;
+  return {
+    observations: truth.observations.map((observation, index) => (
+      index <= failure.index
+        ? observation
+        : {
+          ...observation,
+          status: 'NOT_STARTED',
+          location: 'original',
+          transactionHasMutated: false,
+          error: null,
+        }
+    )),
+    items: truth.items.map((item, index) => (
+      index <= failure.index
+        ? item
+        : {
+          ...item,
+          status: 'NOT_STARTED',
+          location: 'original',
+          transaction_has_mutated: false,
+        }
+    )),
+  };
+}
+
+function batchError(code, status, result, failure = {}) {
+  return new CleanupBatchError(code, status, {
+    batchError: result,
+    errorCode: result.error_code ?? code,
+    failureScope: result.failure_scope ?? failure.scope ?? 'batch',
+    failureItemId: result.failure_item_id ?? failure.itemId ?? null,
+    failureIndex: result.failure_item_index ?? failure.index ?? null,
+    batchId: result.batch_id,
+    planHash: result.plan_hash,
+    overallStatus: result.overall_status,
+    items: result.items,
+    mutationOccurred: result.mutation_occurred,
+    mutationOutcome: result.mutation_outcome,
+    transactionHasMutated: result.transaction_has_mutated,
+    committedTransactionIds: result.committed_transaction_ids,
+    undoCommands: result.undo_commands,
+  });
+}
+
+function buildFailureResult(
+  batch,
+  truth,
+  mutationOccurred,
+  mutationOutcome = mutationOccurred ? 'moved' : 'unchanged',
+) {
+  const unsupportedFailure = firstFailedObservation(truth);
+  if (unsupportedFailure !== null
+      && !['DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED'].includes(
+        unsupportedFailure.observation.status,
+      )) {
+    truth.observations[unsupportedFailure.index] = {
+      ...unsupportedFailure.observation,
+      status: 'RECOVERY_REQUIRED',
+    };
+    truth.items[unsupportedFailure.index] = {
+      ...truth.items[unsupportedFailure.index],
+      status: 'RECOVERY_REQUIRED',
+    };
+  }
+  truth = stopFirstFailureTruth(truth);
+  let failed = firstFailedObservation(truth);
+  const committed = truth.items.filter(({ status }) => status === 'COMMITTED').length;
+  if (committed > 0 && failed?.observation.status === 'BLOCKED') {
+    truth.observations[failed.index] = {
+      ...failed.observation,
+      status: 'RECOVERY_REQUIRED',
+      summaryStatus: 'RECOVERY_REQUIRED',
+    };
+    truth.items[failed.index] = {
+      ...truth.items[failed.index],
+      status: 'RECOVERY_REQUIRED',
+    };
+    failed = firstFailedObservation(truth);
+  }
+  const recoveryRequired = truth.items.some(({ status }) => status === 'RECOVERY_REQUIRED');
+  const partial = committed > 0 && committed < truth.items.length;
+  const status = partial || recoveryRequired ? 'recovery_required' : 'blocked';
+  const overallStatus = partial ? 'PARTIAL' : (
+    recoveryRequired ? 'RECOVERY_REQUIRED' : (
+      truth.items.some(({ status: itemStatus }) => itemStatus === 'DRIFTED')
+        ? 'drifted'
+        : 'blocked'
+    )
+  );
+  const failedItem = failed === null ? null : truth.items[failed.index];
+  const code = failedItem?.status === 'DRIFTED'
+    ? BATCH_ERROR_CODES.preflightDrift
+    : (failedItem?.status === 'BLOCKED'
+      ? BATCH_ERROR_CODES.itemBlocked
+      : (failedItem?.status === 'RECOVERY_REQUIRED'
+        && mutationOutcome === 'unknown'
+        && failedItem.transaction_has_mutated
+        ? BATCH_ERROR_CODES.itemOutcomeAmbiguous
+        : (failedItem?.status === 'RECOVERY_REQUIRED'
+          ? BATCH_ERROR_CODES.itemRecoveryRequired
+          : BATCH_ERROR_CODES.batchRecoveryRequired)));
+  const failureScope = failed === null ? 'batch' : 'item';
+  const result = buildBatchError({
+    batchPlan: batch.batchPlan,
+    status,
+    overallStatus,
+    items: truth.items,
+    mutationOccurred,
+    mutationOutcome,
+    errorCode: code,
+    failureScope,
+    failureItemIndex: failed?.index ?? null,
+  });
+  return {
+    result,
+    error: batchError(code, partial || recoveryRequired ? 'recovery_required' : 'blocked', result, {
+      scope: failureScope,
+      itemId: failed === null ? null : batch.plan.items[failed.index].item_id,
+      index: failed?.index ?? null,
+    }),
+  };
+}
+
+function batchErrorItems(items) {
+  return items.map((item) => {
+    if (['COMMITTED', 'DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED'].includes(item.status)) {
+      return { ...item };
+    }
+    if (item.transaction_has_mutated) {
+      return { ...item, status: 'RECOVERY_REQUIRED' };
+    }
+    return {
+      ...item,
+      status: 'NOT_STARTED',
+      location: 'original',
+      transaction_has_mutated: false,
+    };
+  });
+}
+
+function mergeBatchErrorItems(pendingItems, observedItems) {
+  const pending = pendingItems === null
+    ? null
+    : batchErrorItems(pendingItems);
+  return batchErrorItems(observedItems).map((observed, index) => {
+    const prior = pending?.[index];
+    if (['COMMITTED', 'DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED'].includes(observed.status)) {
+      return observed;
+    }
+    if (prior !== undefined
+        && ['DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED'].includes(prior.status)) {
+      return prior;
+    }
+    return observed;
+  });
+}
+
+function buildBatchScopedRecovery(
+  batch,
+  truth,
+  mutationOccurred,
+  mutationOutcome,
+  errorCode,
+) {
+  const allowedCodes = new Set([
+    BATCH_ERROR_CODES.batchStateProjectionFailed,
+    BATCH_ERROR_CODES.batchRecoveryRequired,
+    BATCH_ERROR_CODES.batchRecordsInvalid,
+    BATCH_ERROR_CODES.batchMutationOutcomeUnknown,
+    BATCH_ERROR_CODES.batchLockAcquireFailed,
+    BATCH_ERROR_CODES.batchLockReleaseFailed,
+  ]);
+  const stablePrimaryCodes = new Set([
+    BATCH_ERROR_CODES.batchStateProjectionFailed,
+    BATCH_ERROR_CODES.batchRecordsInvalid,
+  ]);
+  const normalizedCode = stablePrimaryCodes.has(errorCode)
+    ? errorCode
+    : (mutationOccurred && mutationOutcome === 'unknown'
+      ? BATCH_ERROR_CODES.batchMutationOutcomeUnknown
+      : (allowedCodes.has(errorCode)
+        ? errorCode
+        : BATCH_ERROR_CODES.batchRecoveryRequired));
+  const items = batchErrorItems(truth.items);
+  const result = buildBatchError({
+    batchPlan: batch.batchPlan,
+    status: 'recovery_required',
+    overallStatus: 'RECOVERY_REQUIRED',
+    items,
+    mutationOccurred,
+    mutationOutcome,
+    errorCode: normalizedCode,
+    failureScope: 'batch',
+  });
+  return {
+    result,
+    error: batchError(normalizedCode, 'recovery_required', result),
+  };
+}
+
+function durableBatchItems(items) {
+  return items.map(({ item_id: itemId, transaction_id: transactionId, status }) => ({
+    item_id: itemId,
+    transaction_id: transactionId,
+    status: ['COMMITTED', 'DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED'].includes(status)
+      ? status
+      : 'NOT_STARTED',
+  }));
+}
+
+function batchStateProjectionError(error) {
+  const transactionError = normalizedTransactionError(error);
+  const projectionError = new CleanupTransactionError(
+    BATCH_ERROR_CODES.batchStateProjectionFailed,
+    'cleanup batch state projection failed',
+    'recovery_required',
+  );
+  Object.assign(
+    projectionError,
+    joinMutationTruth('apply', transactionError),
+  );
+  return projectionError;
+}
+
+function advanceBatchProjection(batch, owner, state, items) {
+  const currentState = batch.batchState;
+  const stateItems = durableBatchItems(items);
+  const nextState = {
+    ...currentState,
+    sequence: currentState.sequence + 1,
+    state,
+    items: stateItems,
+  };
+  const authoritativeConvergence = nextState.items
+    .filter((item, index) => (
+      currentState.items[index].status === 'RECOVERY_REQUIRED'
+        && item.status === 'COMMITTED'
+    ))
+    .map(({ transaction_id: transactionId }) => transactionId);
+  try {
+    validateBatchState(nextState, batch.batchPlan, {
+      previousState: currentState,
+      authoritativeConvergence,
+    });
+  } catch (error) {
+    throw batchStateProjectionError(error);
+  }
+  let records;
+  try {
+    records = advanceBatchStateRecord({
+      home: batch.home,
+      batchId: batch.batchPlan.batch_id,
+      planHash: batch.batchPlan.plan_hash,
+      currentState,
+      nextState,
+      owner,
+      executionIdentity: batch.executionIdentity,
+    });
+  } catch (error) {
+    throw batchStateProjectionError(error);
+  }
+  try {
+    validateBatchRecordSet(records, batch.batchPlan, batch.plan);
+  } catch (error) {
+    throw batchStateProjectionError(error);
+  }
+  batch.batchState = records.state;
+  batch.batchLock = records.lock;
+  return batch;
+}
+
+async function applyBatchTransaction({
+  batch,
+  transaction,
+  owner,
+  index,
+  fault,
+}) {
+  const context = {
+    batch_id: batch.batchPlan.batch_id,
+    index,
+    item_id: transaction.item.item_id,
+    transaction_id: transaction.manifest.transaction_id,
+  };
+  let mutationOccurred = false;
+  let mutationAttempted = false;
+  try {
+    if (transaction.state.state === 'COMMITTED') {
+      const observation = observeBatchItem(transaction);
+      if (observation.status !== 'COMMITTED') throw observation.error;
+      return { transaction, mutationOccurred, location: observation.location };
+    }
+    if (transaction.state.state === 'RESTORED') fail('replay_protected', 'blocked');
+    const initial = observeBatchItem(transaction);
+    if (initial.status === 'DRIFTED') throw initial.error;
+    if (!['NOT_STARTED', 'APPLY_PENDING', 'APPLY_FINALIZE_PENDING'].includes(initial.status)) {
+      throw initial.error;
+    }
+    if (transaction.state.state === 'PLANNED') {
+      transaction = await publishNextBatchTransactionState(
+        transaction, 'CONFIRMED', batch.batchPlan, owner, fault, context,
+      );
+    }
+    if (transaction.state.state === 'CONFIRMED') {
+      const beforePrepare = observeBatchItem(transaction);
+      if (beforePrepare.location !== 'original') fail('preflight_identity_drift', 'blocked');
+      transaction = await publishNextBatchTransactionState(
+        transaction, 'PREPARED', batch.batchPlan, owner, fault, context,
+      );
+    }
+    if (transaction.state.state === 'PREPARED') {
+      const beforeApplying = observeBatchItem(transaction);
+      if (beforeApplying.location !== 'original') fail('preflight_identity_drift', 'blocked');
+      transaction = await publishNextBatchTransactionState(
+        transaction, 'APPLYING', batch.batchPlan, owner, fault, context,
+      );
+    }
+    if (transaction.state.state === 'APPLYING') {
+      let observation = observeBatchItem(transaction);
+      if (!['original', 'quarantine', 'rehydrated'].includes(observation.location)) {
+        fail('transaction_state_incoherent', 'recovery_required');
+      }
+      if (observation.location === 'original') {
+        await faultAt(fault, 'before_move', { ...context, state: transaction.state.state });
+        mutationAttempted = true;
+        renameExclusive({
+          home: batch.home,
+          activeRoot: transaction.manifest.active_root,
+          entryPath: transaction.manifest.entry_path,
+          destinationRelativeDirectory: transaction.manifest.payload_relative_directory,
+          destinationLeaf: transaction.manifest.payload_leaf,
+          expectedIdentity: transaction.manifest.execution_identity,
+        });
+        mutationOccurred = true;
+        await faultAt(fault, 'after_move', { ...context, state: transaction.state.state });
+      }
+      observation = observeBatchItem(transaction);
+      if (!['quarantine', 'rehydrated'].includes(observation.location)) {
+        fail('apply_postcondition_failed', 'recovery_required');
+      }
+      transaction = await publishNextBatchTransactionState(
+        transaction,
+        'COMMITTED',
+        batch.batchPlan,
+        owner,
+        fault,
+        context,
+        {
+          location: 'quarantine',
+          manifest_hash: transaction.manifest.execution_identity.manifest_hash,
+        },
+      );
+    }
+    const finalObservation = observeBatchItem(transaction);
+    if (finalObservation.status !== 'COMMITTED') {
+      fail('committed_state_incoherent', 'recovery_required');
+    }
+    return { transaction, mutationOccurred, location: finalObservation.location };
+  } catch (error) {
+    let transactionError = normalizedTransactionError(error)
+      ?? new CleanupTransactionError(
+        'batch_item_interrupted',
+        'cleanup batch item was interrupted',
+        'recovery_required',
+      );
+    const mutationTruth = joinMutationTruth(
+      'apply',
+      transactionError,
+      {
+        mutationOccurred: mutationOccurred
+          || (mutationAttempted && transactionError.status === 'recovery_required'),
+        mutationOutcome: mutationOccurred ? 'moved' : (
+          mutationAttempted && transactionError.status === 'recovery_required'
+            ? 'unknown'
+            : 'unchanged'
+        ),
+      },
+    );
+    if ((mutationOccurred || mutationAttempted)
+        && transaction.state.state === 'APPLYING') {
+      try {
+        transaction = advanceBatchTransactionState(transaction, 'RECOVERY_REQUIRED', {
+          batchPlan: batch.batchPlan,
+          owner,
+        });
+      } catch {
+        // Durable location reconciliation remains authoritative if the state CAS cannot publish.
+      }
+      transactionError = new CleanupTransactionError(
+        transactionError.code,
+        'cleanup batch item failed after a current-command mutation',
+        'recovery_required',
+      );
+    }
+    Object.assign(transactionError, mutationTruth);
+    throw transactionError;
+  }
+}
+
+function loadBatchTransactionContext({
+  home,
+  transactionId,
+  executionIdentity,
+}) {
+  let transactionRecords;
+  try {
+    transactionRecords = probeBatchTransactionRecords({
+      home,
+      transactionId,
+      executionIdentity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) fail(error.reason, error.code);
+    throw error;
+  }
+  let binding;
+  try {
+    binding = validateBatchBinding(transactionRecords.binding);
+  } catch {
+    fail('batch_binding_invalid', 'recovery_required');
+  }
+  let batchRecords;
+  try {
+    batchRecords = probeBatchRecords({
+      home,
+      batchId: binding.batch_id,
+      executionIdentity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) fail(error.reason, error.code);
+    throw error;
+  }
+  const plan = transactionRecords.plan;
+  let batchPlan;
+  try {
+    validatePlan(plan);
+    batchPlan = validateBatchPlan(batchRecords.plan, plan);
+    validateBatchState(batchRecords.state, batchPlan);
+    validateBatchBinding(binding, batchPlan);
+  } catch {
+    fail('batch_records_invalid', 'recovery_required');
+  }
+  const transaction = batchTransactionFromRecords(
+    home,
+    transactionRecords,
+    plan,
+    batchPlan,
+    transactionId,
+  );
+  return {
+    batch: {
+      home,
+      plan,
+      batchPlan,
+      batchState: batchRecords.state,
+      batchLock: batchRecords.lock,
+      executionIdentity,
+    },
+    transaction,
+  };
+}
+
+async function undoBatchTransactionInternal({
+  home,
+  transactionId,
+  confirmation,
+  fault,
+  discoveryRecords,
+}) {
+  if (confirmation !== transactionId) fail('confirmation_mismatch', 'invalid');
+  const executionIdentity = discoveryRecords.manifest?.execution_identity;
+  let { batch, transaction } = loadBatchTransactionContext({
+    home,
+    transactionId,
+    executionIdentity,
+  });
+  await faultAt(fault, 'before_restore_lock_acquire', {
+    batch_id: batch.batchPlan.batch_id,
+    transaction_id: transactionId,
+    state: transaction.state.state,
+  });
+  let owner;
+  try {
+    owner = acquireBatchLock({
+      home,
+      batchId: batch.batchPlan.batch_id,
+      planHash: batch.batchPlan.plan_hash,
+      executionIdentity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) fail(error.reason, error.code);
+    throw error;
+  }
+  batch.batchLock = owner;
+  let mutationOccurred = false;
+  let mutationAttempted = false;
+  let pendingError = null;
+  let returnValue = null;
+  try {
+    await faultAt(fault, 'after_restore_lock_acquire', {
+      batch_id: batch.batchPlan.batch_id,
+      transaction_id: transactionId,
+      state: transaction.state.state,
+    });
+    ({ batch, transaction } = loadBatchTransactionContext({
+      home,
+      transactionId,
+      executionIdentity,
+    }));
+    if (canonicalJson(batch.batchLock) !== canonicalJson(owner)
+        || canonicalJson(transaction.lock) !== canonicalJson(owner)) {
+      fail('batch_lock_identity_invalid', 'recovery_required');
+    }
+    let location = reconcileTransactionLocation({ home, manifest: transaction.manifest });
+    if (transaction.state.state === 'RESTORED') {
+      if (location.location !== 'original') fail('restored_state_incoherent', 'recovery_required');
+      returnValue = publicTransactionResult(
+        'undo', 'already_restored', transaction, 'original', false,
+      );
+    } else {
+      if (!['COMMITTED', 'RESTORE_PREPARED', 'RESTORING'].includes(transaction.state.state)) {
+        fail('undo_not_committed', 'blocked');
+      }
+      if (location.location === 'rehydrated') fail('restore_destination_occupied', 'conflict');
+      if (transaction.state.state === 'COMMITTED' && location.location !== 'quarantine') {
+        fail('committed_state_incoherent', 'recovery_required');
+      }
+      const context = {
+        batch_id: batch.batchPlan.batch_id,
+        item_id: transaction.item.item_id,
+        transaction_id: transactionId,
+      };
+      if (transaction.state.state === 'COMMITTED') {
+        transaction = await publishNextBatchTransactionState(
+          transaction,
+          'RESTORE_PREPARED',
+          batch.batchPlan,
+          owner,
+          fault,
+          context,
+        );
+      }
+      location = reconcileTransactionLocation({ home, manifest: transaction.manifest });
+      if (location.location === 'rehydrated') fail('restore_destination_occupied', 'conflict');
+      if (transaction.state.state === 'RESTORE_PREPARED'
+          && location.location !== 'quarantine') {
+        fail('restore_without_intent', 'recovery_required');
+      }
+      if (transaction.state.state === 'RESTORE_PREPARED') {
+        transaction = await publishNextBatchTransactionState(
+          transaction,
+          'RESTORING',
+          batch.batchPlan,
+          owner,
+          fault,
+          context,
+        );
+      }
+      location = reconcileTransactionLocation({ home, manifest: transaction.manifest });
+      if (!['quarantine', 'original'].includes(location.location)) {
+        fail('restore_state_incoherent', 'recovery_required');
+      }
+      if (location.location === 'quarantine') {
+        await faultAt(fault, 'before_restore_move', {
+          ...context,
+          state: transaction.state.state,
+        });
+        mutationAttempted = true;
+        restoreExclusive({ home, manifest: transaction.manifest });
+        mutationOccurred = true;
+        await faultAt(fault, 'after_restore_move', {
+          ...context,
+          state: transaction.state.state,
+        });
+      }
+      await faultAt(fault, 'before_restore_postcondition_verify', {
+        ...context,
+        state: transaction.state.state,
+      });
+      location = reconcileTransactionLocation({ home, manifest: transaction.manifest });
+      if (location.location !== 'original') fail('restore_postcondition_failed', 'recovery_required');
+      await faultAt(fault, 'after_restore_postcondition_verify', {
+        ...context,
+        state: transaction.state.state,
+      });
+      transaction = await publishNextBatchTransactionState(
+        transaction,
+        'RESTORED',
+        batch.batchPlan,
+        owner,
+        fault,
+        context,
+        {
+          location: 'original',
+          manifest_hash: transaction.manifest.execution_identity.manifest_hash,
+        },
+      );
+      returnValue = publicTransactionResult(
+        'undo', 'restored', transaction, 'original', mutationOccurred,
+      );
+    }
+  } catch (error) {
+    let transactionError = normalizedTransactionError(error)
+      ?? new CleanupTransactionError(
+        'batch_undo_interrupted',
+        'cleanup batch undo was interrupted',
+        'recovery_required',
+      );
+    const mutationTruth = joinMutationTruth(
+      'undo',
+      transactionError,
+      {
+        mutationOccurred: mutationOccurred
+          || (mutationAttempted && transactionError.status === 'recovery_required'),
+        mutationOutcome: mutationOccurred ? 'restored' : (
+          mutationAttempted && transactionError.status === 'recovery_required'
+            ? 'unknown'
+            : 'unchanged'
+        ),
+      },
+    );
+    if ((mutationOccurred || mutationAttempted)
+        && ['RESTORE_PREPARED', 'RESTORING'].includes(transaction.state.state)) {
+      try {
+        transaction = advanceBatchTransactionState(transaction, 'RECOVERY_REQUIRED', {
+          batchPlan: batch.batchPlan,
+          owner,
+        });
+      } catch {
+        // Reconciliation remains authoritative if recovery-state publication cannot complete.
+      }
+      transactionError = new CleanupTransactionError(
+        transactionError.code,
+        'cleanup batch undo failed after a current-command mutation',
+        'recovery_required',
+      );
+    }
+    pendingError = contextualizeTransactionError(transactionError, {
+      command: 'undo',
+      transaction,
+      location: (() => {
+        try {
+          return reconcileTransactionLocation({ home, manifest: transaction.manifest }).location;
+        } catch {
+          return undefined;
+        }
+      })(),
+      ...mutationTruth,
+    });
+  }
+  try {
+    releaseBatchLock({
+      home,
+      batchId: batch.batchPlan.batch_id,
+      planHash: batch.batchPlan.plan_hash,
+      owner,
+      executionIdentity,
+    });
+  } catch (error) {
+    const releaseError = normalizedTransactionError(error);
+    if (releaseError === null) throw error;
+    const primaryError = pendingError ?? releaseError;
+    const mutationTruth = joinMutationTruth(
+      'undo',
+      pendingError,
+      releaseError,
+      {
+        mutationOccurred,
+        mutationOutcome: mutationOccurred ? 'restored' : 'unchanged',
+      },
+    );
+    throw contextualizeTransactionError(
+      new CleanupTransactionError(
+        primaryError.code,
+        pendingError?.message ?? 'cleanup batch undo could not release its exact lease',
+        'recovery_required',
+      ),
+      {
+        command: 'undo',
+        transaction,
+        location: (() => {
+          try {
+            return reconcileTransactionLocation({ home, manifest: transaction.manifest }).location;
+          } catch {
+            return undefined;
+          }
+        })(),
+        ...mutationTruth,
+      },
+    );
+  }
+  if (pendingError !== null) throw pendingError;
+  return returnValue;
+}
+
 async function undoTransactionInternal({
   home = process.env.HOME,
   transactionId,
@@ -930,6 +2366,26 @@ async function undoTransactionInternal({
   } catch (error) {
     if (error instanceof MacosAdapterError) fail(error.reason, error.code);
     throw error;
+  }
+  let kind;
+  try {
+    kind = probeTransactionKind({
+      home,
+      transactionId,
+      executionIdentity: records.manifest?.execution_identity,
+    });
+  } catch (error) {
+    if (error instanceof MacosAdapterError) fail(error.reason, error.code);
+    throw error;
+  }
+  if (kind === 'batch_v2') {
+    return undoBatchTransactionInternal({
+      home,
+      transactionId,
+      confirmation,
+      fault,
+      discoveryRecords: records,
+    });
   }
   let transaction = transactionFromRecords(home, records, transactionId);
   if (transaction.lock !== null) {
@@ -1151,7 +2607,18 @@ function transactionContextFromDisk(home, transactionId) {
   }
   try {
     const records = discoverTransactionRecords({ home, transactionId });
-    const transaction = transactionFromRecords(home, records, transactionId);
+    const kind = probeTransactionKind({
+      home,
+      transactionId,
+      executionIdentity: records.manifest?.execution_identity,
+    });
+    const transaction = kind === 'batch_v2'
+      ? loadBatchTransactionContext({
+        home,
+        transactionId,
+        executionIdentity: records.manifest?.execution_identity,
+      }).transaction
+      : transactionFromRecords(home, records, transactionId);
     let location;
     try {
       location = reconcileTransactionLocation({ home, manifest: transaction.manifest }).location;
@@ -1193,3 +2660,414 @@ export async function undoTransaction(options = {}) {
     throw contextualizeTransactionError(error, { command: 'undo', ...context });
   }
 }
+
+function stateForBatchFailure(result) {
+  if (result.items.some(({ status }) => status === 'RECOVERY_REQUIRED')) {
+    return 'RECOVERY_REQUIRED';
+  }
+  if (result.overall_status === 'PARTIAL') return 'PARTIAL';
+  if (result.overall_status === 'RECOVERY_REQUIRED') return 'RECOVERY_REQUIRED';
+  return 'BLOCKED';
+}
+
+async function applyPlanInternal({
+  home = process.env.HOME,
+  plan,
+  confirmation,
+  fault = null,
+} = {}) {
+  try {
+    validatePlan(plan);
+  } catch {
+    throw new CleanupBatchError('invalid_plan', 'invalid', {
+      errorCode: 'invalid_plan',
+      failureScope: 'batch',
+      failureItemId: null,
+      failureIndex: null,
+    });
+  }
+  if (confirmation !== plan.plan_hash) {
+    throw new CleanupBatchError('confirmation_mismatch', 'invalid', {
+      errorCode: 'confirmation_mismatch',
+      failureScope: 'batch',
+      failureItemId: null,
+      failureIndex: null,
+    });
+  }
+  if (plan.items.length < 2) {
+    throw new CleanupBatchError('batch_requires_multiple_items', 'unsupported', {
+      errorCode: 'batch_requires_multiple_items',
+      failureScope: 'batch',
+      failureItemId: null,
+      failureIndex: null,
+    });
+  }
+  let batch;
+  try {
+    batch = initializeBatch({ home, plan });
+  } catch (error) {
+    const transactionError = normalizedTransactionError(error);
+    if (transactionError === null) throw error;
+    const batchPlan = buildBatchPlan(plan);
+    const { mutationOccurred, mutationOutcome } = joinMutationTruth(
+      'apply', transactionError,
+    );
+    const truth = rebuildBatchTruthForReporting({ home, plan });
+    const historicalMutation = truth.items.some((item) => (
+      item.status === 'COMMITTED' || item.transaction_has_mutated
+    ));
+    const errorCode = mutationOutcome === 'unknown' && !historicalMutation
+      ? BATCH_ERROR_CODES.batchMutationOutcomeUnknown
+      : BATCH_ERROR_CODES.batchRecordsInvalid;
+    const built = buildBatchScopedRecovery({
+      home,
+      plan,
+      batchPlan,
+    }, truth,
+      mutationOccurred,
+      mutationOutcome,
+      errorCode,
+    );
+    throw built.error;
+  }
+
+  let owner;
+  try {
+    await faultAt(fault, 'before_batch_lock_acquire', {
+      batch_id: batch.batchPlan.batch_id,
+    });
+    owner = acquireBatchLock({
+      home,
+      batchId: batch.batchPlan.batch_id,
+      planHash: batch.batchPlan.plan_hash,
+      executionIdentity: batch.executionIdentity,
+    });
+  } catch (error) {
+    const transactionError = normalizedTransactionError(error);
+    if (transactionError === null) throw error;
+    let truth = rebuildBatchTruth(batch);
+    const unfinishedMutation = truth.items.findIndex((item) => (
+      item.status !== 'COMMITTED' && item.transaction_has_mutated
+    ));
+    if (firstFailedObservation(truth) === null && unfinishedMutation >= 0) {
+      truth.items[unfinishedMutation].status = 'RECOVERY_REQUIRED';
+      truth.observations[unfinishedMutation] = {
+        ...truth.observations[unfinishedMutation],
+        status: 'RECOVERY_REQUIRED',
+        summaryStatus: 'RECOVERY_REQUIRED',
+        error: transactionError,
+      };
+    }
+    if (firstFailedObservation(truth) !== null) {
+      const mutationTruth = joinMutationTruth('apply', transactionError);
+      throw buildFailureResult(
+        batch,
+        truth,
+        mutationTruth.mutationOccurred,
+        mutationTruth.mutationOutcome,
+      ).error;
+    }
+    truth = stopFirstFailureTruth(truth);
+    const { mutationOccurred, mutationOutcome } = joinMutationTruth(
+      'apply', transactionError,
+    );
+    const historicalMutation = truth.items.some(({ transaction_has_mutated: mutated }) => mutated);
+    const recoveryRequired = transactionError.status === 'recovery_required'
+      || mutationOutcome === 'unknown'
+      || historicalMutation;
+    const errorCode = mutationOutcome === 'unknown'
+      ? BATCH_ERROR_CODES.batchMutationOutcomeUnknown
+      : (recoveryRequired
+        ? BATCH_ERROR_CODES.batchLockAcquireFailed
+        : BATCH_ERROR_CODES.batchLockUnavailable);
+    const result = buildBatchError({
+      batchPlan: batch.batchPlan,
+      status: recoveryRequired ? 'recovery_required' : 'blocked',
+      overallStatus: recoveryRequired ? 'RECOVERY_REQUIRED' : 'blocked',
+      items: batchErrorItems(truth.items),
+      mutationOccurred,
+      mutationOutcome,
+      errorCode,
+      failureScope: 'batch',
+    });
+    throw batchError(
+      errorCode,
+      recoveryRequired ? 'recovery_required' : 'blocked',
+      result,
+    );
+  }
+
+  let pendingError = null;
+  let returnValue = null;
+  let mutationOccurred = false;
+  let activeIndex = null;
+  try {
+    const leasedRecords = probeBatchRecords({
+      home,
+      batchId: batch.batchPlan.batch_id,
+      executionIdentity: batch.executionIdentity,
+    });
+    validateBatchRecordSet(leasedRecords, batch.batchPlan, batch.plan);
+    if (canonicalJson(leasedRecords.lock) !== canonicalJson(owner)) {
+      fail('batch_lock_identity_invalid', 'recovery_required');
+    }
+    batch.batchState = leasedRecords.state;
+    batch.batchLock = leasedRecords.lock;
+
+    let truth = rebuildBatchTruth(batch);
+    let failure = firstFailedObservation(truth);
+    if (failure !== null) {
+      const built = buildFailureResult(batch, truth, mutationOccurred);
+      advanceBatchProjection(batch, owner, stateForBatchFailure(built.result), built.result.items);
+      throw built.error;
+    }
+
+    if (truth.items.every(({ status }) => status === 'COMMITTED')) {
+      if (batch.batchState.state !== 'COMMITTED'
+          || canonicalJson(batch.batchState.items)
+            !== canonicalJson(durableBatchItems(truth.items))) {
+        await faultAt(fault, 'before_batch_state_update', {
+          batch_id: batch.batchPlan.batch_id,
+          index: batch.plan.items.length - 1,
+        });
+        advanceBatchProjection(batch, owner, 'COMMITTED', truth.items);
+        await faultAt(fault, 'after_batch_state_update', {
+          batch_id: batch.batchPlan.batch_id,
+          index: batch.plan.items.length - 1,
+        });
+      }
+      returnValue = buildBatchResult({
+        batchPlan: batch.batchPlan,
+        status: 'already_committed',
+        overallStatus: 'committed',
+        items: truth.items,
+        mutationOccurred: false,
+      });
+    } else {
+      if (batch.batchState.state !== 'RUNNING'
+          || canonicalJson(batch.batchState.items)
+            !== canonicalJson(durableBatchItems(truth.items))) {
+        advanceBatchProjection(batch, owner, 'RUNNING', truth.items);
+      }
+      for (let index = 0; index < batch.plan.items.length; index += 1) {
+        activeIndex = index;
+        const planItem = batch.plan.items[index];
+        await faultAt(fault, 'before_batch_item_start', {
+          batch_id: batch.batchPlan.batch_id,
+          index,
+          item_id: planItem.item_id,
+          transaction_id: planItem.transaction_id,
+        });
+
+        truth = rebuildBatchTruth(batch);
+        failure = firstFailedObservation(truth);
+        if (failure !== null) {
+          const built = buildFailureResult(batch, truth, mutationOccurred);
+          advanceBatchProjection(batch, owner, stateForBatchFailure(built.result), built.result.items);
+          throw built.error;
+        }
+        if (truth.items[index].status === 'COMMITTED') continue;
+
+        const applied = await applyBatchTransaction({
+          batch,
+          transaction: truth.observations[index].transaction,
+          owner,
+          index,
+          fault,
+        });
+        mutationOccurred ||= applied.mutationOccurred;
+        await faultAt(fault, 'after_batch_item_commit', {
+          batch_id: batch.batchPlan.batch_id,
+          index,
+          item_id: planItem.item_id,
+          transaction_id: planItem.transaction_id,
+        });
+
+        truth = rebuildBatchTruth(batch);
+        failure = firstFailedObservation(truth);
+        if (failure !== null) {
+          const built = buildFailureResult(batch, truth, mutationOccurred);
+          advanceBatchProjection(batch, owner, stateForBatchFailure(built.result), built.result.items);
+          throw built.error;
+        }
+        const nextBatchState = truth.items.every(({ status }) => status === 'COMMITTED')
+          ? 'COMMITTED'
+          : 'RUNNING';
+        await faultAt(fault, 'before_batch_state_update', {
+          batch_id: batch.batchPlan.batch_id,
+          index,
+          item_id: planItem.item_id,
+          transaction_id: planItem.transaction_id,
+        });
+        advanceBatchProjection(batch, owner, nextBatchState, truth.items);
+        await faultAt(fault, 'after_batch_state_update', {
+          batch_id: batch.batchPlan.batch_id,
+          index,
+          item_id: planItem.item_id,
+          transaction_id: planItem.transaction_id,
+        });
+      }
+      truth = rebuildBatchTruth(batch);
+      returnValue = buildBatchResult({
+        batchPlan: batch.batchPlan,
+        status: 'committed',
+        overallStatus: 'committed',
+        items: truth.items,
+        mutationOccurred,
+      });
+    }
+  } catch (error) {
+    if (error instanceof CleanupBatchError) {
+      pendingError = error;
+    } else {
+      const transactionError = normalizedTransactionError(error)
+        ?? new CleanupTransactionError(
+          'batch_execution_interrupted',
+          'cleanup batch execution was interrupted',
+          'recovery_required',
+        );
+      const truth = rebuildBatchTruth(batch);
+      const mutationTruth = joinMutationTruth(
+        'apply',
+        {
+          mutationOccurred,
+          mutationOutcome: mutationOccurred ? 'moved' : 'unchanged',
+        },
+        transactionError,
+      );
+      const currentMutation = mutationTruth.mutationOccurred;
+      const { mutationOutcome } = mutationTruth;
+      let built;
+      const failed = firstFailedObservation(truth);
+      const ambiguousItemIndex = failed?.observation.status === 'RECOVERY_REQUIRED'
+          && truth.items[failed.index].transaction_has_mutated
+        ? failed.index
+        : (activeIndex !== null
+            && truth.items[activeIndex].status !== 'COMMITTED'
+            && truth.items[activeIndex].transaction_has_mutated
+          ? activeIndex
+          : null);
+      if (transactionError.code === BATCH_ERROR_CODES.batchStateProjectionFailed) {
+        built = buildBatchScopedRecovery(
+          batch,
+          truth,
+          currentMutation,
+          mutationOutcome,
+          BATCH_ERROR_CODES.batchStateProjectionFailed,
+        );
+      } else if (currentMutation && mutationOutcome === 'unknown'
+          && ambiguousItemIndex === null) {
+        built = buildBatchScopedRecovery(
+          batch,
+          truth,
+          true,
+          'unknown',
+          BATCH_ERROR_CODES.batchMutationOutcomeUnknown,
+        );
+      } else if (truth.items.every(({ status }) => status === 'COMMITTED')) {
+        built = buildBatchScopedRecovery(
+          batch,
+          truth,
+          currentMutation,
+          mutationOutcome,
+          transactionError.code,
+        );
+      } else {
+        if (firstFailedObservation(truth) === null) {
+          const index = activeIndex !== null
+              && truth.items[activeIndex].status !== 'COMMITTED'
+            ? activeIndex
+            : truth.items.findIndex(({ status }) => status !== 'COMMITTED');
+          truth.items[index].status = transactionError.status === 'recovery_required'
+            ? 'RECOVERY_REQUIRED'
+            : 'BLOCKED';
+          truth.observations[index] = {
+            ...truth.observations[index],
+            status: truth.items[index].status,
+            error: transactionError,
+          };
+        }
+        built = buildFailureResult(
+          batch,
+          truth,
+          currentMutation,
+          mutationOutcome,
+        );
+        try {
+          advanceBatchProjection(batch, owner, stateForBatchFailure(built.result), built.result.items);
+        } catch (projectionFailure) {
+          const projectionError = normalizedTransactionError(projectionFailure)
+            ?? batchStateProjectionError(projectionFailure);
+          const observed = rebuildBatchTruth(batch, {
+            ignoreLeaseMismatchForReporting: true,
+          });
+          const items = mergeBatchErrorItems(built.result.items, observed.items);
+          const projectionMutation = joinMutationTruth(
+            'apply',
+            built.error,
+            projectionError,
+            {
+              mutationOccurred,
+              mutationOutcome: mutationOccurred ? 'moved' : 'unchanged',
+            },
+          );
+          built = buildBatchScopedRecovery(
+            batch,
+            { ...observed, items },
+            projectionMutation.mutationOccurred,
+            projectionMutation.mutationOutcome,
+            BATCH_ERROR_CODES.batchStateProjectionFailed,
+          );
+        }
+      }
+      pendingError = built.error;
+    }
+  }
+
+  try {
+    await faultAt(fault, 'before_batch_lock_release', {
+      batch_id: batch.batchPlan.batch_id,
+    });
+    releaseBatchLock({
+      home,
+      batchId: batch.batchPlan.batch_id,
+      planHash: batch.batchPlan.plan_hash,
+      owner,
+      executionIdentity: batch.executionIdentity,
+    });
+  } catch (error) {
+    const transactionError = normalizedTransactionError(error);
+    if (transactionError === null) throw error;
+    const observed = rebuildBatchTruth(batch, { ignoreLeaseMismatchForReporting: true });
+    const items = mergeBatchErrorItems(pendingError?.items ?? null, observed.items);
+    const mutationTruth = joinMutationTruth(
+      'apply',
+      {
+        mutationOccurred,
+        mutationOutcome: mutationOccurred ? 'moved' : 'unchanged',
+      },
+      pendingError,
+      transactionError,
+    );
+    const built = buildBatchScopedRecovery(
+      batch,
+      { ...observed, items },
+      mutationTruth.mutationOccurred,
+      mutationTruth.mutationOutcome,
+      BATCH_ERROR_CODES.batchLockReleaseFailed,
+    );
+    throw built.error;
+  }
+
+  if (pendingError !== null) throw pendingError;
+  return returnValue;
+}
+
+export async function applyPlan(options = {}) {
+  return applyPlanInternal(options);
+}
+
+export const __testing = Object.freeze({
+  joinMutationTruth,
+  rebuildBatchTruthForReporting,
+});

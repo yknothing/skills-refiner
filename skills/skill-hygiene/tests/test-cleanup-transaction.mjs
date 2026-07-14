@@ -21,6 +21,9 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  BATCH_ERROR_CODES,
+  buildBatchBinding,
+  buildBatchPlan,
   canonicalJson,
   computeItemHash,
   computePlanHash,
@@ -37,14 +40,20 @@ import {
   initializeTransactionRecords,
   isolateStaleTransactionLock,
   probeTransactionRecords,
+  probeBatchRecords,
+  probeBatchTransactionRecords,
+  probeTransactionKind,
   releaseTransactionLock,
 } from '../lib/cleanup-macos.mjs';
 import {
+  __testing as transactionTesting,
   CleanupTransactionError,
+  CleanupBatchError,
   APPLY_FAULT_PHASES,
   RESTORE_FAULT_PHASES,
   advanceTransactionState,
   applyItem,
+  applyPlan,
   assertTransactionTransition,
   initializeTransaction,
   statusTransaction,
@@ -70,6 +79,31 @@ const allowedForward = [
   ['RESTORE_PREPARED', 'RECOVERY_REQUIRED'],
   ['RESTORING', 'RECOVERY_REQUIRED'],
 ];
+
+test('mutation truth join is monotonic and command-specific', () => {
+  assert.deepEqual(
+    transactionTesting.joinMutationTruth('apply',
+      { mutationOccurred: false, mutationOutcome: 'unchanged' },
+      { mutationOccurred: true, mutationOutcome: 'moved' }),
+    { mutationOccurred: true, mutationOutcome: 'moved' },
+  );
+  assert.deepEqual(
+    transactionTesting.joinMutationTruth('undo',
+      { mutationOccurred: true, mutationOutcome: 'restored' },
+      { mutationOccurred: true, mutationOutcome: 'unknown' }),
+    { mutationOccurred: true, mutationOutcome: 'unknown' },
+  );
+  assert.deepEqual(
+    transactionTesting.joinMutationTruth('undo',
+      { mutationOccurred: true, mutationOutcome: 'unchanged' }),
+    { mutationOccurred: true, mutationOutcome: 'restored' },
+  );
+  assert.deepEqual(
+    transactionTesting.joinMutationTruth('apply',
+      { mutationOccurred: false, mutationOutcome: 'unknown' }),
+    { mutationOccurred: true, mutationOutcome: 'unknown' },
+  );
+});
 
 function planForIdentity(identity, authorizationId = '0'.repeat(32)) {
   const item = {
@@ -106,7 +140,49 @@ function planForIdentity(identity, authorizationId = '0'.repeat(32)) {
   return plan;
 }
 
+function planForIdentities(identities, authorizationId = '0'.repeat(32)) {
+  const items = identities.map((identity) => {
+    const item = {
+      item_id: sha256Json({ entry_path: identity.entry_path, identity_hash: identity.identity_hash }),
+      action: 'quarantine',
+      entry_path: identity.entry_path,
+      active_root: identity.active_root,
+      entry_kind: identity.entry_kind,
+      execution_identity: identity,
+      preconditions: {
+        review_fingerprint: `sha256:${'3'.repeat(64)}`,
+        candidate_fingerprint: sha256Json({ candidate: identity.entry_path }),
+        scan_fingerprint: `sha256:${'5'.repeat(64)}`,
+        execution_identity_hash: identity.identity_hash,
+      },
+      expected_postconditions: {
+        active_entry_absent: true,
+        quarantine_entry_present: true,
+      },
+      risk: 'reviewed',
+    };
+    item.item_hash = computeItemHash(item);
+    return item;
+  });
+  const plan = {
+    schema_version: 'skills-refiner.cleanup.plan.v1',
+    product_version: '2.0',
+    platform: 'macos',
+    authorization_id: authorizationId,
+    scan_fingerprint: `sha256:${'5'.repeat(64)}`,
+    created_at: '2026-07-14T00:00:00.000Z',
+    items,
+  };
+  plan.plan_hash = computePlanHash(plan);
+  plan.items = plan.items.map((item) => ({
+    ...item,
+    transaction_id: deriveTransactionId(plan.plan_hash, item.item_id),
+  }));
+  return plan;
+}
+
 const CLI_LAUNCHER = fileURLToPath(new URL('../bin/skills-refiner', import.meta.url));
+const TRANSACTION_MODULE = new URL('../lib/cleanup-transaction.mjs', import.meta.url).href;
 
 function prepareNativeHelper(path, args, home, extraEnvironment = {}) {
   let releaseInput;
@@ -1409,6 +1485,936 @@ test('ambiguous intent is durably terminal while payload drift remains preserved
       transactionId: payloadTransactionId,
       executionIdentity: payloadIdentity,
     }).state.state, 'COMMITTED');
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
+});
+
+test('durable batch apply preflights globally, stops serially, and preserves undo truth', async () => {
+  const buildFixture = async (home, prefix) => {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const entries = [];
+    const identities = [];
+    for (let index = 0; index < 3; index += 1) {
+      const source = writeSkill(join(home, `${prefix}-source-${index}`), `${prefix}-${index}`);
+      const entryPath = join(activeRoot, `${prefix}-entry-${index}`);
+      symlinkSync(source, entryPath);
+      entries.push({ source, entryPath });
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    return { activeRoot, entries, plan: planForIdentities(identities, prefix.repeat(32)) };
+  };
+
+  const successHome = makeSandbox();
+  try {
+    const fixture = await buildFixture(successHome, '1');
+    const result = await applyPlan({
+      home: successHome,
+      plan: fixture.plan,
+      confirmation: fixture.plan.plan_hash,
+    });
+    assert.equal(result.schema_version, 'skills-refiner.cleanup.batch.v1');
+    assert.equal(result.status, 'committed');
+    assert.match(result.batch_id, /^sha256:[0-9a-f]{64}$/u);
+    assert.deepEqual(result.items.map(({ status }) => status), [
+      'COMMITTED',
+      'COMMITTED',
+      'COMMITTED',
+    ]);
+    assert.deepEqual(
+      result.committed_transaction_ids,
+      fixture.plan.items.map(({ transaction_id: id }) => id),
+    );
+    assert.deepEqual(
+      result.undo_commands,
+      fixture.plan.items.toReversed().map(({ transaction_id: id }) => (
+        `skills-refiner cleanup undo ${id} --confirm ${id} --json`
+      )),
+    );
+    assert.ok(fixture.entries.every(({ entryPath }) => !existsSync(entryPath)));
+    const batchRoot = join(
+      successHome,
+      '.agents/skills-quarantine/batches',
+      result.batch_id.slice('sha256:'.length),
+    );
+    assert.equal(lstatSync(batchRoot).mode & 0o777, 0o700);
+    assert.equal(lstatSync(join(batchRoot, 'plan.json')).mode & 0o777, 0o600);
+    assert.equal(lstatSync(join(batchRoot, 'state.json')).mode & 0o777, 0o600);
+    const batchPlan = buildBatchPlan(fixture.plan);
+    for (const item of fixture.plan.items) {
+      const transactionRoot = join(
+        successHome,
+        '.agents/skills-quarantine/transactions',
+        item.transaction_id.slice('sha256:'.length),
+      );
+      assert.equal(lstatSync(join(transactionRoot, 'binding.json')).mode & 0o777, 0o600);
+      assert.equal(probeTransactionKind({
+        home: successHome,
+        transactionId: item.transaction_id,
+        executionIdentity: item.execution_identity,
+      }), 'batch_v2');
+      assert.deepEqual(probeBatchTransactionRecords({
+        home: successHome,
+        transactionId: item.transaction_id,
+        executionIdentity: item.execution_identity,
+      }).binding, buildBatchBinding(batchPlan, item.item_id));
+    }
+    const retried = await applyPlan({
+      home: successHome,
+      plan: { ...fixture.plan, created_at: '2099-01-01T00:00:00.000Z' },
+      confirmation: fixture.plan.plan_hash,
+    });
+    assert.equal(retried.status, 'already_committed');
+    assert.equal(retried.mutation_occurred, false);
+    assert.equal(retried.batch_id, result.batch_id);
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(successHome);
+  }
+
+  const preflightHome = makeSandbox();
+  try {
+    const fixture = await buildFixture(preflightHome, '2');
+    const replacement = writeSkill(join(preflightHome, 'preflight-replacement'), 'replacement');
+    unlinkSync(fixture.entries[1].entryPath);
+    symlinkSync(replacement, fixture.entries[1].entryPath);
+    await assert.rejects(
+      applyPlan({
+        home: preflightHome,
+        plan: fixture.plan,
+        confirmation: fixture.plan.plan_hash,
+      }),
+      (error) => error instanceof CleanupBatchError
+        && error.status === 'blocked'
+        && error.overallStatus === 'drifted'
+        && error.mutationOccurred === false
+        && error.items[1].status === 'DRIFTED'
+        && error.items.filter(({ status }) => status === 'NOT_STARTED').length === 2,
+    );
+    assert.ok(fixture.entries.every(({ entryPath }) => existsSync(entryPath)));
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(preflightHome);
+  }
+
+  const partialHome = makeSandbox();
+  try {
+    const fixture = await buildFixture(partialHome, '3');
+    const replacement = writeSkill(join(partialHome, 'partial-replacement'), 'replacement');
+    let injected = false;
+    await assert.rejects(
+      applyPlan({
+        home: partialHome,
+        plan: fixture.plan,
+        confirmation: fixture.plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase !== 'after_batch_item_commit' || context.index !== 0 || injected) return;
+          injected = true;
+          unlinkSync(fixture.entries[1].entryPath);
+          symlinkSync(replacement, fixture.entries[1].entryPath);
+        },
+      }),
+      (error) => error instanceof CleanupBatchError
+        && error.status === 'recovery_required'
+        && error.overallStatus === 'PARTIAL'
+        && error.mutationOccurred === true
+        && error.items[0].status === 'COMMITTED'
+        && error.items[1].status === 'DRIFTED'
+        && error.items[2].status === 'NOT_STARTED'
+        && error.committedTransactionIds.length === 1
+        && error.undoCommands.length === 1,
+    );
+    assert.equal(existsSync(fixture.entries[0].entryPath), false);
+    assert.equal(readlinkSync(fixture.entries[1].entryPath), replacement);
+    assert.equal(readlinkSync(fixture.entries[2].entryPath), fixture.entries[2].source);
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(partialHome);
+  }
+
+  const interruptedHome = makeSandbox();
+  try {
+    const fixture = await buildFixture(interruptedHome, '7');
+    await assert.rejects(
+      applyPlan({
+        home: interruptedHome,
+        plan: fixture.plan,
+        confirmation: fixture.plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase === 'after_batch_item_commit' && context.index === 0) {
+            throw new Error('test-only interruption');
+          }
+        },
+      }),
+      (error) => error instanceof CleanupBatchError
+        && error.code === BATCH_ERROR_CODES.itemRecoveryRequired
+        && error.status === 'recovery_required'
+        && error.overallStatus === 'PARTIAL'
+        && error.committedTransactionIds.length === 1
+        && error.items[0].status === 'COMMITTED'
+        && error.items[1].status === 'RECOVERY_REQUIRED'
+        && error.items[2].status === 'NOT_STARTED'
+        && error.batchError.schema_version === 'skills-refiner.cleanup.batch-error.v1'
+        && error.batchError.error_code === BATCH_ERROR_CODES.itemRecoveryRequired,
+    );
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(interruptedHome);
+  }
+
+  const ambiguousLockHome = makeSandbox();
+  try {
+    const fixture = await buildFixture(ambiguousLockHome, '8');
+    await assert.rejects(
+      applyPlan({
+        home: ambiguousLockHome,
+        plan: fixture.plan,
+        confirmation: fixture.plan.plan_hash,
+        fault: async (phase) => {
+          if (phase === 'before_batch_lock_acquire') {
+            throw new MacosAdapterError(
+              'recovery_required',
+              'batch_lock_durability_unknown',
+              'test-only batch lock durability ambiguity',
+              { mutationMayHaveOccurred: true },
+            );
+          }
+        },
+      }),
+      (error) => error instanceof CleanupBatchError
+        && error.code === BATCH_ERROR_CODES.batchMutationOutcomeUnknown
+        && error.status === 'recovery_required'
+        && error.overallStatus === 'RECOVERY_REQUIRED'
+        && error.failureScope === 'batch'
+        && error.failureItemId === null
+        && error.failureIndex === null
+        && error.mutationOccurred === true
+        && error.mutationOutcome === 'unknown'
+        && error.transactionHasMutated === false
+        && error.items.every(({ status }) => status === 'NOT_STARTED')
+        && error.batchError.error_code === BATCH_ERROR_CODES.batchMutationOutcomeUnknown,
+    );
+    assert.ok(fixture.entries.every(({ entryPath }) => existsSync(entryPath)));
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(ambiguousLockHome);
+  }
+
+  const ambiguousItemHome = makeSandbox();
+  try {
+    const fixture = await buildFixture(ambiguousItemHome, '9');
+    await assert.rejects(
+      applyPlan({
+        home: ambiguousItemHome,
+        plan: fixture.plan,
+        confirmation: fixture.plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase === 'before_move' && context.index === 0) {
+            throw new MacosAdapterError(
+              'recovery_required',
+              'item_mutation_durability_unknown',
+              'test-only item durability ambiguity',
+              { mutationMayHaveOccurred: true },
+            );
+          }
+        },
+      }),
+      (error) => error instanceof CleanupBatchError
+        && error.code === BATCH_ERROR_CODES.batchMutationOutcomeUnknown
+        && error.status === 'recovery_required'
+        && error.overallStatus === 'RECOVERY_REQUIRED'
+        && error.failureScope === 'batch'
+        && error.mutationOccurred === true
+        && error.mutationOutcome === 'unknown'
+        && error.transactionHasMutated === false
+        && error.items.every(({ status }) => status === 'NOT_STARTED'),
+    );
+    assert.ok(fixture.entries.every(({ entryPath }) => existsSync(entryPath)));
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(ambiguousItemHome);
+  }
+});
+
+test('batch status reconciles a real SIGKILL gap read-only and retry never replays a commit', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const identities = [];
+    const entryPaths = [];
+    for (let index = 0; index < 2; index += 1) {
+      const source = writeSkill(join(home, `kill-source-${index}`), `kill-${index}`);
+      const entryPath = join(activeRoot, `kill-entry-${index}`);
+      symlinkSync(source, entryPath);
+      entryPaths.push(entryPath);
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    const plan = planForIdentities(identities, '4'.repeat(32));
+    const encodedPlan = Buffer.from(canonicalJson(plan), 'utf8').toString('base64');
+    const childProgram = `
+      const { applyPlan } = await import(${JSON.stringify(TRANSACTION_MODULE)});
+      const plan = JSON.parse(Buffer.from(process.env.SKILLS_REFINER_TEST_PLAN, 'base64'));
+      await applyPlan({
+        home: process.env.HOME,
+        plan,
+        confirmation: plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase === 'before_batch_state_update' && context.index === 0) {
+            process.kill(process.pid, 'SIGKILL');
+          }
+        },
+      });
+    `;
+    const killed = spawnSync(process.execPath, ['--input-type=module', '--eval', childProgram], {
+      env: {
+        HOME: home,
+        LANG: 'C',
+        LC_ALL: 'C',
+        PATH: '/usr/bin:/bin',
+        TMPDIR: process.env.TMPDIR ?? '/tmp',
+        SKILLS_REFINER_TEST_PLAN: encodedPlan,
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(killed.status, null, killed.stderr);
+    assert.equal(killed.signal, 'SIGKILL');
+    assert.equal(existsSync(entryPaths[0]), false);
+    assert.equal(existsSync(entryPaths[1]), true);
+
+    const batchPlan = buildBatchPlan(plan);
+    const beforeStatus = probeBatchRecords({
+      home,
+      batchId: batchPlan.batch_id,
+      executionIdentity: identities[0],
+    });
+    assert.notEqual(beforeStatus.lock, null);
+    assert.deepEqual(beforeStatus.state.items.map(({ status }) => status), [
+      'NOT_STARTED',
+      'NOT_STARTED',
+    ]);
+    const committedBeforeRetry = probeBatchTransactionRecords({
+      home,
+      transactionId: plan.items[0].transaction_id,
+      executionIdentity: identities[0],
+    }).state;
+    assert.equal(committedBeforeRetry.state, 'COMMITTED');
+
+    const status = statusTransaction({
+      home,
+      transactionId: plan.items[0].transaction_id,
+    });
+    assert.equal(status.schema_version, 'skills-refiner.cleanup.transaction-batch-status.v1');
+    assert.equal(status.batch_id, batchPlan.batch_id);
+    assert.equal(status.batch_summary.overall_status, 'RUNNING');
+    assert.deepEqual(status.batch_summary.items.map(({ status: itemStatus }) => itemStatus), [
+      'COMMITTED',
+      'NOT_STARTED',
+    ]);
+    const afterStatus = probeBatchRecords({
+      home,
+      batchId: batchPlan.batch_id,
+      executionIdentity: identities[0],
+    });
+    assert.equal(afterStatus.lock, null);
+    assert.equal(canonicalJson(afterStatus.state), canonicalJson(beforeStatus.state));
+
+    const retried = await applyPlan({ home, plan, confirmation: plan.plan_hash });
+    assert.equal(retried.status, 'committed');
+    assert.deepEqual(retried.items.map(({ status: itemStatus }) => itemStatus), [
+      'COMMITTED',
+      'COMMITTED',
+    ]);
+    assert.equal(
+      canonicalJson(probeBatchTransactionRecords({
+        home,
+        transactionId: plan.items[0].transaction_id,
+        executionIdentity: identities[0],
+      }).state),
+      canonicalJson(committedBeforeRetry),
+    );
+
+    const restored = await undoTransaction({
+      home,
+      transactionId: plan.items[0].transaction_id,
+      confirmation: plan.items[0].transaction_id,
+    });
+    assert.equal(restored.status, 'restored');
+    const restoredStatus = statusTransaction({
+      home,
+      transactionId: plan.items[0].transaction_id,
+    });
+    assert.equal(restoredStatus.status, 'restored');
+    assert.equal(restoredStatus.batch_summary.overall_status, 'PARTIALLY_RESTORED');
+    assert.deepEqual(
+      restoredStatus.batch_summary.items.map(({ status: itemStatus }) => itemStatus),
+      ['RESTORED', 'COMMITTED'],
+    );
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
+});
+
+test('batch status exposes durable apply pending, rehydration, and restore conflict truth', async () => {
+  const makeBatchFixture = async (home, prefix) => {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const entries = [];
+    const identities = [];
+    for (let index = 0; index < 2; index += 1) {
+      const source = writeSkill(join(home, `${prefix}-source-${index}`), `${prefix}-${index}`);
+      const entryPath = join(activeRoot, `${prefix}-entry-${index}`);
+      symlinkSync(source, entryPath);
+      entries.push({ source, entryPath });
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    return {
+      entries,
+      plan: planForIdentities(identities, prefix.repeat(32)),
+    };
+  };
+
+  const pendingHome = makeSandbox();
+  try {
+    const fixture = await makeBatchFixture(pendingHome, 'a');
+    await assert.rejects(
+      applyPlan({
+        home: pendingHome,
+        plan: fixture.plan,
+        confirmation: fixture.plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase === 'after_state_confirmed' && context.index === 0) {
+            throw new Error('test-only confirmed-state interruption');
+          }
+        },
+      }),
+      (error) => error instanceof CleanupBatchError
+        && error.code === BATCH_ERROR_CODES.itemRecoveryRequired,
+    );
+    const status = statusTransaction({
+      home: pendingHome,
+      transactionId: fixture.plan.items[0].transaction_id,
+    });
+    assert.equal(status.state, 'CONFIRMED');
+    assert.equal(status.status, 'ready_to_resume_apply');
+    assert.equal(status.batch_summary.overall_status, 'RUNNING');
+    assert.equal(status.batch_summary.items[0].status, 'APPLY_PENDING');
+    assert.equal(status.batch_summary.items[0].location, 'original');
+    assert.equal(status.batch_summary.items[0].transaction_has_mutated, false);
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(pendingHome);
+  }
+
+  const conflictHome = makeSandbox();
+  try {
+    const fixture = await makeBatchFixture(conflictHome, 'b');
+    await applyPlan({
+      home: conflictHome,
+      plan: fixture.plan,
+      confirmation: fixture.plan.plan_hash,
+    });
+    const competing = writeSkill(join(conflictHome, 'competing-source'), 'competing');
+    symlinkSync(competing, fixture.entries[0].entryPath);
+    const rehydrated = statusTransaction({
+      home: conflictHome,
+      transactionId: fixture.plan.items[0].transaction_id,
+    });
+    assert.equal(rehydrated.state, 'COMMITTED');
+    assert.equal(rehydrated.status, 'rehydrated');
+    assert.equal(rehydrated.location, 'rehydrated');
+    assert.equal(rehydrated.batch_summary.overall_status, 'REHYDRATED');
+    assert.equal(rehydrated.batch_summary.items[0].status, 'REHYDRATED');
+
+    unlinkSync(fixture.entries[0].entryPath);
+    await assert.rejects(
+      undoTransaction({
+        home: conflictHome,
+        transactionId: fixture.plan.items[0].transaction_id,
+        confirmation: fixture.plan.items[0].transaction_id,
+        fault: async (phase) => {
+          if (phase === 'after_state_restore_prepared') {
+            throw new Error('test-only restore-prepared interruption');
+          }
+        },
+      }),
+      (error) => error instanceof CleanupTransactionError
+        && error.code === 'batch_undo_interrupted',
+    );
+    symlinkSync(competing, fixture.entries[0].entryPath);
+    const restoreConflict = statusTransaction({
+      home: conflictHome,
+      transactionId: fixture.plan.items[0].transaction_id,
+    });
+    assert.equal(restoreConflict.state, 'RESTORE_PREPARED');
+    assert.equal(restoreConflict.status, 'restore_conflict');
+    assert.equal(restoreConflict.location, 'rehydrated');
+    assert.equal(restoreConflict.batch_summary.overall_status, 'RESTORE_CONFLICT');
+    assert.equal(restoreConflict.batch_summary.items[0].status, 'RESTORE_CONFLICT');
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(conflictHome);
+  }
+});
+
+test('read-only batch reporting preserves committed truth when another item is unreadable', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const identities = [];
+    for (let index = 0; index < 2; index += 1) {
+      const source = writeSkill(join(home, `report-source-${index}`), `report-${index}`);
+      const entryPath = join(activeRoot, `report-entry-${index}`);
+      symlinkSync(source, entryPath);
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    const plan = planForIdentities(identities, 'c'.repeat(32));
+    await assert.rejects(
+      applyPlan({
+        home,
+        plan,
+        confirmation: plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase === 'after_batch_item_commit' && context.index === 0) {
+            throw new Error('test-only partial batch');
+          }
+        },
+      }),
+      CleanupBatchError,
+    );
+    const unreadableState = join(
+      home,
+      '.agents/skills-quarantine/transactions',
+      plan.items[1].transaction_id.slice('sha256:'.length),
+      'state.json',
+    );
+    writeFileSync(unreadableState, '{', { encoding: 'utf8', mode: 0o600 });
+
+    const truth = transactionTesting.rebuildBatchTruthForReporting({ home, plan });
+    assert.deepEqual(truth.items.map(({ status }) => status), [
+      'COMMITTED',
+      'RECOVERY_REQUIRED',
+    ]);
+    assert.equal(truth.items[0].location, 'quarantine');
+    assert.equal(truth.items[0].transaction_has_mutated, true);
+    assert.equal(truth.items[1].location, 'unknown');
+    assert.deepEqual(
+      truth.items.filter(({ status }) => status === 'COMMITTED')
+        .map(({ transaction_id: transactionId }) => transactionId),
+      [plan.items[0].transaction_id],
+    );
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
+});
+
+test('batch undo keeps restore ambiguity when exact lease release also fails', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const identities = [];
+    for (let index = 0; index < 2; index += 1) {
+      const source = writeSkill(join(home, `undo-join-source-${index}`), `undo-join-${index}`);
+      const entryPath = join(activeRoot, `undo-join-entry-${index}`);
+      symlinkSync(source, entryPath);
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    const plan = planForIdentities(identities, 'd'.repeat(32));
+    await applyPlan({ home, plan, confirmation: plan.plan_hash });
+    const transactionId = plan.items[0].transaction_id;
+    await assert.rejects(
+      undoTransaction({
+        home,
+        transactionId,
+        confirmation: transactionId,
+        fault: async (phase) => {
+          if (phase !== 'before_restore_move') return;
+          writeFileSync(
+            join(home, '.agents/skills-quarantine/lock/owner.json'),
+            '{}',
+            { encoding: 'utf8', mode: 0o600 },
+          );
+          throw new MacosAdapterError(
+            'recovery_required',
+            'restore_mutation_durability_unknown',
+            'test-only restore durability ambiguity',
+            { mutationMayHaveOccurred: true },
+          );
+        },
+      }),
+      (error) => error instanceof CleanupTransactionError
+        && error.code === 'restore_mutation_durability_unknown'
+        && error.status === 'recovery_required'
+        && error.mutationOccurred === true
+        && error.mutationOutcome === 'unknown'
+        && error.transactionHasMutated === true,
+    );
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
+});
+
+test('batch init failure reports current immutable item truth and keeps undo IDs', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const identities = [];
+    for (let index = 0; index < 3; index += 1) {
+      const source = writeSkill(join(home, `init-report-source-${index}`), `init-${index}`);
+      const entryPath = join(activeRoot, `init-report-entry-${index}`);
+      symlinkSync(source, entryPath);
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    const plan = planForIdentities(identities, 'e'.repeat(32));
+    await assert.rejects(
+      applyPlan({
+        home,
+        plan,
+        confirmation: plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase === 'after_batch_item_commit' && context.index === 0) {
+            throw new Error('test-only partial batch before init retry');
+          }
+        },
+      }),
+      CleanupBatchError,
+    );
+    writeFileSync(join(
+      home,
+      '.agents/skills-quarantine/transactions',
+      plan.items[1].transaction_id.slice('sha256:'.length),
+      'state.json',
+    ), '{', { encoding: 'utf8', mode: 0o600 });
+
+    await assert.rejects(
+      applyPlan({ home, plan, confirmation: plan.plan_hash }),
+      (error) => {
+        assert.ok(error instanceof CleanupBatchError);
+        assert.equal(error.code, BATCH_ERROR_CODES.batchRecordsInvalid);
+        assert.equal(error.failureScope, 'batch');
+        assert.equal(error.mutationOccurred, false);
+        assert.equal(error.mutationOutcome, 'unchanged');
+        assert.deepEqual(error.items.map(({ status }) => status), [
+          'COMMITTED', 'RECOVERY_REQUIRED', 'NOT_STARTED',
+        ]);
+        assert.deepEqual(error.committedTransactionIds, [plan.items[0].transaction_id]);
+        assert.deepEqual(error.undoCommands, [
+          `skills-refiner cleanup undo ${plan.items[0].transaction_id} --confirm ${plan.items[0].transaction_id} --json`,
+        ]);
+        return true;
+      },
+    );
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
+});
+
+test('batch projection failure preserves the known item failure and committed prefix', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const identities = [];
+    const entries = [];
+    for (let index = 0; index < 3; index += 1) {
+      const source = writeSkill(join(home, `projection-source-${index}`), `projection-${index}`);
+      const entryPath = join(activeRoot, `projection-entry-${index}`);
+      symlinkSync(source, entryPath);
+      entries.push(entryPath);
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    const plan = planForIdentities(identities, 'f'.repeat(32));
+    const batchPlan = buildBatchPlan(plan);
+    const replacement = writeSkill(join(home, 'projection-drift'), 'drift');
+    await assert.rejects(
+      applyPlan({
+        home,
+        plan,
+        confirmation: plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase !== 'after_batch_item_commit' || context.index !== 0) return;
+          unlinkSync(entries[1]);
+          symlinkSync(replacement, entries[1]);
+          writeFileSync(join(
+            home,
+            '.agents/skills-quarantine/batches',
+            batchPlan.batch_id.slice('sha256:'.length),
+            'state.json',
+          ), '{', { encoding: 'utf8', mode: 0o600 });
+        },
+      }),
+      (error) => {
+        assert.ok(error instanceof CleanupBatchError);
+        assert.equal(error.code, BATCH_ERROR_CODES.batchStateProjectionFailed);
+        assert.equal(error.failureScope, 'batch');
+        assert.equal(error.status, 'recovery_required');
+        assert.equal(error.overallStatus, 'RECOVERY_REQUIRED');
+        assert.equal(error.mutationOccurred, true);
+        assert.equal(error.mutationOutcome, 'moved');
+        assert.deepEqual(error.items.map(({ status }) => status), [
+          'COMMITTED', 'DRIFTED', 'NOT_STARTED',
+        ]);
+        assert.deepEqual(error.committedTransactionIds, [plan.items[0].transaction_id]);
+        return true;
+      },
+    );
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
+});
+
+test('batch release failure merges pending item truth and makes unknown outcome dominant', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const identities = [];
+    for (let index = 0; index < 3; index += 1) {
+      const source = writeSkill(join(home, `release-source-${index}`), `release-${index}`);
+      const entryPath = join(activeRoot, `release-entry-${index}`);
+      symlinkSync(source, entryPath);
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    const plan = planForIdentities(identities, '1'.repeat(32));
+    await assert.rejects(
+      applyPlan({
+        home,
+        plan,
+        confirmation: plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase === 'after_batch_item_commit' && context.index === 0) {
+            throw new Error('test-only pending item failure');
+          }
+          if (phase === 'before_batch_lock_release') {
+            writeFileSync(
+              join(home, '.agents/skills-quarantine/lock/owner.json'),
+              '{}',
+              { encoding: 'utf8', mode: 0o600 },
+            );
+          }
+        },
+      }),
+      (error) => error instanceof CleanupBatchError
+        && error.code === BATCH_ERROR_CODES.batchMutationOutcomeUnknown
+        && error.failureScope === 'batch'
+        && error.status === 'recovery_required'
+        && error.overallStatus === 'RECOVERY_REQUIRED'
+        && error.mutationOccurred === true
+        && error.mutationOutcome === 'unknown'
+        && error.items[0].status === 'COMMITTED'
+        && error.items[1].status === 'RECOVERY_REQUIRED'
+        && error.items[2].status === 'NOT_STARTED'
+        && error.committedTransactionIds[0] === plan.items[0].transaction_id,
+    );
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
+});
+
+test('batch initialization does not misclassify an unrelated standalone global lease', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const makeIdentity = async (name) => {
+      const source = writeSkill(join(home, `${name}-source`), name);
+      const entryPath = join(activeRoot, `${name}-entry`);
+      symlinkSync(source, entryPath);
+      const identity = await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      });
+      return { entryPath, identity };
+    };
+    const standalone = await makeIdentity('standalone-owner');
+    const standalonePlan = planForIdentity(standalone.identity, '5'.repeat(32));
+    const standaloneTransaction = initializeTransaction({
+      home,
+      plan: standalonePlan,
+      transactionId: standalonePlan.items[0].transaction_id,
+      confirmation: standalonePlan.plan_hash,
+    });
+    const standaloneOwner = acquireTransactionLock({
+      home,
+      transactionId: standalonePlan.items[0].transaction_id,
+      planHash: standalonePlan.plan_hash,
+      executionIdentity: standalone.identity,
+    });
+    const first = await makeIdentity('batch-one');
+    const second = await makeIdentity('batch-two');
+    const batchPlan = planForIdentities([first.identity, second.identity], '6'.repeat(32));
+    await assert.rejects(
+      applyPlan({ home, plan: batchPlan, confirmation: batchPlan.plan_hash }),
+      (error) => error instanceof CleanupBatchError
+        && error.code === BATCH_ERROR_CODES.batchLockUnavailable
+        && error.status === 'blocked'
+        && error.failureScope === 'batch'
+        && error.mutationOccurred === false,
+    );
+    assert.equal(readlinkSync(first.entryPath), join(home, 'batch-one-source'));
+    assert.equal(readlinkSync(second.entryPath), join(home, 'batch-two-source'));
+    releaseTransactionLock({
+      home,
+      transactionId: standalonePlan.items[0].transaction_id,
+      planHash: standalonePlan.plan_hash,
+      owner: standaloneOwner,
+      executionIdentity: standaloneTransaction.manifest.execution_identity,
+    });
+    const applied = await applyPlan({
+      home,
+      plan: batchPlan,
+      confirmation: batchPlan.plan_hash,
+    });
+    assert.equal(applied.status, 'committed');
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
+});
+
+test('batch lock acquisition failure retains an existing committed prefix', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const identities = [];
+    for (let index = 0; index < 3; index += 1) {
+      const source = writeSkill(join(home, `acquire-history-source-${index}`), `history-${index}`);
+      const entryPath = join(activeRoot, `acquire-history-entry-${index}`);
+      symlinkSync(source, entryPath);
+      identities.push(await createMacosAdapter({ home }).inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(source).toString('base64'),
+        },
+      }));
+    }
+    const plan = planForIdentities(identities, '2'.repeat(32));
+    await assert.rejects(
+      applyPlan({
+        home,
+        plan,
+        confirmation: plan.plan_hash,
+        fault: async (phase, context) => {
+          if (phase === 'after_batch_item_commit' && context.index === 0) {
+            throw new Error('test-only committed prefix');
+          }
+        },
+      }),
+      CleanupBatchError,
+    );
+
+    const standaloneSource = writeSkill(join(home, 'acquire-owner-source'), 'owner');
+    const standaloneEntry = join(activeRoot, 'acquire-owner-entry');
+    symlinkSync(standaloneSource, standaloneEntry);
+    const standaloneIdentity = await createMacosAdapter({ home }).inspectForPlan(
+      standaloneEntry,
+      activeRoot,
+      {
+        entry_kind: 'symlink',
+        entry_identity: {
+          raw_link_target_base64: Buffer.from(standaloneSource).toString('base64'),
+        },
+      },
+    );
+    const standalonePlan = planForIdentity(standaloneIdentity, '3'.repeat(32));
+    const standaloneTransaction = initializeTransaction({
+      home,
+      plan: standalonePlan,
+      transactionId: standalonePlan.items[0].transaction_id,
+      confirmation: standalonePlan.plan_hash,
+    });
+    const standaloneOwner = acquireTransactionLock({
+      home,
+      transactionId: standalonePlan.items[0].transaction_id,
+      planHash: standalonePlan.plan_hash,
+      executionIdentity: standaloneIdentity,
+    });
+    try {
+      await assert.rejects(
+        applyPlan({ home, plan, confirmation: plan.plan_hash }),
+        (error) => error instanceof CleanupBatchError
+          && error.code === BATCH_ERROR_CODES.batchLockAcquireFailed
+          && error.failureScope === 'batch'
+          && error.mutationOccurred === false
+          && error.mutationOutcome === 'unchanged'
+          && error.items[0].status === 'COMMITTED'
+          && error.items[1].status === 'NOT_STARTED'
+          && error.items[2].status === 'NOT_STARTED'
+          && error.committedTransactionIds[0] === plan.items[0].transaction_id,
+      );
+    } finally {
+      releaseTransactionLock({
+        home,
+        transactionId: standalonePlan.items[0].transaction_id,
+        planHash: standalonePlan.plan_hash,
+        owner: standaloneOwner,
+        executionIdentity: standaloneTransaction.manifest.execution_identity,
+      });
+    }
   } finally {
     __testing.clearHelperCache();
     removeSandbox(home);
