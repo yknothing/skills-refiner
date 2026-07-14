@@ -111,12 +111,12 @@ npx skills add yknothing/skills-refiner --skill skills-refiner --skill skills-ap
 
 适用于 Claude Code、Cursor、Codex、OpenCode 及 [多种 agent](https://github.com/vercel-labs/skills#supported-agents)。
 
-治理脚本依赖 Bash、`jq` 与 SHA-256 实现。macOS 原生环境支持完整工具链。
-`HOME` 位于 WSL Linux 文件系统的 Windows WSL 2 是完整工具链目标：canary
-会复核实际 mode 并 fail closed，但专用 WSL runner 认证仍待完成。Windows
-Git Bash 只覆盖真实目录/复制布局的只读治理与 trace 文件变换；
-symlink/junction 拓扑尚未认证，canary 写日志会被拒绝。原生 PowerShell/cmd
-尚未实现。精确边界见
+只读治理脚本依赖 Bash、`jq` 与 SHA-256 实现。本机 cleanup 还要求 Node.js
+major 24；mutation adapter 目前仅支持 macOS，第一次编译 native helper 时
+需要 Apple Command Line Tools。Linux/Ubuntu 可以 review 已安装条目，但 cleanup
+mutation 会 fail closed。Windows Git Bash 仍只支持既有的有界只读与 trace 文件
+变换；Windows 尚未实现 `setup-cli` 与 cleanup mutation。原生 PowerShell/cmd
+也未实现。精确边界见
 [平台支持契约](docs/platform-support.md)。
 
 四个 skill 均可独立选择安装。例如：
@@ -152,7 +152,106 @@ bash bin/skills-refiner-doctor.sh --help
 
 可选环境变量：`SKILLS_REFINER_TOOLS_ROOT` — 包含 `skill-debug/` 与 `skill-hygiene/` 的目录（布局与 `~/.agents/skills` 相同）。
 
-版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v4` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v4 不再用静态预检乐观声称 `loadable: true`，未证明阻断时改为 `status: "unknown"` 与 `loadable: null`。
+### Review 并安全退役本机条目
+
+`skill-scan.sh` 提供证据，不做退役裁决。Cleanup 只治理 Agent skill root 中
+本机已安装或已分发的条目；独立 authoring/source 仓库只能 review，永远不是
+mutation target。
+
+在 macOS + Node.js 24 上，从已安装包启动，并可选择把经过校验的
+`skills-refiner` launcher 安装到一个已存在、位于 `PATH`、属于当前用户且安全的
+目录：
+
+```bash
+bash ~/.agents/skills/skill-hygiene/bin/skills-refiner setup-cli --node /absolute/path/to/node24
+skills-refiner cleanup
+```
+
+`setup-cli` 不修改 shell profile，也不会覆盖无关文件。TTY 下只有一个安全
+`PATH` 目录时会自动选择；有多个时列出候选并要求 `--target`。命令会展示一个
+绑定 source launcher、精确 Node binary 与 destination 的 digest，并要求逐字
+输入。空输入、EOF、不匹配或 Ctrl-C 都是零写入。如果没有安全 `PATH` 目录，
+则不写入 wrapper，并返回可直接复制的完整路径 invocation：它会先把
+`SKILLS_REFINER_NODE_BIN` 设为已选定的 Node 24 binary，再运行已安装
+launcher。
+
+Agent/IDE 的非 TTY 流程必须显式决策并使用 JSON：
+
+```bash
+bash ~/.agents/skills/skill-hygiene/bin/skills-refiner setup-cli \
+  --node /absolute/path/to/node24 --target /absolute/safe/PATH/directory --json
+# 退出 2 返回 preview；用其中的 confirmation.digest 原样重复命令：
+bash ~/.agents/skills/skill-hygiene/bin/skills-refiner setup-cli \
+  --node /absolute/path/to/node24 --target /absolute/safe/PATH/directory \
+  --confirm 'sha256:...' --json
+
+SESSION_DIR=$(mktemp -d /tmp/skills-refiner-cleanup.XXXXXX) || exit 1
+chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
+REVIEW="$SESSION_DIR/review.json"
+DECISIONS="$SESSION_DIR/decisions.json"
+PLAN="$SESSION_DIR/plan.json"
+skills-refiner cleanup review --json > "$REVIEW"
+```
+
+不要把这些产物写入当前 project/source repository。在私有会话目录中创建
+`$DECISIONS`，复用精确的 review fingerprint，并为每个 candidate 写一项
+显式决策：
+
+```json
+{
+  "schema_version": "skills-refiner.cleanup.decisions.v1",
+  "review_fingerprint": "<完整复制 review_fingerprint 的精确值>",
+  "decisions": [
+    {"candidate_id": "<完整复制 candidate_id 的精确值>", "action": "later"}
+  ]
+}
+```
+
+然后编译并执行不可变 plan：
+
+```bash
+skills-refiner cleanup plan --review "$REVIEW" --decisions "$DECISIONS" --json > "$PLAN"
+skills-refiner cleanup apply --plan "$PLAN" --confirm 'sha256:...' --post-scan --json
+skills-refiner cleanup status 'sha256:...' --json
+skills-refiner cleanup undo 'sha256:...' --confirm 'sha256:...' --json
+rm -f -- "$REVIEW" "$DECISIONS" "$PLAN"
+rmdir -- "$SESSION_DIR"
+```
+
+Apply 必须使用 `$PLAN` 中精确的 `plan_hash`，status/undo 必须使用对应 item
+的精确 `transaction_id`。`cleanup plan --persist-keep` 是 Agent/IDE 路径中唯一会
+持久化 Keep 的方式；不加该参数，plan 不会产生 Keep 副作用。每个 candidate 都
+必须显式选择 `keep`、`later` 或 `retire`，遗漏会判为 invalid。`Inspect` 只存在
+于 TTY 展示中，不是第四种 JSON action。如果流程中途停止，只删除上述三个
+会话文件，再移除对应私有目录；切勿通过删除当前 working tree 来“清理”。
+
+TTY 提供 **Keep / Later / Inspect / Retire**。空输入等于 Later，因此默认不会
+选中任何退役动作。Keep 只在观测到的条目标识与拓扑仍匹配时持续生效；Later
+仅作用于当前会话；Inspect 展示证据；Retire 还要第二次精确确认。Retire 是位于
+`~/.agents/skills-quarantine/transactions/` 的可恢复 quarantine transaction，
+不是永久删除；当前没有 purge 命令。
+
+多条目 plan 按顺序执行为互相独立、可分别 undo 的 transaction，并在第一次
+失败时停止。此前 committed transaction 的原始 payload 会继续留在 quarantine
+（除非已 restore），其 ID 会出现在 `committed_transaction_ids` 中；应逐个独立处理。
+使用 `--post-scan` 时，每个已提交条目会得到 `QUARANTINED`、
+`REHYDRATED`、`RESTORE_CONFLICT` 或 `INDETERMINATE`。Installer 可能在原始
+payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent 也可能保留
+缓存。系统不会自动再次隔离 rehydrated 条目，必须先 review 新证据。
+
+机器可读命令在 stdout 只输出一个 JSON 文档，诊断写入 stderr。退出码边界如下：
+
+| 退出码 | 含义 |
+|---:|---|
+| `0` | 成功或已验证的幂等结果 |
+| `2` | 输入无效/不完整、需要或不匹配确认、或安全取消 |
+| `3` | runtime、平台或 mutation adapter 不支持；零 mutation |
+| `10` | 安全检查阻断或检测到 drift |
+| `20` | 需要恢复，或无法证明 mutation outcome |
+| `21` | restore/transaction 冲突 |
+| `130` | 交互被中断 |
+
+版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v5` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v5 保留 v4 的保守运行时语义，并为后续处置计划新增精确 active-entry identity、统一兼容视图与已绑定内容的 GitHub 安装凭证证据。`entries` 的顺序契约是 `skills + skill_links + broken_symlinks`。
 
 ## 仓库布局
 
@@ -165,7 +264,10 @@ bash bin/skills-refiner-doctor.sh --help
 **治理与可观测性：**
 - `skills/skill-hygiene/SKILL.md` — AI 驱动的评估框架
 - `skills/skill-hygiene/bin/skill-scan.sh` — 拓扑与事实收集
-- `skills/skill-hygiene/tests/test-scan.sh` — 集成测试
+- `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap 与 cleanup CLI launcher
+- `skills/skill-hygiene/lib/cleanup-*.mjs` — review、contract、planning、平台与 transaction 逻辑
+- `skills/skill-hygiene/native/cleanup-macos-helper.c` — fail-closed macOS 文件系统 mutation helper
+- `skills/skill-hygiene/tests/test-scan.sh` 与 `test-cleanup-*` — scan 与 cleanup gates
 - `skills/skill-debug/SKILL.md` — 三层可观测性
 - `skills/skill-debug/bin/skill-probe.sh` — 发现诊断
 - `skills/skill-debug/bin/skill-trace.sh` — 探针注入/移除
@@ -213,6 +315,9 @@ bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 # 扫描已安装 skills
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 
+# 本机交互式 review；空输入为 Later，不会默认选中退役
+skills-refiner cleanup
+
 # 当前目录附近哪些 skill 文件可能被诊断器看到？
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 
@@ -235,7 +340,7 @@ bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
 
 Cases 08–09 覆盖与 skill-creator 协作场景。
 
-治理类 skill（`skill-hygiene`、`skill-debug`）通过沙箱拓扑下的集成测试验证扫描器/追踪器行为；`skills/skill-debug/tests/test-doctor.sh` 在隔离 `HOME` 下对只读 `skills-refiner-doctor.sh` 做冒烟验证，`test-platform-contract.sh` 则覆盖带空格路径、BOM/CRLF 往返恢复与 Windows 权限失败边界。GitHub Actions 在 macOS/Ubuntu 跑全量套件，并在 `windows-latest` 跑有界的 Git Bash 契约。
+治理类 skill（`skill-hygiene`、`skill-debug`）通过隔离沙箱集成测试验证。可移植的 scan/observability 与 cleanup contract/CLI gates 在 macOS、Ubuntu 运行；真实 cleanup mutation、native-helper 故障注入，以及成功 transaction 的 status/undo 只在 macOS 运行。`test-install-layout.sh` 验证选择性安装包可在 checkout 外运行且不会改动 source Git。`windows-latest` 仍是有界的 Git Bash 只读/trace 契约，不认证 cleanup mutation。
 
 ## 贡献
 

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -o pipefail
+
+SCRIPT_PARENT="${BASH_SOURCE[0]%/*}"
+[ "$SCRIPT_PARENT" = "${BASH_SOURCE[0]}" ] && SCRIPT_PARENT=.
+SCRIPT_DIR="$(cd "$SCRIPT_PARENT" && pwd)"
+JSON_REQUESTED=false
+for arg in "$@"; do
+    [ "$arg" = "--json" ] && JSON_REQUESTED=true
+done
+
+SETUP_REQUESTED=false
+[ "${1:-}" = "setup-cli" ] && SETUP_REQUESTED=true
+
+setup_bootstrap_error() {
+    local status="$1" result="$2" error_code="$3" exit_code="$4"
+    if $JSON_REQUESTED; then
+        printf '%s\n' "{\"schema_version\":\"skills-refiner.setup-cli.v1\",\"command\":\"setup-cli\",\"status\":\"$status\",\"overall_status\":\"$status\",\"result\":\"$result\",\"installed\":false,\"mutation_occurred\":false,\"mutation_outcome\":\"unchanged\",\"source_launcher\":null,\"node_binary\":null,\"destination_launcher\":null,\"full_path_launcher\":null,\"confirmation\":null,\"error_code\":\"$error_code\"}"
+    fi
+    echo "[ERROR] setup-cli requires one normalized absolute Node.js 24 binary and valid bootstrap options." >&2
+    exit "$exit_code"
+}
+
+normalized_absolute_path() {
+    case "$1" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in
+        *$'\n'*|*$'\r'*|*'/../'*|*'/./'*|*/..|*/.|//*|/) return 1 ;;
+    esac
+    return 0
+}
+
+NODE_BIN="${SKILLS_REFINER_NODE_BIN:-node}"
+if $SETUP_REQUESTED; then
+    NODE_SEEN=false
+    index=2
+    while [ "$index" -le "$#" ]; do
+        argument="${!index}"
+        case "$argument" in
+            --node)
+                $NODE_SEEN && setup_bootstrap_error invalid none invalid_invocation 2
+                NODE_SEEN=true
+                index=$((index + 1))
+                [ "$index" -le "$#" ] || setup_bootstrap_error invalid none invalid_invocation 2
+                NODE_BIN="${!index}"
+                normalized_absolute_path "$NODE_BIN" \
+                    || setup_bootstrap_error invalid none invalid_node_binary 2
+                ;;
+            --target|--confirm)
+                index=$((index + 1))
+                [ "$index" -le "$#" ] || setup_bootstrap_error invalid none invalid_invocation 2
+                ;;
+            --json) ;;
+            *) setup_bootstrap_error invalid none invalid_invocation 2 ;;
+        esac
+        index=$((index + 1))
+    done
+fi
+
+bootstrap_error() {
+    if $SETUP_REQUESTED; then
+        setup_bootstrap_error unsupported none node_runtime_unavailable 3
+    fi
+    if $JSON_REQUESTED; then
+        printf '%s\n' '{"schema_version":"skills-refiner.cleanup.error.v1","status":"unsupported","overall_status":"unsupported","error_code":"node_runtime_unavailable","mutation_occurred":false,"mutation_outcome":"unchanged","transaction_has_mutated":false,"committed_transaction_ids":[]}'
+    fi
+    echo "[ERROR] cleanup requires Node.js major 24" >&2
+    exit 3
+}
+
+if ! command -v "$NODE_BIN" >/dev/null 2>&1; then
+    bootstrap_error
+fi
+
+NODE_MAJOR="$("$NODE_BIN" -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null)" || bootstrap_error
+if ! [[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] || [ "$NODE_MAJOR" -ne 24 ]; then
+    bootstrap_error
+fi
+
+exec "$NODE_BIN" "$SCRIPT_DIR/../lib/cleanup-cli.mjs" "$@"

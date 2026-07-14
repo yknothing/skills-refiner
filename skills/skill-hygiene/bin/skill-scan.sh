@@ -30,6 +30,12 @@ STALE_DAYS=180
 JSON_ONLY=false
 NO_WRITE=false
 MAX_DESCRIPTION_LENGTH=1024
+SKILL_LOCK_SCHEMA_VERSION=3
+MAX_SKILL_LOCK_BYTES=1048576
+PROVENANCE_GIT_TMP=""
+PROVENANCE_RECEIPT_TMP=""
+GIT_TREE_HASH_RESULT=""
+MUTATION_PROVENANCE_JSON=""
 
 # Colors
 RED='\033[0;31m'
@@ -92,6 +98,10 @@ done < <(sr_agent_skill_dirs)
 # ── Helpers ───────────────────────────────────────────────────────────
 if ! command -v jq >/dev/null 2>&1; then
     echo "[ERROR] jq is required for JSON output and aggregation. Install jq and retry." >&2
+    exit 127
+fi
+if ! command -v base64 >/dev/null 2>&1; then
+    echo "[ERROR] base64 is required for byte-preserving symlink identity. Install base64 and retry." >&2
     exit 127
 fi
 
@@ -293,36 +303,218 @@ source_kind_for_entry() {
     fi
 }
 
-resolve_symlink_target() {
-    local path="$1" target="$2"
-    sr_resolve_symlink_target "$path" "$target"
+canonical_dir_for_entry() {
+    local path="$1"
+    (
+        cd -P "$path" 2>/dev/null || exit 1
+        printf '%s\001' "$PWD"
+    )
 }
 
-canonical_dir_for_entry() {
-    local path="$1" entry_type="$2" link_target="$3"
-    if [ "$entry_type" = "symlink" ]; then
-        resolve_symlink_target "$path" "$link_target" 2>/dev/null || return 1
+stat_owner_uid() {
+    local path="$1" result
+    if result=$(stat -c '%u' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -f '%u' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
     else
-        sr_canonical_dir "$path"
+        return 1
     fi
 }
 
-# Resolve symlink chain and classify entry type.
-classify_entry() {
-    local path="$1"
-    if [ -L "$path" ]; then
-        local target resolved
-        target=$(readlink "$path" 2>/dev/null)
-        resolved=$(resolve_symlink_target "$path" "$target" 2>/dev/null || true)
-        if [ -n "$resolved" ] && [ -d "$resolved" ]; then
-            echo "symlink|$target"
-        else
-            echo "broken_symlink|$target"
-        fi
-    elif [ -d "$path" ]; then
-        echo "directory|"
+stat_size_bytes() {
+    local path="$1" result
+    if result=$(stat -c '%s' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -f '%z' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
     else
-        echo "file|"
+        return 1
+    fi
+}
+
+stat_inode() {
+    local path="$1" result
+    if result=$(stat -c '%i' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -f '%i' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
+}
+
+stat_inode_follow() {
+    local path="$1" result
+    if result=$(stat -L -c '%i' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -L -f '%i' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
+}
+
+stat_mode_bits() {
+    local path="$1" result
+    if result=$(stat -c '%a' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -f '%Lp' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
+}
+
+cleanup_provenance_git_tmp() {
+    if [ -n "$PROVENANCE_GIT_TMP" ] && [ -d "$PROVENANCE_GIT_TMP" ]; then
+        rm -rf -- "$PROVENANCE_GIT_TMP"
+    fi
+    if [ -n "$PROVENANCE_RECEIPT_TMP" ] && [ -f "$PROVENANCE_RECEIPT_TMP" ]; then
+        rm -f -- "$PROVENANCE_RECEIPT_TMP"
+    fi
+}
+
+trap cleanup_provenance_git_tmp EXIT
+
+ensure_provenance_git_tmp() {
+    [ -n "$PROVENANCE_GIT_TMP" ] && [ -d "$PROVENANCE_GIT_TMP/repo" ] && return 0
+    [ -x /usr/bin/git ] || return 1
+
+    local tmp_root candidate
+    tmp_root="${TMPDIR:-/tmp}"
+    candidate=$(mktemp -d "${tmp_root%/}/skills-refiner-git-tree.XXXXXX") || return 1
+    chmod 700 "$candidate" || {
+        rm -rf -- "$candidate"
+        return 1
+    }
+    /usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME_DIR" \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        /usr/bin/git init --bare -q "$candidate/repo" >/dev/null 2>&1 || {
+        rm -rf -- "$candidate"
+        return 1
+    }
+    PROVENANCE_GIT_TMP="$candidate"
+}
+
+git_tree_hash_for_directory() {
+    local entry_path="$1"
+    GIT_TREE_HASH_RESULT=""
+    ensure_provenance_git_tmp || return 1
+    rm -f -- "$PROVENANCE_GIT_TMP/index"
+
+    /usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME_DIR" \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_INDEX_FILE="$PROVENANCE_GIT_TMP/index" \
+        /usr/bin/git --git-dir="$PROVENANCE_GIT_TMP/repo" --work-tree="$entry_path" \
+        -c core.autocrlf=false -c core.filemode=true -c core.symlinks=true \
+        add -f -A -- . >/dev/null 2>&1 || return 1
+    GIT_TREE_HASH_RESULT=$(/usr/bin/env -i PATH=/usr/bin:/bin HOME="$HOME_DIR" \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_INDEX_FILE="$PROVENANCE_GIT_TMP/index" \
+        /usr/bin/git --git-dir="$PROVENANCE_GIT_TMP/repo" --work-tree="$entry_path" \
+        write-tree 2>/dev/null) || return 1
+    echo "$GIT_TREE_HASH_RESULT" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+snapshot_install_receipt() {
+    local receipt_file="$1"
+    local receipt_owner receipt_size receipt_mode path_inode fd_inode snapshot tmp_root
+
+    [ -f "$receipt_file" ] && [ ! -L "$receipt_file" ] || return 1
+    exec 9< "$receipt_file" || return 1
+
+    path_inode=$(stat_inode "$receipt_file" 2>/dev/null || true)
+    fd_inode=$(stat_inode_follow /dev/fd/9 2>/dev/null || true)
+    receipt_owner=$(stat_owner_uid "$receipt_file" 2>/dev/null || true)
+    receipt_size=$(stat_size_bytes "$receipt_file" 2>/dev/null || true)
+    receipt_mode=$(stat_mode_bits "$receipt_file" 2>/dev/null || true)
+    if [ -z "$path_inode" ] || [ "$path_inode" != "$fd_inode" ] ||
+       [ "$receipt_owner" != "$(id -u)" ] ||
+       ! echo "$receipt_size" | grep -Eq '^[0-9]+$' ||
+       [ "$receipt_size" -gt "$MAX_SKILL_LOCK_BYTES" ] ||
+       ! echo "$receipt_mode" | grep -Eq '^[0-7]{3,4}$' ||
+       (( (8#$receipt_mode & 8#022) != 0 )); then
+        exec 9<&-
+        return 1
+    fi
+
+    tmp_root="${TMPDIR:-/tmp}"
+    snapshot=$(mktemp "${tmp_root%/}/skills-refiner-receipt.XXXXXX") || {
+        exec 9<&-
+        return 1
+    }
+    chmod 600 "$snapshot" || {
+        exec 9<&-
+        rm -f -- "$snapshot"
+        return 1
+    }
+    if ! cat <&9 > "$snapshot"; then
+        exec 9<&-
+        rm -f -- "$snapshot"
+        return 1
+    fi
+    exec 9<&-
+
+    if [ -L "$receipt_file" ] ||
+       [ "$(stat_inode "$receipt_file" 2>/dev/null || true)" != "$path_inode" ] ||
+       [ "$(stat_size_bytes "$snapshot" 2>/dev/null || true)" != "$receipt_size" ]; then
+        rm -f -- "$snapshot"
+        return 1
+    fi
+
+    printf '%s\n' "$snapshot"
+}
+
+mutation_provenance_for_entry() {
+    local location="$1" entry_type="$2" entry_name="$3" entry_path="$4" receipt_snapshot="$5"
+    local unknown='{"kind":"unknown","confidence":"none","evidence":null}'
+    MUTATION_PROVENANCE_JSON="$unknown"
+
+    if [ "$location" != ".agents/skills" ] || [ "$entry_type" != "directory" ]; then
+        return
+    fi
+
+    if [ -z "$receipt_snapshot" ] || [ ! -f "$receipt_snapshot" ]; then
+        return
+    fi
+
+    local receipt_file="$HOME_DIR/.agents/.skill-lock.json"
+
+    if jq -e --arg skill "$entry_name" --argjson schema_version "$SKILL_LOCK_SCHEMA_VERSION" '
+        .version == $schema_version and
+        (.skills | type == "object") and
+        (.skills[$skill] | type == "object") and
+        ([.skills[$skill].source,
+          .skills[$skill].sourceType,
+          .skills[$skill].sourceUrl,
+          .skills[$skill].skillPath]
+         | all(type == "string" and length > 0)) and
+        (.skills[$skill].sourceType == "github") and
+        (.skills[$skill].skillFolderHash | type == "string" and test("^[0-9a-f]{40}$"))
+    ' "$receipt_snapshot" >/dev/null 2>&1; then
+        local receipt_sha256 expected_tree_sha1 installed_tree_sha1
+        receipt_sha256=$(sr_hash_file_raw "$receipt_snapshot" 2>/dev/null || true)
+        expected_tree_sha1=$(jq -r --arg skill "$entry_name" '.skills[$skill].skillFolderHash' "$receipt_snapshot" 2>/dev/null || true)
+        if git_tree_hash_for_directory "$entry_path" 2>/dev/null; then
+            installed_tree_sha1="$GIT_TREE_HASH_RESULT"
+        else
+            installed_tree_sha1=""
+        fi
+        if [ -n "$receipt_sha256" ] && [ "$installed_tree_sha1" = "$expected_tree_sha1" ]; then
+            MUTATION_PROVENANCE_JSON=$(jq -n \
+                --arg receipt_file "$receipt_file" \
+                --arg receipt_sha256 "$receipt_sha256" \
+                --arg installed_tree_sha1 "$installed_tree_sha1" \
+                '{kind:"installed_copy", confidence:"direct",
+                  evidence:{kind:"content_bound_installer_receipt",
+                            receipt_file:$receipt_file,
+                            receipt_sha256:$receipt_sha256,
+                            installed_tree_sha1:$installed_tree_sha1}}')
+            return
+        fi
+    else
+        return
     fi
 }
 
@@ -334,22 +526,41 @@ scan_directory() {
 
     [ ! -d "$dir" ] && echo "$results" && return
 
-    local _seen=""
+    local install_receipt_snapshot=""
+    if [ "$dir_label" = ".agents/skills" ]; then
+        install_receipt_snapshot=$(snapshot_install_receipt "$HOME_DIR/.agents/.skill-lock.json" 2>/dev/null || true)
+        PROVENANCE_RECEIPT_TMP="$install_receipt_snapshot"
+    fi
+
     for entry_path in "$dir"/*; do
         [ -e "$entry_path" ] || [ -L "$entry_path" ] || continue
         [ -d "$entry_path" ] || [ -L "$entry_path" ] || continue
         local entry_name
-        entry_name=$(basename "$entry_path")
-        echo "$_seen" | grep -qx "$entry_name" && continue
-        _seen="${_seen}${entry_name}
-"
-
+        entry_name="${entry_path##*/}"
         [[ "$entry_name" == .* ]] && continue
 
-        local classification entry_type link_target
-        classification=$(classify_entry "$entry_path")
-        entry_type="${classification%%|*}"
-        link_target="${classification#*|}"
+        local entry_type link_target raw_link_target_base64
+        link_target=""
+        raw_link_target_base64=""
+        if [ -L "$entry_path" ]; then
+            local readlink_with_sentinel
+            readlink_with_sentinel="$(readlink -n "$entry_path" 2>/dev/null; printf '\001')"
+            link_target="${readlink_with_sentinel%$'\001'}"
+            raw_link_target_base64=$(printf '%s' "$link_target" | base64 | tr -d '\r\n')
+            if [ -d "$entry_path" ]; then
+                entry_type="symlink"
+            else
+                entry_type="broken_symlink"
+            fi
+        elif [ -d "$entry_path" ]; then
+            entry_type="directory"
+        else
+            continue
+        fi
+
+        local mutation_provenance_json
+        mutation_provenance_for_entry "$dir_label" "$entry_type" "$entry_name" "$entry_path" "$install_receipt_snapshot"
+        mutation_provenance_json="$MUTATION_PROVENANCE_JSON"
 
         if [ "$entry_type" = "broken_symlink" ]; then
             local entry_json
@@ -357,15 +568,28 @@ scan_directory() {
                 --arg name "$entry_name" \
                 --arg dir_name "$entry_name" \
                 --arg location "$dir_label" \
+                --arg entry_path "$entry_path" \
+                --arg active_root "$dir" \
                 --arg entry_type "broken_symlink" \
                 --arg link_target "$link_target" \
-                '{name: $name, dir_name: $dir_name, location: $location, type: $entry_type, link_target: $link_target, description: "", word_count: 0, age_days: 0, flags: ["broken_symlink"]}')
+                --arg raw_link_target_base64 "$raw_link_target_base64" \
+                --argjson mutation_provenance "$mutation_provenance_json" \
+                '{name: $name, dir_name: $dir_name, location: $location,
+                  entry_path: $entry_path, active_root: $active_root,
+                  entry_kind: $entry_type, type: $entry_type,
+                  link_target: $link_target,
+                  raw_link_target: $link_target,
+                  raw_link_target_base64: $raw_link_target_base64,
+                  mutation_provenance: $mutation_provenance,
+                  description: "", word_count: 0, age_days: 0,
+                  flags: ["broken_symlink"]}')
             results=$(echo "$results" | jq --argjson e "$entry_json" '. + [$e]')
             continue
         fi
 
-        local canonical_dir skill_file source_skill_file canonical_skill_file
-        canonical_dir=$(canonical_dir_for_entry "$entry_path" "$entry_type" "$link_target" 2>/dev/null || true)
+        local canonical_dir canonical_dir_with_sentinel skill_file source_skill_file canonical_skill_file
+        canonical_dir_with_sentinel=$(canonical_dir_for_entry "$entry_path" 2>/dev/null || true)
+        canonical_dir="${canonical_dir_with_sentinel%$'\001'}"
         [ -z "$canonical_dir" ] && continue
 
         skill_file="$canonical_dir/SKILL.md"
@@ -516,8 +740,11 @@ scan_directory() {
             --arg frontmatter_name "$name" \
             --arg dir_name "$entry_name" \
             --arg location "$dir_label" \
+            --arg entry_path "$entry_path" \
+            --arg active_root "$dir" \
             --arg entry_type "$entry_type" \
-            --arg link_target "$link_target" \
+            --arg raw_link_target "$link_target" \
+            --arg raw_link_target_base64 "$raw_link_target_base64" \
             --arg source_skill_file "$source_skill_file" \
             --arg canonical_skill_file "$canonical_skill_file" \
             --arg canonical_dir "$canonical_dir" \
@@ -564,14 +791,21 @@ scan_directory() {
             --argjson openai_yaml_exists "$openai_yaml_exists" \
             --argjson tool_dependencies_count "$tool_dependencies_count" \
             --argjson runtime_loadable "$runtime_loadable_json" \
+            --argjson mutation_provenance "$mutation_provenance_json" \
             --argjson flags "$flags_json" \
             --argjson risks "$risk_json" \
             '{
                 name: $name,
                 dir_name: $dir_name,
                 location: $location,
+                entry_path: $entry_path,
+                active_root: $active_root,
+                entry_kind: $entry_type,
                 type: $entry_type,
-                link_target: $link_target,
+                link_target: $raw_link_target,
+                raw_link_target: (if $raw_link_target == "" then null else $raw_link_target end),
+                raw_link_target_base64: (if $entry_type == "directory" then null else $raw_link_target_base64 end),
+                mutation_provenance: $mutation_provenance,
                 source_skill_file: $source_skill_file,
                 canonical_skill_file: $canonical_skill_file,
                 canonical_dir: $canonical_dir,
@@ -658,6 +892,10 @@ scan_directory() {
         results=$(echo "$results" | jq --argjson e "$entry_json" '. + [$e]')
     done
 
+    if [ -n "$install_receipt_snapshot" ]; then
+        rm -f -- "$install_receipt_snapshot"
+        PROVENANCE_RECEIPT_TMP=""
+    fi
     echo "$results"
 }
 
@@ -673,7 +911,7 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v4", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories", hash_normalization:"strip-canary-crlf-bom.v1", runtime_validation_mode:"static-preflight", runtime_status_semantics:"pass=runtime validator confirmed; fail=proven blocker; unknown=runtime loader not executed"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], runtime_load_blockers:[], name_collisions:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v5", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories", hash_normalization:"strip-canary-crlf-bom.v1", runtime_validation_mode:"static-preflight", runtime_status_semantics:"pass=runtime validator confirmed; fail=proven blocker; unknown=runtime loader not executed"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], entries:[], runtime_load_blockers:[], name_collisions:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
@@ -703,6 +941,7 @@ main() {
     all_data=$(echo "$all_data" | jq '
         def is_backup_or_archive:
             (.dir_name | test("\\.backup\\.|\\.disabled|\\.tmp|\\.old|\\.archive"));
+        .entries = (.skills + .skill_links + .broken_symlinks) |
         .runtime_load_blockers = (
             .skills + .skill_links
             | unique_by(.canonical_skill_file)
