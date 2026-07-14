@@ -233,6 +233,23 @@ NODE
 
     boundary_transaction="sha256:$(printf '1%.0s' {1..64})"
     run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" \
+        HOME="$boundary_home" "$LAUNCHER" cleanup status "$boundary_transaction" --json
+    assert_eq "non-macOS valid status exits unsupported" "3" "$RUN_STATUS"
+    assert_eq "non-macOS status emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+    assert_eq "non-macOS status uses cleanup error schema" "skills-refiner.cleanup.error.v1" \
+        "$(jq -r '.schema_version' "$stdout_file")"
+    assert_eq "non-macOS status uses exact error keys" \
+        "committed_transaction_ids,error_code,mutation_occurred,mutation_outcome,overall_status,schema_version,status,transaction_has_mutated" \
+        "$(jq -r 'keys | sort | join(",")' "$stdout_file")"
+    assert_eq "non-macOS status reaches platform guard" "unsupported_platform" \
+        "$(jq -r '.error_code' "$stdout_file")"
+    assert_eq "non-macOS status reports exact unsupported mutation truth" \
+        "unsupported:unsupported:false:unchanged:false:0" \
+        "$(jq -r '[.status,.overall_status,.mutation_occurred,.mutation_outcome,.transaction_has_mutated,(.committed_transaction_ids | length)] | join(":")' "$stdout_file")"
+    assert_eq "non-macOS status creates no transaction" "false" \
+        "$([ -e "$boundary_home/.agents/skills-refiner/cleanup/transactions" ] && echo true || echo false)"
+
+    run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" \
         HOME="$boundary_home" "$LAUNCHER" cleanup undo "$boundary_transaction" \
         --confirm "$boundary_transaction" --json
     assert_eq "non-macOS valid undo exits unsupported" "3" "$RUN_STATUS"
