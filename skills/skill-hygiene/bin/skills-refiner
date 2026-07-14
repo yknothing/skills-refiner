@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -o pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NODE_BIN="${SKILLS_REFINER_NODE_BIN:-node}"
+JSON_REQUESTED=false
+for arg in "$@"; do
+    [ "$arg" = "--json" ] && JSON_REQUESTED=true
+done
+
+bootstrap_error() {
+    if $JSON_REQUESTED; then
+        printf '%s\n' '{"schema_version":"skills-refiner.cleanup.error.v1","status":"unsupported","overall_status":"unsupported","error_code":"node_runtime_unavailable","mutation_occurred":false,"committed_transaction_ids":[]}'
+    fi
+    echo "[ERROR] cleanup requires Node.js major 24" >&2
+    exit 3
+}
+
+if ! command -v "$NODE_BIN" >/dev/null 2>&1; then
+    bootstrap_error
+fi
+
+NODE_MAJOR="$("$NODE_BIN" -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null)" || bootstrap_error
+if ! [[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] || [ "$NODE_MAJOR" -ne 24 ]; then
+    bootstrap_error
+fi
+
+exec "$NODE_BIN" "$SCRIPT_DIR/../lib/cleanup-cli.mjs" "$@"

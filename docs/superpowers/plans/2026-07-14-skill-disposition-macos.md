@@ -244,7 +244,7 @@ and aligned implementation-plan contract.
 - Create: `skills/skill-hygiene/tests/test-cleanup-cli.sh`
 - Modify: `.gitattributes`
 
-- [ ] **Step 1: Write failing contract tests**
+- [x] **Step 1: Write failing contract tests**
 
 Use `node:test` and real serialized JSON. Cover:
 
@@ -283,7 +283,7 @@ bash skills/skill-hygiene/tests/test-cleanup-cli.sh
 Expected: failing imports because the launcher and contract modules do not yet
 exist.
 
-- [ ] **Step 2: Add the LF-only launcher**
+- [x] **Step 2: Add the LF-only launcher**
 
 Add these `.gitattributes` rules:
 
@@ -327,7 +327,7 @@ exec "$NODE_BIN" "$SCRIPT_DIR/../lib/cleanup-cli.mjs" "$@"
 
 Include `--help` and `-h`. Do not use `eval`, shell-built JSON, or profile edits.
 
-- [ ] **Step 3: Implement strict schema and hash primitives**
+- [x] **Step 3: Implement strict schema and hash primitives**
 
 Export frozen constants, `canonicalJson`, `sha256Json`, and validators from
 `cleanup-contract.mjs`. Validators must whitelist object keys, require exact
@@ -348,7 +348,7 @@ accepted. After calculating the plan hash, derive each transaction ID from
 `sha256Json({ plan_hash, item_id })`; the validator recomputes it, avoiding a
 circular hash input while keeping retry IDs stable.
 
-- [ ] **Step 4: Implement the read-only CLI skeleton**
+- [x] **Step 4: Implement the read-only CLI skeleton**
 
 Parse argv without a third-party library. Route only documented commands.
 Return one result object through one presenter. Dependency injection must keep
@@ -366,7 +366,7 @@ to stderr, and set `process.exitCode`. In machine mode, every failure emits one
 `overall_status`, and any committed transaction IDs. Do not print a second JSON
 object from an error handler.
 
-- [ ] **Step 5: Make contract tests pass**
+- [x] **Step 5: Make contract tests pass**
 
 Run:
 
@@ -380,16 +380,17 @@ git diff --check
 
 Expected: all tests pass; static checks and whitespace checks are silent.
 
-- [ ] **Step 6: Commit the public contract batch**
+- [x] **Step 6: Commit the public contract batch**
 
 ```bash
 test -z "$(git diff --cached --name-only)"
-git add .gitattributes skills/skill-hygiene/bin/skills-refiner skills/skill-hygiene/lib/cleanup-contract.mjs skills/skill-hygiene/lib/cleanup-cli.mjs skills/skill-hygiene/tests/test-cleanup-contract.mjs skills/skill-hygiene/tests/test-cleanup-cli.sh
+git add .gitattributes docs/superpowers/plans/2026-07-14-skill-disposition-macos.md skills/skill-hygiene/bin/skills-refiner skills/skill-hygiene/lib/cleanup-contract.mjs skills/skill-hygiene/lib/cleanup-cli.mjs skills/skill-hygiene/tests/test-cleanup-contract.mjs skills/skill-hygiene/tests/test-cleanup-cli.sh
 git diff --cached --check
 git commit -m "feat(cleanup): establish CLI and JSON contracts"
 ```
 
-Expected: one commit with the launcher, contract, CLI skeleton, and their tests.
+Expected: one commit with the launcher, contract, CLI skeleton, their tests,
+and the aligned execution checklist.
 
 ## Task 3: Compile conservative candidates and immutable plans
 
