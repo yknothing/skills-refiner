@@ -245,6 +245,7 @@ run_tests() {
     assert_eq "Pipe-to-shell flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "pipe_to_shell")] | length')"
     assert_eq "Dangerous command flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "dangerous_cmd")] | length')"
     assert_eq "Project repo skill excluded from global scan" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "project-skill")] | length')"
+    assert_eq "BOM/CRLF frontmatter name is observed directly" "bom-crlf-skill" "$(echo "$json_output" | jq -r '.skills[] | select(.dir_name == "bom-crlf-skill") | .frontmatter.name')"
     assert_eq "BOM/CRLF static preflight remains unknown" "unknown" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.status')"
     assert_eq "BOM/CRLF static preflight does not claim loadable" "true" "$(echo "$json_output" | jq '.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.loadable == null')"
     assert_eq "BOM/CRLF frontmatter has no missing field blockers" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.load_blockers[]? | select(. == "missing_name" or . == "missing_description")] | length')"

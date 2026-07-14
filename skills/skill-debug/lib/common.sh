@@ -451,7 +451,7 @@ sr_strip_trace_blocks() {
 
 sr_get_frontmatter_field() {
     local file="$1" key="$2"
-    awk -v key="$key" '
+    LC_ALL=C awk -v key="$key" '
         function top_key(line, raw, first, last) {
             if (line ~ /^[[:space:]]/ || line !~ /:/) return ""
             raw=line
@@ -484,7 +484,7 @@ sr_get_frontmatter_field() {
 
 sr_get_frontmatter_text() {
     local file="$1" key="$2"
-    awk -v key="$key" '
+    LC_ALL=C awk -v key="$key" '
         function top_key(line, raw, first, last) {
             if (line ~ /^[[:space:]]/ || line !~ /:/) return ""
             raw=line
@@ -526,7 +526,7 @@ sr_get_frontmatter_text() {
 
 sr_get_metadata_value() {
     local file="$1" key="$2"
-    awk -v key="$key" '
+    LC_ALL=C awk -v key="$key" '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -547,7 +547,7 @@ sr_get_metadata_value() {
 
 sr_frontmatter_keys_json() {
     local file="$1"
-    awk '
+    LC_ALL=C awk '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -565,7 +565,7 @@ sr_frontmatter_keys_json() {
 
 sr_frontmatter_list_json() {
     local file="$1" key="$2"
-    awk -v key="$key" '
+    LC_ALL=C awk -v key="$key" '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -604,7 +604,7 @@ sr_frontmatter_list_json() {
 
 sr_hook_events_json() {
     local file="$1"
-    awk '
+    LC_ALL=C awk '
         {
             line=$0
             sub(/\r$/, "", line)
