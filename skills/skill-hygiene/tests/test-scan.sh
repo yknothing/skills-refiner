@@ -403,6 +403,56 @@ EOF
     cp "$receipt_backup" "$receipt_file"
     echo ""
 
+    echo -e "${BOLD}── GNU stat Receipt Compatibility ──${NC}"
+    local gnu_stat_bin gnu_stat_json host_stat_family
+    gnu_stat_bin="$SANDBOX/gnu-stat-bin"
+    mkdir -p "$gnu_stat_bin"
+    if "$real_stat" -c '%u' "$receipt_file" >/dev/null 2>&1; then
+        host_stat_family=gnu
+    else
+        host_stat_family=bsd
+    fi
+    cat > "$gnu_stat_bin/stat" << EOF
+#!/usr/bin/env bash
+if [ "$host_stat_family" = "gnu" ]; then
+    exec "$real_stat" "\$@"
+fi
+if [ "\${1:-}" = "-f" ]; then
+    printf 'gnu-filesystem-report-for-valid-second-operand\\n'
+    exit 1
+fi
+if [ "\${1:-}" = "-L" ] && [ "\${2:-}" = "-c" ]; then
+    case "\${3:-}" in
+        %i) exec "$real_stat" -L -f '%i' "\${4:-}" ;;
+    esac
+fi
+if [ "\${1:-}" = "-c" ]; then
+    case "\${2:-}" in
+        %Y) exec "$real_stat" -f '%m' "\${3:-}" ;;
+        %u) exec "$real_stat" -f '%u' "\${3:-}" ;;
+        %s) exec "$real_stat" -f '%z' "\${3:-}" ;;
+        %a) exec "$real_stat" -f '%Lp' "\${3:-}" ;;
+        %i)
+            case "\${3:-}" in
+                /dev/fd/*) printf '999999999\\n'; exit 0 ;;
+            esac
+            exec "$real_stat" -f '%i' "\${3:-}"
+            ;;
+    esac
+fi
+exec "$real_stat" "\$@"
+EOF
+    chmod +x "$gnu_stat_bin/stat"
+    gnu_stat_json=$(PATH="$gnu_stat_bin:$PATH" HOME="$SANDBOX" \
+        bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "GNU stat receipt provenance survives failed BSD probe output" \
+        "installed_copy:direct" \
+        "$(echo "$gnu_stat_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | [.mutation_provenance.kind, .mutation_provenance.confidence] | join(":")')"
+    assert_eq "GNU stat receipt evidence survives /dev/fd no-dereference" \
+        "true:true" \
+        "$(echo "$gnu_stat_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | (.mutation_provenance.evidence // {}) as $e | [($e.receipt_sha256 // "" | test("^[0-9a-f]{64}$")), ($e.installed_tree_sha1 // "" | test("^[0-9a-f]{40}$"))] | map(tostring) | join(":")')"
+    echo ""
+
     echo -e "${BOLD}── Provenance and Version Facts ──${NC}"
     assert_eq "Content hash collected" "64" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".agents/skills" and .name == "healthy-skill") | .normalized_content_sha256 | length')"
     assert_eq "Metadata version remains auxiliary fact" "2.0.0" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .declared_version')"

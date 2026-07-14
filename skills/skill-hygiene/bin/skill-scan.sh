@@ -312,23 +312,58 @@ canonical_dir_for_entry() {
 }
 
 stat_owner_uid() {
-    local path="$1"
-    stat -f '%u' "$path" 2>/dev/null || stat -c '%u' "$path" 2>/dev/null
+    local path="$1" result
+    if result=$(stat -c '%u' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -f '%u' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
 }
 
 stat_size_bytes() {
-    local path="$1"
-    stat -f '%z' "$path" 2>/dev/null || stat -c '%s' "$path" 2>/dev/null
+    local path="$1" result
+    if result=$(stat -c '%s' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -f '%z' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
 }
 
 stat_inode() {
-    local path="$1"
-    stat -f '%i' "$path" 2>/dev/null || stat -c '%i' "$path" 2>/dev/null
+    local path="$1" result
+    if result=$(stat -c '%i' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -f '%i' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
+}
+
+stat_inode_follow() {
+    local path="$1" result
+    if result=$(stat -L -c '%i' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -L -f '%i' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
 }
 
 stat_mode_bits() {
-    local path="$1"
-    stat -f '%Lp' "$path" 2>/dev/null || stat -c '%a' "$path" 2>/dev/null
+    local path="$1" result
+    if result=$(stat -c '%a' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    elif result=$(stat -f '%Lp' "$path" 2>/dev/null); then
+        printf '%s\n' "$result"
+    else
+        return 1
+    fi
 }
 
 cleanup_provenance_git_tmp() {
@@ -390,7 +425,7 @@ snapshot_install_receipt() {
     exec 9< "$receipt_file" || return 1
 
     path_inode=$(stat_inode "$receipt_file" 2>/dev/null || true)
-    fd_inode=$(stat_inode /dev/fd/9 2>/dev/null || true)
+    fd_inode=$(stat_inode_follow /dev/fd/9 2>/dev/null || true)
     receipt_owner=$(stat_owner_uid "$receipt_file" 2>/dev/null || true)
     receipt_size=$(stat_size_bytes "$receipt_file" 2>/dev/null || true)
     receipt_mode=$(stat_mode_bits "$receipt_file" 2>/dev/null || true)
