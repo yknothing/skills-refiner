@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
+  buildApplyReport,
   canonicalJson,
   ContractError,
   SCHEMAS,
@@ -18,6 +19,9 @@ import {
   compilePlan,
   compileReview,
   overlayPersistedKeeps,
+  preApplyStatusAllowsBaseline,
+  reconcilePostApplyScan,
+  semanticIdentityHashForEntry,
   validateKeepStore,
 } from './cleanup-core.mjs';
 import {
@@ -208,7 +212,8 @@ function probeKeepState(home = process.env.HOME) {
 }
 
 async function compileLiveReview() {
-  const review = compileReview(runInstalledScanner(), {
+  const scan = runInstalledScanner();
+  const review = compileReview(scan, {
     executionEligible: true,
     source: 'live_scan',
   });
@@ -371,7 +376,13 @@ async function runPlan(args) {
 }
 
 async function runApply(args) {
-  rejectUnknownOptions(args, new Set(['--plan', '--confirm']));
+  const postScanIndexes = args
+    .map((argument, index) => (argument === '--post-scan' ? index : -1))
+    .filter((index) => index >= 0);
+  if (postScanIndexes.length > 1) invalid();
+  const postScanRequested = postScanIndexes.length === 1;
+  const valueArgs = args.filter((argument) => argument !== '--post-scan');
+  rejectUnknownOptions(valueArgs, new Set(['--plan', '--confirm']));
   const planPath = parseNamedFileOption(args, '--plan');
   if (!planPath) invalid();
   const plan = readJsonFile(planPath);
@@ -388,13 +399,234 @@ async function runApply(args) {
   if (process.platform !== 'darwin') {
     unsupported('platform_adapter_unavailable', '[ERROR] No certified mutation adapter is available on this platform.');
   }
+  let baselineByTransactionId = new Map();
+  let baselineIdentityUnavailableTransactionIds = new Set();
+  if (postScanRequested) {
+    const eligibleBaselineTransactions = preApplyBaselineTransactions(plan);
+    const baselineScan = tryInstalledScanner();
+    if (baselineScan.available) {
+      ({
+        hashes: baselineByTransactionId,
+        unavailable: baselineIdentityUnavailableTransactionIds,
+      } = semanticBaselines(baselineScan.scan, plan, eligibleBaselineTransactions));
+    } else {
+      baselineIdentityUnavailableTransactionIds = new Set(eligibleBaselineTransactions);
+    }
+  }
   const apply = plan.items.length > 1 ? applyPlan : applyItem;
-  return apply({
-    home: process.env.HOME,
-    plan,
-    confirmation,
-    fault: transactionFaultCallback(),
-  });
+  try {
+    const applyOutcome = await apply({
+      home: process.env.HOME,
+      plan,
+      confirmation,
+      fault: transactionFaultCallback(),
+    });
+    if (!postScanRequested) return applyOutcome;
+    return await postScanApplyReport(
+      plan,
+      baselineByTransactionId,
+      baselineIdentityUnavailableTransactionIds,
+      applyOutcome,
+    );
+  } catch (error) {
+    if (postScanRequested && error instanceof CleanupBatchError
+        && error.batchError?.committed_transaction_ids?.length > 0) {
+      error.applyReport = await postScanApplyReport(
+        plan,
+        baselineByTransactionId,
+        baselineIdentityUnavailableTransactionIds,
+        error.batchError,
+      );
+    }
+    throw error;
+  }
+}
+
+function tryInstalledScanner() {
+  try {
+    return { available: true, scan: runInstalledScanner(), errorCode: null };
+  } catch (error) {
+    const invalidScanner = error instanceof CliError
+      && ['invalid_document', 'invalid_schema'].includes(error.errorCode);
+    return {
+      available: false,
+      scan: null,
+      errorCode: invalidScanner ? 'scanner_invalid' : 'scanner_unavailable',
+    };
+  }
+}
+
+function preApplyBaselineTransactions(plan) {
+  const eligible = new Set();
+  for (const item of plan.items) {
+    let preStatus;
+    try {
+      const status = statusTransaction({
+        home: process.env.HOME,
+        transactionId: item.transaction_id,
+      });
+      preStatus = {
+        ok: true,
+        state: status.state,
+        location: status.location,
+        transaction_has_mutated: status.transaction_has_mutated,
+      };
+    } catch (error) {
+      preStatus = {
+        ok: false,
+        error_code: error instanceof CleanupTransactionError
+          ? error.code
+          : 'status_unavailable',
+      };
+    }
+    if (preApplyStatusAllowsBaseline(preStatus)) eligible.add(item.transaction_id);
+  }
+  return eligible;
+}
+
+function semanticBaselines(scan, plan, eligibleTransactions) {
+  const hashes = new Map();
+  const unavailable = new Set();
+  let candidatesByPath;
+  try {
+    const review = compileReview(scan, { executionEligible: false, source: 'post_scan_baseline' });
+    candidatesByPath = new Map(review.candidates.map((candidate) => [
+      candidate.entry_path,
+      candidate,
+    ]));
+  } catch {
+    for (const transactionId of eligibleTransactions) unavailable.add(transactionId);
+    return { hashes, unavailable };
+  }
+  for (const item of plan.items) {
+    if (!eligibleTransactions.has(item.transaction_id)) continue;
+    const matches = scan.entries.filter(({ entry_path: entryPath }) => (
+      entryPath === item.entry_path
+    ));
+    if (matches.length !== 1) continue;
+    const candidate = candidatesByPath.get(item.entry_path);
+    if (candidate?.candidate_fingerprint !== item.preconditions.candidate_fingerprint) continue;
+    try {
+      hashes.set(
+        item.transaction_id,
+        semanticIdentityHashForEntry(matches[0]),
+      );
+    } catch {
+      unavailable.add(item.transaction_id);
+    }
+  }
+  return { hashes, unavailable };
+}
+
+function unavailablePostScan(
+  plan,
+  committedTransactionIds,
+  baselineByTransactionId,
+  errorCode,
+) {
+  const planItems = new Map(plan.items.map((item) => [item.transaction_id, item]));
+  return {
+    schema_version: SCHEMAS.postScan,
+    observation_status: 'UNAVAILABLE',
+    scanner_schema: null,
+    error_code: errorCode,
+    items: committedTransactionIds.map((transactionId) => {
+      const item = planItems.get(transactionId);
+      return {
+        item_id: item.item_id,
+        transaction_id: transactionId,
+        entry_path: item.entry_path,
+        status: 'INDETERMINATE',
+        location: 'unknown',
+        baseline_identity_hash: baselineByTransactionId.get(transactionId) ?? null,
+        observed_identity_hash: null,
+      };
+    }),
+    warnings: ['installer_may_redeploy', 'running_agent_may_cache'],
+  };
+}
+
+async function postScanApplyReport(
+  plan,
+  baselineByTransactionId,
+  baselineIdentityUnavailableTransactionIds,
+  applyOutcome,
+) {
+  const committedTransactionIds = applyOutcome.committed_transaction_ids;
+  const effectiveBaselines = applyOutcome.status === 'already_committed'
+    ? new Map()
+    : baselineByTransactionId;
+  const effectiveUnavailable = applyOutcome.status === 'already_committed'
+    ? new Set()
+    : baselineIdentityUnavailableTransactionIds;
+  let postScan;
+  try {
+    const adapter = createMacosAdapter({ home: process.env.HOME });
+    const planItems = new Map(plan.items.map((item) => [item.transaction_id, item]));
+    const nativeIdentityBeforeByTransactionId = new Map();
+    for (const transactionId of committedTransactionIds) {
+      nativeIdentityBeforeByTransactionId.set(
+        transactionId,
+        await inspectPostApplyIdentity(adapter, planItems.get(transactionId)),
+      );
+    }
+    const scanned = tryInstalledScanner();
+    const statusByTransactionId = new Map();
+    const nativeIdentityAfterByTransactionId = new Map();
+    if (scanned.available) {
+      for (const transactionId of committedTransactionIds) {
+        try {
+          const status = statusTransaction({ home: process.env.HOME, transactionId });
+          statusByTransactionId.set(transactionId, { ok: true, location: status.location });
+        } catch {
+          statusByTransactionId.set(transactionId, { ok: false, location: null });
+        }
+        const planItem = planItems.get(transactionId);
+        nativeIdentityAfterByTransactionId.set(
+          transactionId,
+          await inspectPostApplyIdentity(adapter, planItem),
+        );
+      }
+    }
+    postScan = reconcilePostApplyScan({
+      plan,
+      committedTransactionIds,
+      baselineByTransactionId: effectiveBaselines,
+      baselineIdentityUnavailableTransactionIds: effectiveUnavailable,
+      scan: scanned.scan,
+      scanAvailable: scanned.available,
+      scanErrorCode: scanned.errorCode ?? 'scanner_unavailable',
+      statusByTransactionId,
+      nativeIdentityBeforeByTransactionId,
+      nativeIdentityAfterByTransactionId,
+    });
+  } catch {
+    postScan = unavailablePostScan(
+      plan,
+      committedTransactionIds,
+      effectiveBaselines,
+      'post_scan_internal_error',
+    );
+  }
+  return buildApplyReport({ applyOutcome, postScan, plan });
+}
+
+async function inspectPostApplyIdentity(adapter, planItem) {
+  try {
+    const identity = await adapter.inspectIdentity(
+      planItem.entry_path,
+      planItem.active_root,
+      {
+        entry_kind: planItem.entry_kind,
+        entry_identity: {
+          raw_link_target_base64: planItem.execution_identity.raw_link_target_base64,
+        },
+      },
+    );
+    return { ok: true, identity };
+  } catch {
+    return { ok: false, identity: null };
+  }
 }
 
 function parseTransactionArguments(args, { allowConfirmation = false } = {}) {
@@ -641,6 +873,17 @@ function printInspection(candidate) {
   process.stdout.write(`Uncertainty: ${terminalList(candidate.uncertainty)}\n`);
 }
 
+function printPostScanVerification(postScan) {
+  const statuses = [...new Set(postScan.items.map(({ status }) => status))].join(', ');
+  process.stdout.write(`Post-scan verification: ${postScan.observation_status} (${statuses}).\n`);
+  if (postScan.warnings.includes('automatic_requarantine_disabled')) {
+    process.stdout.write('Warning: an installer may have redeployed a retired skill; cleanup did not delete it again.\n');
+  } else {
+    process.stdout.write('Installers can redeploy retired skills; rerun review if an entry reappears.\n');
+  }
+  process.stdout.write('Running Agents may retain cached skill state until they are restarted.\n');
+}
+
 async function persistGuidedKeepDecisions(review, decisions, adapter) {
   try {
     return await persistKeepDecisions(review, decisions, adapter);
@@ -749,17 +992,49 @@ async function runGuidedCleanup(args) {
     if (keepCount > 0 || live.keepState?.available === true) {
       await persistGuidedKeepDecisions(review, decisions, live.adapter);
     }
+    const eligibleBaselineTransactions = preApplyBaselineTransactions(plan);
+    const baselineScan = tryInstalledScanner();
+    const baselines = baselineScan.available
+      ? semanticBaselines(baselineScan.scan, plan, eligibleBaselineTransactions)
+      : {
+        hashes: new Map(),
+        unavailable: new Set(eligibleBaselineTransactions),
+      };
     const apply = plan.items.length > 1 ? applyPlan : applyItem;
-    await apply({
-      home: process.env.HOME,
+    let applyOutcome;
+    try {
+      applyOutcome = await apply({
+        home: process.env.HOME,
+        plan,
+        confirmation: plan.plan_hash,
+        fault: transactionFaultCallback(),
+      });
+    } catch (error) {
+      if (error instanceof CleanupBatchError
+          && error.batchError?.committed_transaction_ids?.length > 0) {
+        const report = await postScanApplyReport(
+          plan,
+          baselines.hashes,
+          baselines.unavailable,
+          error.batchError,
+        );
+        const committed = error.batchError.committed_transaction_ids.length;
+        process.stdout.write(`Retired ${committed} entr${committed === 1 ? 'y' : 'ies'} before cleanup stopped.\n`);
+        printPostScanVerification(report.post_scan);
+      }
+      throw error;
+    }
+    const report = await postScanApplyReport(
       plan,
-      confirmation: plan.plan_hash,
-      fault: transactionFaultCallback(),
-    });
+      baselines.hashes,
+      baselines.unavailable,
+      applyOutcome,
+    );
     process.stdout.write(`Retired ${retireCount} entr${retireCount === 1 ? 'y' : 'ies'}.\n`);
     if (keepCount > 0) {
       process.stdout.write(`Saved ${keepCount} Keep decision${keepCount === 1 ? '' : 's'}.\n`);
     }
+    printPostScanVerification(report.post_scan);
     return { kind: 'text', text: '' };
   } finally {
     prompter.close();
@@ -773,7 +1048,7 @@ function helpText() {
     'Usage:',
     '  skills-refiner cleanup review [--scan FILE] [--json]',
     '  skills-refiner cleanup plan --review FILE --decisions FILE [--persist-keep] [--json]',
-    '  skills-refiner cleanup apply --plan FILE --confirm HASH [--json]',
+    '  skills-refiner cleanup apply --plan FILE --confirm HASH [--post-scan] [--json]',
     '  skills-refiner cleanup status TRANSACTION_ID [--json]',
     '  skills-refiner cleanup undo TRANSACTION_ID --confirm TRANSACTION_ID [--json]',
     '  skills-refiner cleanup --help',
@@ -877,7 +1152,12 @@ try {
       recovery_required: 20,
       conflict: 21,
     }[error.status] ?? 20;
-    if (JSON_REQUESTED && error.batchError !== undefined) {
+    if (error.applyReport !== undefined) {
+      process.stdout.write(`${JSON.stringify(error.applyReport)}\n`);
+      process.stderr.write('[ERROR] Cleanup batch safety checks did not converge.\n');
+      process.exitCode = exitCode;
+      mapped = null;
+    } else if (JSON_REQUESTED && error.batchError !== undefined) {
       process.stdout.write(`${JSON.stringify(error.batchError)}\n`);
       process.stderr.write('[ERROR] Cleanup batch safety checks did not converge.\n');
       process.exitCode = exitCode;

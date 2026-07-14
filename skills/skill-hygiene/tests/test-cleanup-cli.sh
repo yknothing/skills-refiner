@@ -150,6 +150,9 @@ run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_B
     "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$plan_hash" --json
 assert_eq "single-item apply commits" "0" "$RUN_STATUS"
 assert_eq "apply status is committed" "committed" "$(jq -r '.status' "$stdout_file")"
+assert_eq "legacy apply keeps its exact transaction v1 keys" \
+    "command,committed_transaction_ids,location,mutation_occurred,mutation_outcome,overall_status,schema_version,state,status,transaction_has_mutated,transaction_id" \
+    "$(jq -r 'keys | sort | join(",")' "$stdout_file")"
 assert_eq "apply reports current mutation" "true" "$(jq -r '.mutation_occurred' "$stdout_file")"
 assert_eq "apply removes active link" "false" "$([ -e "$SANDBOX/home/.claude/skills/source-skill" ] || [ -L "$SANDBOX/home/.claude/skills/source-skill" ] && echo true || echo false)"
 
@@ -204,6 +207,72 @@ run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_B
 assert_eq "offline review exits cleanly" "0" "$RUN_STATUS"
 assert_eq "offline review cannot execute" "false" "$(jq -r '.execution_eligible' "$stdout_file")"
 assert_eq "offline review has no executable plan" "null" "$(jq -r '.executable_plan' "$stdout_file")"
+
+post_scan_home="$SANDBOX/post-scan-home"
+mkdir -p "$post_scan_home/.claude/skills"
+ln -s "$SANDBOX/source-one" "$post_scan_home/.claude/skills/source-skill"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$post_scan_home" \
+    "$LAUNCHER" cleanup review --json
+cp "$stdout_file" "$review_file"
+jq '{schema_version:"skills-refiner.cleanup.decisions.v1",review_fingerprint:.review_fingerprint,decisions:[.candidates[]|{candidate_id,action:"retire"}]}' \
+    "$review_file" >"$decisions_file"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$post_scan_home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
+cp "$stdout_file" "$plan_file"
+post_scan_hash=$(jq -r '.plan_hash' "$plan_file")
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$post_scan_home" \
+    "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$post_scan_hash" --post-scan --json
+assert_eq "post-scan apply exits cleanly" "0" "$RUN_STATUS"
+assert_eq "post-scan apply emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+assert_eq "post-scan apply uses exact wrapper" "skills-refiner.cleanup.apply-report.v1" "$(jq -r '.schema_version' "$stdout_file")"
+assert_eq "post-scan wrapper preserves transaction outcome" "skills-refiner.cleanup.transaction.v1" "$(jq -r '.apply_outcome.schema_version' "$stdout_file")"
+assert_eq "post-scan document uses exact Agent keys" \
+    "error_code,items,observation_status,scanner_schema,schema_version,warnings" \
+    "$(jq -r '.post_scan | keys | sort | join(",")' "$stdout_file")"
+assert_eq "post-scan item uses exact identity keys" \
+    "baseline_identity_hash,entry_path,item_id,location,observed_identity_hash,status,transaction_id" \
+    "$(jq -r '.post_scan.items[0] | keys | sort | join(",")' "$stdout_file")"
+assert_eq "post-scan observation completes" "COMPLETE" "$(jq -r '.post_scan.observation_status' "$stdout_file")"
+assert_eq "post-scan confirms absent committed entry" "QUARANTINED" "$(jq -r '.post_scan.items[0].status' "$stdout_file")"
+assert_eq "quarantined report has stable base warnings" \
+    'installer_may_redeploy,running_agent_may_cache' \
+    "$(jq -r '.post_scan.warnings | join(",")' "$stdout_file")"
+assert_eq "post-scan report exposes hashes but no semantic source object" "false" "$(jq 'has("semantic_identity") or (.post_scan.items[0] | has("semantic_identity"))' "$stdout_file")"
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$post_scan_home" \
+    "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$post_scan_hash" --post-scan --json
+assert_eq "already-committed post-scan retry exits cleanly" "0" "$RUN_STATUS"
+assert_eq "already-committed outcome remains unchanged" "already_committed" "$(jq -r '.apply_outcome.status' "$stdout_file")"
+assert_eq "already-committed retry never invents a current baseline" "null" "$(jq -r '.post_scan.items[0].baseline_identity_hash' "$stdout_file")"
+assert_eq "already-committed absent entry remains quarantined" "QUARANTINED" "$(jq -r '.post_scan.items[0].status' "$stdout_file")"
+
+rehydrated_home="$SANDBOX/rehydrated-home"
+mkdir -p "$rehydrated_home/.claude/skills"
+ln -s "$SANDBOX/source-one" "$rehydrated_home/.claude/skills/source-skill"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$rehydrated_home" \
+    "$LAUNCHER" cleanup review --json
+cp "$stdout_file" "$review_file"
+jq '{schema_version:"skills-refiner.cleanup.decisions.v1",review_fingerprint:.review_fingerprint,decisions:[.candidates[]|{candidate_id,action:"retire"}]}' \
+    "$review_file" >"$decisions_file"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$rehydrated_home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
+cp "$stdout_file" "$plan_file"
+rehydrated_hash=$(jq -r '.plan_hash' "$plan_file")
+rehydrated_transaction_key=$(jq -r '.items[0].transaction_id | sub("^sha256:"; "")' "$plan_file")
+(
+    while [ -L "$rehydrated_home/.claude/skills/source-skill" ]; do :; done
+    ln -s "$SANDBOX/source-one" "$rehydrated_home/.claude/skills/source-skill"
+) &
+redeployer_pid=$!
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$rehydrated_home" \
+    "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$rehydrated_hash" --post-scan --json
+wait "$redeployer_pid"
+assert_eq "same semantic redeploy remains a successful apply" "0" "$RUN_STATUS"
+assert_eq "stable same-semantic redeploy is explicitly rehydrated" "REHYDRATED" "$(jq -r '.post_scan.items[0].status' "$stdout_file")"
+assert_eq "semantic comparison remains hash-equal" "true" "$(jq '.post_scan.items[0] | .baseline_identity_hash == .observed_identity_hash' "$stdout_file")"
+assert_eq "rehydrated report disables automatic requarantine" "automatic_requarantine_disabled" "$(jq -r '.post_scan.warnings[-1]' "$stdout_file")"
+assert_eq "rehydrated entry is never automatically quarantined again" "true" "$([ -L "$rehydrated_home/.claude/skills/source-skill" ] && echo true || echo false)"
+assert_eq "rehydrated flow retains exactly the original quarantine payload" "1" "$(find "$rehydrated_home/.agents/skills-quarantine/transactions/$rehydrated_transaction_key/payload" -type l | wc -l | tr -d ' ')"
 
 set +e
 printf '' | env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" "$LAUNCHER" cleanup >"$stdout_file" 2>"$stderr_file"
@@ -502,6 +571,9 @@ expect -re {Type (apply [0-9a-f]{12}) to retire}
 set confirmation \$expect_out(1,string)
 send "\$confirmation\r"
 expect "Retired 1 entry"
+expect "Post-scan verification: COMPLETE (QUARANTINED)"
+expect "Installers can redeploy retired skills"
+expect "Running Agents may retain cached skill state"
 expect eof
 lassign [wait] pid spawnid os_error status
 exit \$status
@@ -552,7 +624,7 @@ assert_eq "Keep persistence failure blocks Retire" "10" "$RUN_STATUS"
 assert_eq "Keep gate failure preserves retire target" "true" "$([ -L "$gate_home/.claude/skills/gate-retire" ] && echo true || echo false)"
 assert_eq "Keep gate failure creates no transaction" "false" "$([ -e "$gate_home/.agents/skills-refiner/cleanup/transactions" ] && echo true || echo false)"
 
-partial_home="$SANDBOX/partial-home"
+partial_home="$SANDBOX/p"
 partial_safe_source="$SANDBOX/partial-safe-source"
 partial_fail_source="$SANDBOX/partial-fail-source"
 partial_retire_source="$SANDBOX/partial-retire-source"
@@ -646,6 +718,49 @@ run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_B
 assert_eq "batch preflight drift exits blocked" "10" "$RUN_STATUS"
 assert_eq "batch failure emits exact batch error" "skills-refiner.cleanup.batch-error.v1" "$(jq -r '.schema_version' "$stdout_file")"
 assert_eq "batch preflight drift mutates no active entry" "2" "$(find "$drift_home/.claude/skills" -type l | wc -l | tr -d ' ')"
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$drift_home" "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$batch_hash" --post-scan --json
+assert_eq "zero-commit post-scan error preserves original exit" "10" "$RUN_STATUS"
+assert_eq "zero-commit post-scan error is not wrapped" "skills-refiner.cleanup.batch-error.v1" "$(jq -r '.schema_version' "$stdout_file")"
+
+partial_home="$SANDBOX/partial-home"
+partial_source_one="$SANDBOX/partial-source-one"
+partial_source_two="$SANDBOX/partial-source-two"
+mkdir -p "$partial_home/.claude/skills" "$partial_source_one" "$partial_source_two"
+chmod 755 "$partial_home" "$partial_home/.claude" "$partial_home/.claude/skills"
+cp "$guided_source/SKILL.md" "$partial_source_one/SKILL.md"
+sed 's/guided-skill/guided-skill-two/' "$guided_source/SKILL.md" >"$partial_source_two/SKILL.md"
+ln -s "$partial_source_one" "$partial_home/.claude/skills/guided-skill"
+ln -s "$partial_source_two" "$partial_home/.claude/skills/guided-skill-two"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$partial_home" "$LAUNCHER" cleanup review --json
+cp "$stdout_file" "$review_file"
+jq '{schema_version:"skills-refiner.cleanup.decisions.v1",review_fingerprint:.review_fingerprint,decisions:[.candidates[]|{candidate_id,action:"retire"}]}' "$review_file" >"$decisions_file"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$partial_home" "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
+cp "$stdout_file" "$plan_file"
+assert_eq "partial wrapper fixture plan exits cleanly" "0" "$RUN_STATUS"
+assert_eq "partial wrapper fixture has two items" "2" "$(jq '.items | length' "$plan_file")"
+assert_eq "partial wrapper fixture has no planning error" "none" "$(jq -r '.error_code // "none"' "$plan_file")"
+if [ "$(jq '.items | length' "$plan_file")" != "2" ]; then
+    assert_eq "all cleanup CLI assertions" "0" "$FAIL"
+    exit 1
+fi
+partial_hash=$(jq -r '.plan_hash' "$plan_file")
+first_entry=$(jq -r '.items[0].entry_path' "$plan_file")
+second_entry=$(jq -r '.items[1].entry_path' "$plan_file")
+(
+    while [ -L "$first_entry" ]; do :; done
+    rm "$second_entry"
+    ln -s "$partial_source_one" "$second_entry"
+) &
+drifter_pid=$!
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$partial_home" "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$partial_hash" --post-scan --json
+wait "$drifter_pid"
+assert_eq "committed-prefix post-scan preserves recovery exit" "20" "$RUN_STATUS"
+assert_eq "committed-prefix post-scan emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+assert_eq "committed-prefix post-scan uses apply wrapper" "skills-refiner.cleanup.apply-report.v1" "$(jq -r '.schema_version' "$stdout_file")"
+assert_eq "committed-prefix wrapper preserves batch error" "skills-refiner.cleanup.batch-error.v1" "$(jq -r '.apply_outcome.schema_version' "$stdout_file")"
+assert_eq "committed-prefix wrapper preserves exact committed IDs" "true" "$(jq '.apply_outcome.committed_transaction_ids == [.post_scan.items[].transaction_id]' "$stdout_file")"
+assert_eq "committed-prefix post-scan verifies only one committed item" "1" "$(jq '.post_scan.items | length' "$stdout_file")"
 
 assert_eq "all cleanup CLI assertions" "0" "$FAIL"
 printf '%s tests passed\n' "$PASS"

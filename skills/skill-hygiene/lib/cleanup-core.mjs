@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { basename } from 'node:path';
+import { basename, dirname, isAbsolute } from 'node:path';
 
 import {
   SCHEMAS,
@@ -9,6 +9,7 @@ import {
   sha256Json,
   validateObservationIdentity,
   validatePlan,
+  validatePostScanReport,
 } from './cleanup-contract.mjs';
 
 export const POLICY_VERSION = 'skill-disposition.v1';
@@ -63,6 +64,277 @@ function validateScan(scan) {
 
 function safeArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+const SAFE_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+const RAW_SHA256 = /^[0-9a-f]{64}$/u;
+const RAW_SHA1 = /^[0-9a-f]{40}$/u;
+const SEMANTIC_ENTRY_KINDS = new Set(['directory', 'symlink', 'broken_symlink']);
+
+function semanticIdentityUnavailable() {
+  fail(
+    'semantic_identity_unavailable',
+    'semantic identity evidence is missing or malformed',
+  );
+}
+
+function semanticString(value, { empty = false } = {}) {
+  if (typeof value !== 'string' || (!empty && value.length === 0)
+      || /[\u0000-\u001f\u007f]/u.test(value)) semanticIdentityUnavailable();
+  return value;
+}
+
+function hasExactKeys(value, allowed, required = allowed) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.every((key) => allowed.includes(key))
+    && required.every((key) => Object.hasOwn(value, key));
+}
+
+function normalizedMutationProvenance(value) {
+  if (!hasExactKeys(value, ['kind', 'confidence', 'evidence'])) {
+    semanticIdentityUnavailable();
+  }
+  const kind = semanticString(value.kind);
+  const confidence = semanticString(value.confidence);
+  if (kind === 'unknown' && confidence === 'none' && value.evidence === null) {
+    return { kind, confidence, evidence: null };
+  }
+  const evidence = value.evidence;
+  if (kind !== 'installed_copy' || confidence !== 'direct'
+      || !hasExactKeys(
+        evidence,
+        ['kind', 'receipt_file', 'receipt_sha256', 'installed_tree_sha1'],
+        ['kind', 'receipt_sha256', 'installed_tree_sha1'],
+      )
+      || evidence.kind !== 'content_bound_installer_receipt'
+      || typeof evidence.receipt_sha256 !== 'string'
+      || !RAW_SHA256.test(evidence.receipt_sha256)
+      || typeof evidence.installed_tree_sha1 !== 'string'
+      || !RAW_SHA1.test(evidence.installed_tree_sha1)
+      || (Object.hasOwn(evidence, 'receipt_file')
+        && (typeof evidence.receipt_file !== 'string'
+          || !isAbsolute(evidence.receipt_file)))) {
+    semanticIdentityUnavailable();
+  }
+  if (Object.hasOwn(evidence, 'receipt_file')) semanticString(evidence.receipt_file);
+  return {
+    kind,
+    confidence,
+    evidence: {
+      kind: evidence.kind,
+      receipt_sha256: evidence.receipt_sha256,
+      installed_tree_sha1: evidence.installed_tree_sha1,
+    },
+  };
+}
+
+function semanticIdentity(entry) {
+  requireObject(entry, 'scan entry must be an object');
+  const entryPath = semanticString(entry.entry_path);
+  const activeRoot = semanticString(entry.active_root);
+  const entryKind = entry.entry_kind;
+  if (!isAbsolute(entryPath) || !isAbsolute(activeRoot) || dirname(entryPath) !== activeRoot
+      || !SEMANTIC_ENTRY_KINDS.has(entryKind)) semanticIdentityUnavailable();
+  const rawTarget = entry.raw_link_target_base64;
+  if ((entryKind === 'directory' && rawTarget !== null)
+      || (entryKind !== 'directory'
+        && (typeof rawTarget !== 'string' || rawTarget.length === 0
+          || !SAFE_BASE64.test(rawTarget)))) semanticIdentityUnavailable();
+  const canonicalTarget = entry.canonical_dir ?? null;
+  if ((entryKind === 'broken_symlink' && canonicalTarget !== null)
+      || (entryKind !== 'broken_symlink'
+        && (typeof canonicalTarget !== 'string' || canonicalTarget.length === 0
+          || !isAbsolute(canonicalTarget)))) semanticIdentityUnavailable();
+  if (canonicalTarget !== null) semanticString(canonicalTarget);
+  const provenance = entry.provenance;
+  let normalizedProvenance;
+  if (entryKind === 'broken_symlink' && provenance === undefined) {
+    normalizedProvenance = { kind: 'unknown', source_url: '', git_root: '' };
+  } else {
+    if (!hasExactKeys(
+      provenance,
+      ['kind', 'source_url', 'git_root', 'git_branch', 'confidence'],
+    )) semanticIdentityUnavailable();
+    semanticString(provenance.git_branch, { empty: true });
+    semanticString(provenance.confidence);
+    normalizedProvenance = {
+      kind: semanticString(provenance.kind),
+      source_url: semanticString(provenance.source_url, { empty: true }),
+      git_root: semanticString(provenance.git_root, { empty: true }),
+    };
+  }
+  const contentHash = entry.normalized_content_sha256 ?? null;
+  if ((entryKind === 'broken_symlink' && contentHash !== null)
+      || (entryKind !== 'broken_symlink'
+        && (typeof contentHash !== 'string' || !RAW_SHA256.test(contentHash)))) {
+    semanticIdentityUnavailable();
+  }
+  return {
+    entry_path: entryPath,
+    active_root: activeRoot,
+    entry_kind: entryKind,
+    raw_link_target_base64: rawTarget,
+    canonical_target: canonicalTarget,
+    provenance: normalizedProvenance,
+    mutation_provenance: normalizedMutationProvenance(entry.mutation_provenance),
+    normalized_content_sha256: contentHash,
+  };
+}
+
+export function semanticIdentityHashForEntry(entry) {
+  return sha256Json(semanticIdentity(entry));
+}
+
+export function preApplyStatusAllowsBaseline(status) {
+  if (!status || typeof status !== 'object' || Array.isArray(status)) return false;
+  if (status.ok === false) return status.error_code === 'transaction_unavailable';
+  return status.ok === true && status.location === 'original'
+    && status.transaction_has_mutated === false
+    && ['PLANNED', 'CONFIRMED', 'PREPARED', 'APPLYING'].includes(status.state);
+}
+
+function nativeObservationStable(before, after, planItem) {
+  if (before?.ok !== true || after?.ok !== true
+      || !before.identity || !after.identity) return false;
+  for (const identity of [before.identity, after.identity]) {
+    if (identity.entry_path !== planItem.entry_path
+        || identity.active_root !== planItem.active_root
+        || identity.entry_kind !== planItem.entry_kind
+        || (planItem.entry_kind !== 'directory'
+          && identity.raw_link_target_base64
+            !== planItem.execution_identity?.raw_link_target_base64)) return false;
+  }
+  return typeof before.identity.identity_hash === 'string'
+    && before.identity.identity_hash === after.identity.identity_hash;
+}
+
+export function reconcilePostApplyScan({
+  plan,
+  committedTransactionIds,
+  baselineByTransactionId,
+  baselineIdentityUnavailableTransactionIds = new Set(),
+  scan,
+  scanAvailable,
+  scanErrorCode = 'scanner_unavailable',
+  statusByTransactionId,
+  nativeIdentityBeforeByTransactionId,
+  nativeIdentityAfterByTransactionId,
+} = {}) {
+  requireObject(plan, 'plan must be an object');
+  if (!Array.isArray(plan.items) || !Array.isArray(committedTransactionIds)
+      || !(baselineByTransactionId instanceof Map)
+      || !(baselineIdentityUnavailableTransactionIds instanceof Set)
+      || !(statusByTransactionId instanceof Map)
+      || !(nativeIdentityBeforeByTransactionId instanceof Map)
+      || !(nativeIdentityAfterByTransactionId instanceof Map)
+      || typeof scanAvailable !== 'boolean'
+      || (scanAvailable && (!scan || !Array.isArray(scan.entries)))) {
+    fail('invalid_document', 'post-apply scan inputs are invalid');
+  }
+  const planItems = new Map(plan.items.map((item) => [item.transaction_id, item]));
+  let statusUnavailable = false;
+  let observationRace = false;
+  let semanticUnavailable = false;
+  const items = committedTransactionIds.map((transactionId) => {
+    const planItem = planItems.get(transactionId);
+    if (planItem === undefined) {
+      fail('invalid_document', 'committed transaction is not present in the plan');
+    }
+    const baseline = baselineByTransactionId.get(transactionId) ?? null;
+    if (!scanAvailable) {
+      return {
+        transaction_id: transactionId,
+        item_id: planItem.item_id,
+        entry_path: planItem.entry_path,
+        status: 'INDETERMINATE',
+        location: 'unknown',
+        baseline_identity_hash: baseline,
+        observed_identity_hash: null,
+      };
+    }
+    const matches = scan.entries.filter(({ entry_path: entryPath }) => (
+      entryPath === planItem.entry_path
+    ));
+    let observed = null;
+    if (matches.length === 1) {
+      try {
+        observed = semanticIdentityHashForEntry(matches[0]);
+      } catch (error) {
+        if (!(error instanceof CleanupCoreError)
+            || error.code !== 'semantic_identity_unavailable') throw error;
+        semanticUnavailable = true;
+      }
+    }
+    const nativeStatus = statusByTransactionId.get(transactionId);
+    const nativeBefore = nativeIdentityBeforeByTransactionId.get(transactionId);
+    const nativeAfter = nativeIdentityAfterByTransactionId.get(transactionId);
+    let status;
+    let location;
+    if (nativeStatus?.ok !== true) {
+      status = 'INDETERMINATE';
+      location = 'unknown';
+      statusUnavailable = true;
+    } else if (nativeStatus.location === 'quarantine' && matches.length === 0) {
+      status = 'QUARANTINED';
+      location = 'quarantine';
+    } else if (nativeStatus.location === 'quarantine') {
+      status = 'INDETERMINATE';
+      location = 'unknown';
+      observationRace = true;
+    } else if (nativeStatus.location === 'rehydrated') {
+      location = 'rehydrated';
+      if (baselineIdentityUnavailableTransactionIds.has(transactionId)) {
+        semanticUnavailable = true;
+      }
+      if (matches.length !== 1) {
+        status = 'RESTORE_CONFLICT';
+      } else if (!nativeObservationStable(nativeBefore, nativeAfter, planItem)) {
+        status = 'INDETERMINATE';
+        location = 'unknown';
+        observationRace = true;
+      } else if (baseline !== null && observed !== null && baseline === observed) {
+        status = 'REHYDRATED';
+      } else {
+        status = 'RESTORE_CONFLICT';
+      }
+    } else {
+      status = 'INDETERMINATE';
+      location = 'unknown';
+      statusUnavailable = true;
+    }
+    return {
+      item_id: planItem.item_id,
+      transaction_id: transactionId,
+      entry_path: planItem.entry_path,
+      status,
+      location,
+      baseline_identity_hash: baseline,
+      observed_identity_hash: status === 'QUARANTINED' ? null : observed,
+    };
+  });
+  const rehydrationWarning = items.some(({ status }) => (
+    ['REHYDRATED', 'RESTORE_CONFLICT'].includes(status)
+  ));
+  const warnings = ['installer_may_redeploy', 'running_agent_may_cache'];
+  if (rehydrationWarning) warnings.push('automatic_requarantine_disabled');
+  const unavailable = !scanAvailable;
+  const partial = !unavailable
+    && (statusUnavailable || observationRace || semanticUnavailable);
+  return validatePostScanReport({
+    schema_version: SCHEMAS.postScan,
+    observation_status: unavailable ? 'UNAVAILABLE' : (partial ? 'PARTIAL' : 'COMPLETE'),
+    scanner_schema: unavailable ? null : 'skill-scan.v5',
+    error_code: unavailable
+      ? scanErrorCode
+      : (statusUnavailable
+        ? 'status_unavailable'
+        : (observationRace
+          ? 'observation_race'
+          : (semanticUnavailable ? 'semantic_identity_unavailable' : null))),
+    items,
+    warnings,
+  }, committedTransactionIds, plan);
 }
 
 function stableUnique(values) {

@@ -8,6 +8,7 @@ import {
   buildBatchError,
   buildBatchPlan,
   buildBatchResult,
+  buildApplyReport,
   buildInitialBatchState,
   BATCH_ERROR_CODES,
   canonicalJson,
@@ -27,6 +28,7 @@ import {
   validateBatchResult,
   validateBatchSummary,
   validateBatchState,
+  validateApplyReport,
   validateExecutionIdentity,
   validateObservationIdentity,
   validatePlan,
@@ -1135,6 +1137,165 @@ test('batch-bound transaction status uses a new exact schema without weakening T
     },
   };
   assert.equal(validateTransactionBatchStatus(planned, batchPlan), planned);
+});
+
+test('post-scan apply reports are exact wrappers around unchanged committed outcomes', () => {
+  const plan = validPlan();
+  const transactionId = plan.items[0].transaction_id;
+  const applyOutcome = {
+    schema_version: SCHEMAS.transaction,
+    command: 'apply',
+    status: 'committed',
+    overall_status: 'committed',
+    transaction_id: transactionId,
+    state: 'COMMITTED',
+    location: 'quarantine',
+    mutation_occurred: true,
+    mutation_outcome: 'moved',
+    transaction_has_mutated: true,
+    committed_transaction_ids: [transactionId],
+  };
+  const baseline = sha256Json({ source: 'same' });
+  const report = buildApplyReport({
+    applyOutcome,
+    plan,
+    postScan: {
+      schema_version: SCHEMAS.postScan,
+      observation_status: 'COMPLETE',
+      scanner_schema: 'skill-scan.v5',
+      error_code: null,
+      items: [{
+        item_id: plan.items[0].item_id,
+        transaction_id: transactionId,
+        entry_path: plan.items[0].entry_path,
+        status: 'REHYDRATED',
+        location: 'rehydrated',
+        baseline_identity_hash: baseline,
+        observed_identity_hash: baseline,
+      }],
+      warnings: [
+        'installer_may_redeploy',
+        'running_agent_may_cache',
+        'automatic_requarantine_disabled',
+      ],
+    },
+  });
+
+  assert.equal(report.schema_version, SCHEMAS.applyReport);
+  assert.equal(report.apply_outcome, applyOutcome);
+  assert.equal(validateApplyReport(report, plan), report);
+  assert.deepEqual(Object.keys(report).sort(), [
+    'apply_outcome', 'command', 'post_scan', 'schema_version',
+  ]);
+  assert.throws(() => validateApplyReport({ ...report, unexpected: true }), /apply report/);
+  assert.throws(
+    () => validateApplyReport({
+      ...report,
+      post_scan: {
+        ...report.post_scan,
+        items: [{ ...report.post_scan.items[0], observed_identity_hash: sha256Json({ source: 'changed' }) }],
+      },
+    }, plan),
+    /post-scan/,
+  );
+  assert.throws(
+    () => validateApplyReport({
+      ...report,
+      post_scan: { ...report.post_scan, observation_status: 'UNAVAILABLE' },
+    }, plan),
+    /post-scan/,
+  );
+  assert.throws(
+    () => validateApplyReport({
+      ...report,
+      post_scan: { ...report.post_scan, warnings: report.post_scan.warnings.slice(0, 2) },
+    }, plan),
+    /post-scan/,
+  );
+});
+
+test('post-scan reports accept committed-prefix batch errors without weakening error truth', () => {
+  const plan = validMultiPlan(2);
+  const batchPlan = buildBatchPlan(plan);
+  const committedItems = batchPlan.transaction_map.map((mapping) => resultItem(
+    mapping,
+    'COMMITTED',
+  ));
+  const batchOutcome = buildBatchResult({
+    batchPlan,
+    status: 'committed',
+    overallStatus: 'committed',
+    items: committedItems,
+    mutationOccurred: true,
+  });
+  const successfulBatchReport = buildApplyReport({
+    applyOutcome: batchOutcome,
+    plan,
+    postScan: {
+      schema_version: SCHEMAS.postScan,
+      observation_status: 'COMPLETE',
+      scanner_schema: 'skill-scan.v5',
+      error_code: null,
+      items: batchOutcome.committed_transaction_ids.map((transactionId, index) => ({
+        item_id: plan.items[index].item_id,
+        transaction_id: transactionId,
+        entry_path: plan.items[index].entry_path,
+        status: 'QUARANTINED',
+        location: 'quarantine',
+        baseline_identity_hash: sha256Json({ baseline: index }),
+        observed_identity_hash: null,
+      })),
+      warnings: ['installer_may_redeploy', 'running_agent_may_cache'],
+    },
+  });
+  assert.equal(validateApplyReport(successfulBatchReport, plan), successfulBatchReport);
+
+  const items = batchPlan.transaction_map.map((mapping, index) => resultItem(
+    mapping,
+    index === 0 ? 'COMMITTED' : 'DRIFTED',
+  ));
+  const applyOutcome = buildBatchError({
+    batchPlan,
+    status: 'recovery_required',
+    overallStatus: 'PARTIAL',
+    items,
+    mutationOccurred: true,
+    mutationOutcome: 'moved',
+    errorCode: BATCH_ERROR_CODES.preflightDrift,
+    failureScope: 'item',
+    failureItemIndex: 1,
+  });
+  const report = buildApplyReport({
+    applyOutcome,
+    plan,
+    postScan: {
+      schema_version: SCHEMAS.postScan,
+      observation_status: 'COMPLETE',
+      scanner_schema: 'skill-scan.v5',
+      error_code: null,
+      items: [{
+        item_id: plan.items[0].item_id,
+        transaction_id: applyOutcome.committed_transaction_ids[0],
+        entry_path: plan.items[0].entry_path,
+        status: 'QUARANTINED',
+        location: 'quarantine',
+        baseline_identity_hash: sha256Json({ baseline: 1 }),
+        observed_identity_hash: null,
+      }],
+      warnings: ['installer_may_redeploy', 'running_agent_may_cache'],
+    },
+  });
+
+  assert.equal(validateApplyReport(report, plan), report);
+  assert.equal(report.apply_outcome, applyOutcome);
+  assert.throws(
+    () => buildApplyReport({
+      applyOutcome: { ...applyOutcome, committed_transaction_ids: [] },
+      plan,
+      postScan: report.post_scan,
+    }),
+    /batch error|committed/,
+  );
 });
 
 test('batch errors preserve current uncertainty, per-item history, and exact failure identity', () => {

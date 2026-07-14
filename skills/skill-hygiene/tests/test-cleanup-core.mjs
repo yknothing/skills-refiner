@@ -14,6 +14,9 @@ import {
   compilePlan,
   compileReview,
   overlayPersistedKeeps,
+  preApplyStatusAllowsBaseline,
+  reconcilePostApplyScan,
+  semanticIdentityHashForEntry,
   validateKeepStore,
 } from '../lib/cleanup-core.mjs';
 import {
@@ -500,6 +503,262 @@ test('receipt and identity drift re-surface installed copies without changing st
   assert.equal(invalidReceipt.mutation_eligibility, 'review_only');
   assert.equal(invalidReceipt.review_only_reason, 'unproven_installed_copy');
 }));
+
+test('semantic identity hashes bind entry identity, source, provenance, and normalized content only', () => withSandbox((root) => {
+  const original = scanFixture(root).entries[1];
+  const baseline = semanticIdentityHashForEntry(original);
+  const advisoryOnly = structuredClone(original);
+  advisoryOnly.flags = ['dangerous_cmd'];
+  advisoryOnly.risk_indicators = [{ id: 'different', severity: 'review_required' }];
+  advisoryOnly.runtime_contract = { status: 'fail', loadable: false, load_blockers: ['changed'] };
+  advisoryOnly.freshness = { mtime_epoch: 999, is_stale: true };
+  advisoryOnly.location = '.different/topology';
+  advisoryOnly.provenance.git_branch = 'changed-but-non-semantic';
+  advisoryOnly.provenance.confidence = 'none';
+  assert.equal(semanticIdentityHashForEntry(advisoryOnly), baseline);
+
+  for (const changed of [
+    { ...structuredClone(original), entry_path: `${original.entry_path}-changed` },
+    {
+      ...structuredClone(original),
+      active_root: `${original.active_root}-changed`,
+      entry_path: `${original.active_root}-changed/${original.name}`,
+    },
+    {
+      ...structuredClone(original),
+      entry_kind: 'broken_symlink',
+      canonical_dir: null,
+      normalized_content_sha256: null,
+    },
+    { ...structuredClone(original), raw_link_target_base64: Buffer.from('changed').toString('base64') },
+    { ...structuredClone(original), canonical_dir: `${original.canonical_dir}-changed` },
+    { ...structuredClone(original), provenance: { ...original.provenance, git_root: '/changed' } },
+    { ...structuredClone(original), normalized_content_sha256: 'f'.repeat(64) },
+  ]) {
+    assert.notEqual(semanticIdentityHashForEntry(changed), baseline);
+  }
+}));
+
+test('semantic identity rejects missing or malformed evidence instead of hashing defaults', () => withSandbox((root) => {
+  const original = scanFixture(root).entries[1];
+  const malformed = [
+    { ...structuredClone(original), entry_path: null },
+    { ...structuredClone(original), active_root: '' },
+    { ...structuredClone(original), entry_kind: 'file' },
+    { ...structuredClone(original), raw_link_target_base64: 'not base64' },
+    { ...structuredClone(original), canonical_dir: null },
+    { ...structuredClone(original), provenance: null },
+    { ...structuredClone(original), provenance: { ...original.provenance, source_url: null } },
+    { ...structuredClone(original), mutation_provenance: { kind: 'unknown', confidence: 'none', evidence: {} } },
+    { ...structuredClone(original), normalized_content_sha256: null },
+    { ...structuredClone(original), normalized_content_sha256: 'not-a-digest' },
+  ];
+  for (const entry of malformed) {
+    assert.throws(() => semanticIdentityHashForEntry(entry), /semantic identity/i);
+  }
+
+  const validBroken = scanFixture(root).entries[0];
+  delete validBroken.canonical_dir;
+  delete validBroken.provenance;
+  delete validBroken.normalized_content_sha256;
+  assert.match(semanticIdentityHashForEntry(validBroken), /^sha256:[0-9a-f]{64}$/u);
+  assert.throws(
+    () => semanticIdentityHashForEntry({ ...validBroken, normalized_content_sha256: 'a'.repeat(64) }),
+    /semantic identity/i,
+  );
+  assert.throws(
+    () => semanticIdentityHashForEntry({
+      ...structuredClone(original),
+      provenance: { ...original.provenance, unexpected: true },
+    }),
+    /semantic identity/i,
+  );
+  assert.throws(
+    () => semanticIdentityHashForEntry({
+      ...structuredClone(original),
+      mutation_provenance: {
+        ...original.mutation_provenance,
+        unexpected: true,
+      },
+    }),
+    /semantic identity/i,
+  );
+  const installed = scanFixture(root).entries[3];
+  const installedHash = semanticIdentityHashForEntry(installed);
+  installed.mutation_provenance.evidence.receipt_file = `${root}/.agents/.skill-lock.json`;
+  assert.equal(semanticIdentityHashForEntry(installed), installedHash);
+  installed.mutation_provenance.evidence.receipt_file = null;
+  assert.throws(() => semanticIdentityHashForEntry(installed), /semantic identity/i);
+}));
+
+test('post-apply scan reconciliation exposes exact conservative Agent truth', () => withSandbox((root) => {
+  const scan = scanFixture(root);
+  const entry = scan.entries[1];
+  const plan = {
+    items: [{
+      item_id: sha256Json({ item: 1 }),
+      transaction_id: sha256Json({ transaction: 1 }),
+      entry_path: entry.entry_path,
+      active_root: entry.active_root,
+      entry_kind: entry.entry_kind,
+      execution_identity: {
+        manifest_hash: sha256Json({ manifest: 1 }),
+        raw_link_target_base64: entry.raw_link_target_base64,
+      },
+    }],
+  };
+  const transactionId = plan.items[0].transaction_id;
+  const hash = semanticIdentityHashForEntry(entry);
+  const baselineByTransactionId = new Map([[transactionId, hash]]);
+  const committedTransactionIds = [transactionId];
+  const statusByTransactionId = new Map([[transactionId, { ok: true, location: 'rehydrated' }]]);
+  const nativeIdentity = {
+    ok: true,
+    identity: {
+      identity_hash: sha256Json({ native: 1 }),
+      entry_path: entry.entry_path,
+      active_root: entry.active_root,
+      entry_kind: entry.entry_kind,
+      manifest_hash: plan.items[0].execution_identity.manifest_hash,
+      raw_link_target_base64: entry.raw_link_target_base64,
+    },
+  };
+  const nativeIdentityBeforeByTransactionId = new Map([[transactionId, nativeIdentity]]);
+  const nativeIdentityAfterByTransactionId = new Map([[transactionId, structuredClone(nativeIdentity)]]);
+  const reconcile = (overrides = {}) => reconcilePostApplyScan({
+    plan,
+    committedTransactionIds,
+    baselineByTransactionId,
+    scan,
+    scanAvailable: true,
+    statusByTransactionId,
+    nativeIdentityBeforeByTransactionId,
+    nativeIdentityAfterByTransactionId,
+    ...overrides,
+  });
+
+  const rehydrated = reconcile();
+  assert.equal(rehydrated.observation_status, 'COMPLETE');
+  assert.equal(rehydrated.scanner_schema, 'skill-scan.v5');
+  assert.equal(rehydrated.error_code, null);
+  assert.deepEqual(rehydrated.items[0], {
+    item_id: plan.items[0].item_id,
+    transaction_id: transactionId,
+    entry_path: entry.entry_path,
+    status: 'REHYDRATED',
+    location: 'rehydrated',
+    baseline_identity_hash: hash,
+    observed_identity_hash: hash,
+  });
+  assert.deepEqual(rehydrated.warnings, [
+    'installer_may_redeploy',
+    'running_agent_may_cache',
+    'automatic_requarantine_disabled',
+  ]);
+
+  const duplicateScan = structuredClone(scan);
+  duplicateScan.entries.push(structuredClone(entry));
+  assert.equal(reconcile({ scan: duplicateScan }).items[0].status, 'RESTORE_CONFLICT');
+  assert.equal(reconcile({ baselineByTransactionId: new Map() }).items[0].status, 'RESTORE_CONFLICT');
+  const invalidBaseline = reconcile({
+    baselineByTransactionId: new Map(),
+    baselineIdentityUnavailableTransactionIds: new Set([transactionId]),
+  });
+  assert.equal(invalidBaseline.observation_status, 'PARTIAL');
+  assert.equal(invalidBaseline.error_code, 'semantic_identity_unavailable');
+  assert.equal(invalidBaseline.items[0].status, 'RESTORE_CONFLICT');
+  const statusUnavailable = reconcile({
+    statusByTransactionId: new Map([[transactionId, { ok: false, location: null }]]),
+  });
+  assert.equal(statusUnavailable.observation_status, 'PARTIAL');
+  assert.equal(statusUnavailable.error_code, 'status_unavailable');
+  assert.equal(statusUnavailable.items[0].status, 'INDETERMINATE');
+
+  const unavailable = reconcile({
+    scan: null,
+    scanAvailable: false,
+    scanErrorCode: 'scanner_unavailable',
+  });
+  assert.equal(unavailable.observation_status, 'UNAVAILABLE');
+  assert.equal(unavailable.scanner_schema, null);
+  assert.equal(unavailable.error_code, 'scanner_unavailable');
+  assert.equal(unavailable.items[0].status, 'INDETERMINATE');
+
+  const quarantinedScan = structuredClone(scan);
+  quarantinedScan.entries = quarantinedScan.entries.filter(({ entry_path: path }) => (
+    path !== entry.entry_path
+  ));
+  const quarantined = reconcile({
+    scan: quarantinedScan,
+    statusByTransactionId: new Map([[transactionId, { ok: true, location: 'quarantine' }]]),
+  });
+  assert.equal(quarantined.items[0].status, 'QUARANTINED');
+  assert.equal(quarantined.items[0].location, 'quarantine');
+  assert.equal(quarantined.warnings.includes('automatic_requarantine_disabled'), false);
+
+  const contradictoryQuarantine = reconcile({
+    statusByTransactionId: new Map([[transactionId, { ok: true, location: 'quarantine' }]]),
+  });
+  assert.equal(contradictoryQuarantine.items[0].status, 'INDETERMINATE');
+  assert.equal(contradictoryQuarantine.items[0].location, 'unknown');
+  assert.equal(contradictoryQuarantine.error_code, 'observation_race');
+
+  const changedScan = structuredClone(scan);
+  changedScan.entries.find(({ entry_path: path }) => path === entry.entry_path)
+    .normalized_content_sha256 = 'e'.repeat(64);
+  assert.equal(reconcile({ scan: changedScan }).items[0].status, 'RESTORE_CONFLICT');
+
+  const malformedScan = structuredClone(scan);
+  malformedScan.entries.find(({ entry_path: path }) => path === entry.entry_path)
+    .normalized_content_sha256 = null;
+  const malformed = reconcile({ scan: malformedScan });
+  assert.equal(malformed.observation_status, 'PARTIAL');
+  assert.equal(malformed.error_code, 'semantic_identity_unavailable');
+  assert.equal(malformed.items[0].status, 'RESTORE_CONFLICT');
+
+  const nativeUnavailable = reconcile({
+    nativeIdentityBeforeByTransactionId: new Map([[
+      transactionId,
+      { ok: false, identity: null },
+    ]]),
+  });
+  assert.equal(nativeUnavailable.items[0].status, 'INDETERMINATE');
+  assert.equal(nativeUnavailable.error_code, 'observation_race');
+
+  const nativeMismatch = structuredClone(nativeIdentity);
+  nativeMismatch.identity.identity_hash = sha256Json({ native: 'changed' });
+  const mismatched = reconcile({
+    nativeIdentityAfterByTransactionId: new Map([[transactionId, nativeMismatch]]),
+  });
+  assert.equal(mismatched.items[0].status, 'INDETERMINATE');
+  assert.equal(mismatched.error_code, 'observation_race');
+}));
+
+test('pre-apply baseline eligibility excludes prior committed and ambiguous retry occupants', () => {
+  assert.equal(preApplyStatusAllowsBaseline({
+    ok: false,
+    error_code: 'transaction_unavailable',
+  }), true);
+  assert.equal(preApplyStatusAllowsBaseline({
+    ok: true,
+    state: 'APPLYING',
+    location: 'original',
+    transaction_has_mutated: false,
+  }), true);
+  assert.equal(preApplyStatusAllowsBaseline({
+    ok: true,
+    state: 'PLANNED',
+    location: 'original',
+    transaction_has_mutated: false,
+  }), true);
+  for (const status of [
+    { ok: true, state: 'COMMITTED', location: 'quarantine', transaction_has_mutated: true },
+    { ok: true, state: 'COMMITTED', location: 'rehydrated', transaction_has_mutated: true },
+    { ok: false, error_code: 'status_unavailable' },
+  ]) {
+    assert.equal(preApplyStatusAllowsBaseline(status), false);
+  }
+});
 
 test('plan compilation requires explicit matched decisions and execution identity', () => withSandbox(async (root) => {
   const review = compileReview(scanFixture(root));

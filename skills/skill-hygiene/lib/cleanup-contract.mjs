@@ -17,6 +17,8 @@ export const SCHEMAS = Object.freeze({
   batchError: 'skills-refiner.cleanup.batch-error.v1',
   batchSummary: 'skills-refiner.cleanup.batch-summary.v1',
   transactionBatchStatus: 'skills-refiner.cleanup.transaction-batch-status.v1',
+  applyReport: 'skills-refiner.cleanup.apply-report.v1',
+  postScan: 'skills-refiner.cleanup.post-scan.v1',
 });
 
 export const ACTIONS = Object.freeze(['quarantine']);
@@ -314,6 +316,51 @@ const TRANSACTION_RESULT_KEYS = new Set([
 ]);
 const TRANSACTION_RESULT_REQUIRED_KEYS = [...TRANSACTION_RESULT_KEYS]
   .filter((key) => key !== 'next_safe_command');
+const APPLY_REPORT_KEYS = new Set([
+  'schema_version',
+  'command',
+  'apply_outcome',
+  'post_scan',
+]);
+const POST_SCAN_KEYS = new Set([
+  'schema_version',
+  'observation_status',
+  'scanner_schema',
+  'error_code',
+  'items',
+  'warnings',
+]);
+const POST_SCAN_ITEM_KEYS = new Set([
+  'item_id',
+  'transaction_id',
+  'entry_path',
+  'status',
+  'location',
+  'baseline_identity_hash',
+  'observed_identity_hash',
+]);
+const POST_SCAN_STATUSES = new Set([
+  'QUARANTINED',
+  'REHYDRATED',
+  'RESTORE_CONFLICT',
+  'INDETERMINATE',
+]);
+const POST_SCAN_OBSERVATION_STATUSES = new Set(['COMPLETE', 'PARTIAL', 'UNAVAILABLE']);
+const POST_SCAN_ERROR_CODES = new Set([
+  'scanner_unavailable',
+  'scanner_invalid',
+  'status_unavailable',
+  'native_observation_unavailable',
+  'observation_race',
+  'semantic_identity_unavailable',
+  'post_scan_internal_error',
+]);
+const POST_SCAN_LOCATIONS = new Set(['quarantine', 'rehydrated', 'unknown']);
+const POST_SCAN_BASE_WARNINGS = Object.freeze([
+  'installer_may_redeploy',
+  'running_agent_may_cache',
+]);
+const POST_SCAN_REHYDRATION_WARNING = 'automatic_requarantine_disabled';
 const TRANSACTION_STATES = new Set([
   'PLANNED',
   'CONFIRMED',
@@ -508,6 +555,144 @@ export function validateTransactionResult(result) {
     safeNonEmptyString(result.next_safe_command, 'transaction_result.next_safe_command', 512);
   }
   return result;
+}
+
+function validateApplyOutcome(outcome) {
+  requireObject(outcome, 'apply report.apply_outcome');
+  if (outcome.schema_version === SCHEMAS.transaction) {
+    validateTransactionResult(outcome);
+    if (outcome.command !== 'apply' || outcome.state !== 'COMMITTED'
+        || outcome.committed_transaction_ids.length !== 1) {
+      fail('apply report transaction outcome is not committed');
+    }
+    return outcome.committed_transaction_ids;
+  }
+  if (outcome.schema_version === SCHEMAS.batch) {
+    validateBatchResult(outcome);
+  } else if (outcome.schema_version === SCHEMAS.batchError) {
+    validateBatchError(outcome);
+  } else {
+    fail('apply report outcome schema is unsupported');
+  }
+  if (outcome.committed_transaction_ids.length === 0) {
+    fail('apply report batch outcome has no committed prefix');
+  }
+  return outcome.committed_transaction_ids;
+}
+
+export function validatePostScanReport(
+  report,
+  committedTransactionIds = null,
+  plan = null,
+) {
+  exactKeys(report, POST_SCAN_KEYS, [...POST_SCAN_KEYS], 'post-scan report');
+  canonicalJson(report);
+  if (report.schema_version !== SCHEMAS.postScan
+      || !POST_SCAN_OBSERVATION_STATUSES.has(report.observation_status)
+      || !Array.isArray(report.items) || report.items.length === 0) {
+    fail(`post-scan report schema mismatch: expected ${SCHEMAS.postScan}`);
+  }
+  if ((report.scanner_schema !== null && report.scanner_schema !== 'skill-scan.v5')
+      || (report.error_code !== null && !POST_SCAN_ERROR_CODES.has(report.error_code))) {
+    fail('post-scan observation metadata is invalid');
+  }
+  if ((report.observation_status === 'COMPLETE'
+      && (report.scanner_schema !== 'skill-scan.v5' || report.error_code !== null))
+    || (report.observation_status === 'PARTIAL'
+      && (report.scanner_schema !== 'skill-scan.v5' || report.error_code === null))
+    || (report.observation_status === 'UNAVAILABLE'
+      && (report.scanner_schema !== null || report.error_code === null))) {
+    fail('post-scan observation status contradicts scanner or error truth');
+  }
+  if ((report.observation_status === 'UNAVAILABLE'
+      && !['scanner_unavailable', 'scanner_invalid', 'post_scan_internal_error']
+        .includes(report.error_code))
+    || (report.observation_status === 'PARTIAL'
+      && ['scanner_unavailable', 'scanner_invalid'].includes(report.error_code))) {
+    fail('post-scan error code contradicts observation availability');
+  }
+  const seen = new Set();
+  for (const item of report.items) {
+    exactKeys(item, POST_SCAN_ITEM_KEYS, [...POST_SCAN_ITEM_KEYS], 'post-scan item');
+    validateSha256(item.item_id, 'post-scan item.item_id');
+    validateSha256(item.transaction_id, 'post-scan item.transaction_id');
+    safeNonEmptyString(item.entry_path, 'post-scan item.entry_path');
+    if (seen.has(item.transaction_id) || !POST_SCAN_STATUSES.has(item.status)
+        || !POST_SCAN_LOCATIONS.has(item.location)) {
+      fail('post-scan item identity or status is invalid');
+    }
+    seen.add(item.transaction_id);
+    for (const field of [
+      'baseline_identity_hash',
+      'observed_identity_hash',
+    ]) {
+      if (item[field] !== null) validateSha256(item[field], `post-scan item.${field}`);
+    }
+    const baseline = item.baseline_identity_hash;
+    const observed = item.observed_identity_hash;
+    if ((item.status === 'REHYDRATED'
+        && (item.location !== 'rehydrated' || baseline === null || observed === null
+          || baseline !== observed))
+      || (item.status === 'RESTORE_CONFLICT'
+        && item.location !== 'rehydrated')
+      || (item.status === 'QUARANTINED'
+        && (item.location !== 'quarantine' || observed !== null))
+      || (item.status === 'INDETERMINATE' && item.location !== 'unknown')) {
+      fail('post-scan item status contradicts semantic identity evidence');
+    }
+  }
+  if ((report.observation_status === 'COMPLETE'
+      && report.items.some(({ status }) => status === 'INDETERMINATE'))
+    || (report.observation_status === 'UNAVAILABLE'
+      && report.items.some(({ status }) => status !== 'INDETERMINATE'))) {
+    fail('post-scan observation status contradicts item truth');
+  }
+  if (committedTransactionIds !== null
+      && canonicalJson(report.items.map(({ transaction_id: id }) => id))
+        !== canonicalJson(committedTransactionIds)) {
+    fail('post-scan items do not match the committed transaction prefix');
+  }
+  if (plan !== null) {
+    const planItems = new Map(plan.items.map((item) => [item.transaction_id, item]));
+    for (const item of report.items) {
+      const expected = planItems.get(item.transaction_id);
+      if (expected === undefined || expected.item_id !== item.item_id
+          || expected.entry_path !== item.entry_path) {
+        fail('post-scan item does not match its immutable plan item');
+      }
+    }
+  }
+  const expectedWarnings = [...POST_SCAN_BASE_WARNINGS];
+  if (report.items.some(({ status }) => ['REHYDRATED', 'RESTORE_CONFLICT'].includes(status))) {
+    expectedWarnings.push(POST_SCAN_REHYDRATION_WARNING);
+  }
+  if (!Array.isArray(report.warnings)
+      || canonicalJson(report.warnings) !== canonicalJson(expectedWarnings)) {
+    fail('post-scan warnings do not match stable safety guidance');
+  }
+  return report;
+}
+
+export function validateApplyReport(report, plan = null) {
+  exactKeys(report, APPLY_REPORT_KEYS, [...APPLY_REPORT_KEYS], 'apply report');
+  canonicalJson(report);
+  if (report.schema_version !== SCHEMAS.applyReport || report.command !== 'apply') {
+    fail(`apply report schema mismatch: expected ${SCHEMAS.applyReport}`);
+  }
+  const committedTransactionIds = validateApplyOutcome(report.apply_outcome);
+  if (plan === null) fail('apply report validation requires its immutable plan');
+  validatePlan(plan);
+  validatePostScanReport(report.post_scan, committedTransactionIds, plan);
+  return report;
+}
+
+export function buildApplyReport({ applyOutcome, postScan, plan } = {}) {
+  return validateApplyReport({
+    schema_version: SCHEMAS.applyReport,
+    command: 'apply',
+    apply_outcome: applyOutcome,
+    post_scan: postScan,
+  }, plan);
 }
 
 export function validatePlan(plan) {
