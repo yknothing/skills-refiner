@@ -235,7 +235,7 @@ sr_json_escape() {
 sr_normalize_skill_content() {
     local file="$1"
     if ! sr_validate_trace_structure "$file"; then
-        awk '
+        LC_ALL=C awk '
             {
                 line=$0
                 sub(/\r$/, "", line)
@@ -245,7 +245,7 @@ sr_normalize_skill_content() {
         ' "$file" 2>/dev/null
         return
     fi
-    awk '
+    LC_ALL=C awk '
         function clean(line) {
             sub(/\r$/, "", line)
             return line
@@ -301,7 +301,7 @@ sr_hash_skill_file() {
 
 sr_skill_has_trace() {
     local file="$1"
-    awk '
+    LC_ALL=C awk '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -320,7 +320,7 @@ sr_skill_has_trace() {
 
 sr_validate_trace_structure() {
     local file="$1"
-    awk '
+    LC_ALL=C awk '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -391,7 +391,9 @@ sr_strip_trace_blocks() {
     local source_final_newline=0 source_eof_state
     source_eof_state=$(sr_file_eof_state "$file") || return 1
     [ "$source_eof_state" = "newline" ] && source_final_newline=1
-    awk -v source_final_newline="$source_final_newline" '
+    # GNU awk on Git Bash otherwise applies text-mode CRLF translation. Other
+    # awk implementations treat BINMODE as an ordinary, harmless variable.
+    LC_ALL=C awk -v BINMODE=3 -v source_final_newline="$source_final_newline" '
         function clean(line) {
             sub(/\r$/, "", line)
             return line
@@ -451,7 +453,7 @@ sr_strip_trace_blocks() {
 
 sr_get_frontmatter_field() {
     local file="$1" key="$2"
-    awk -v key="$key" '
+    LC_ALL=C awk -v key="$key" '
         function top_key(line, raw, first, last) {
             if (line ~ /^[[:space:]]/ || line !~ /:/) return ""
             raw=line
@@ -484,7 +486,7 @@ sr_get_frontmatter_field() {
 
 sr_get_frontmatter_text() {
     local file="$1" key="$2"
-    awk -v key="$key" '
+    LC_ALL=C awk -v key="$key" '
         function top_key(line, raw, first, last) {
             if (line ~ /^[[:space:]]/ || line !~ /:/) return ""
             raw=line
@@ -526,7 +528,7 @@ sr_get_frontmatter_text() {
 
 sr_get_metadata_value() {
     local file="$1" key="$2"
-    awk -v key="$key" '
+    LC_ALL=C awk -v key="$key" '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -547,7 +549,7 @@ sr_get_metadata_value() {
 
 sr_frontmatter_keys_json() {
     local file="$1"
-    awk '
+    LC_ALL=C awk '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -565,7 +567,7 @@ sr_frontmatter_keys_json() {
 
 sr_frontmatter_list_json() {
     local file="$1" key="$2"
-    awk -v key="$key" '
+    LC_ALL=C awk -v key="$key" '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -604,7 +606,7 @@ sr_frontmatter_list_json() {
 
 sr_hook_events_json() {
     local file="$1"
-    awk '
+    LC_ALL=C awk '
         {
             line=$0
             sub(/\r$/, "", line)

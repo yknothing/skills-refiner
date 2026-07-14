@@ -153,7 +153,7 @@ inject_trace() {
 
     # Find the end of frontmatter and inject after it
     local fm_end
-    if ! fm_end=$(awk '{
+    if ! fm_end=$(LC_ALL=C awk '{
         line=$0
         sub(/\r$/, "", line)
         if (NR == 1) if (substr(line, 1, 3) == "\357\273\277") line=substr(line, 4)
