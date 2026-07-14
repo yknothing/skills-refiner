@@ -116,13 +116,13 @@ npx skills add yknothing/skills-refiner --skill skills-refiner --skill skills-ap
 
 Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https://github.com/vercel-labs/skills#supported-agents).
 
-The governance scripts require Bash, `jq`, and a SHA-256 implementation. Native
-macOS supports the full toolchain. Windows WSL 2 with `HOME` on the WSL Linux
-filesystem is the full-toolchain target: canary writes re-check actual modes and
-fail closed, but dedicated WSL runner certification is still pending. Windows
-Git Bash covers real-directory read-only governance and trace file transforms;
-symlink/junction topology is not certified, and canary logging is rejected.
-Native PowerShell/cmd is not implemented. See the
+The read-only governance scripts require Bash, `jq`, and a SHA-256
+implementation. Local cleanup additionally requires Node.js major 24. Its
+mutation adapter is currently macOS-only and needs Apple Command Line Tools the
+first time it compiles the native helper. Linux/Ubuntu can review installed
+entries but cleanup mutation fails closed. Windows Git Bash retains its bounded
+read-only and trace-transform contract; `setup-cli` and cleanup mutation are not
+implemented on Windows. Native PowerShell/cmd is not implemented. See the
 [platform support contract](docs/platform-support.md) for exact boundaries.
 
 Each skill is independently installable. For example:
@@ -158,6 +158,114 @@ bash bin/skills-refiner-doctor.sh --help
 
 Optional env: `SKILLS_REFINER_TOOLS_ROOT` — directory that contains `skill-debug/` and `skill-hygiene/` (same layout as `~/.agents/skills`).
 
+### Review and safely retire local entries
+
+`skill-scan.sh` supplies evidence, not a retirement verdict. The cleanup flow
+governs only locally installed or distributed entries under agent skill roots;
+standalone authoring/source repositories are review-only and are never mutation
+targets.
+
+On macOS with Node.js 24, start from the installed package and optionally install
+a verified `skills-refiner` launcher into an existing, safe, user-owned directory
+already on `PATH`:
+
+```bash
+bash ~/.agents/skills/skill-hygiene/bin/skills-refiner setup-cli --node /absolute/path/to/node24
+skills-refiner cleanup
+```
+
+`setup-cli` never edits a shell profile and never overwrites an unrelated file.
+In a TTY, one safe `PATH` directory is selected automatically; multiple safe
+directories are listed and require `--target`. The command displays a digest
+bound to the source launcher, exact Node binary, and destination, then requires
+that exact digest. Blank input, EOF, a mismatch, or Ctrl-C writes nothing. If no
+safe `PATH` directory exists, it makes no wrapper write and prints a full-path
+fallback invocation that sets `SKILLS_REFINER_NODE_BIN` to the selected Node 24
+binary before running the installed launcher.
+
+For a non-TTY Agent/IDE flow, make every decision explicit and use JSON:
+
+```bash
+bash ~/.agents/skills/skill-hygiene/bin/skills-refiner setup-cli \
+  --node /absolute/path/to/node24 --target /absolute/safe/PATH/directory --json
+# Exit 2 returns a preview. Repeat the identical command with its confirmation.digest:
+bash ~/.agents/skills/skill-hygiene/bin/skills-refiner setup-cli \
+  --node /absolute/path/to/node24 --target /absolute/safe/PATH/directory \
+  --confirm 'sha256:...' --json
+
+SESSION_DIR=$(mktemp -d /tmp/skills-refiner-cleanup.XXXXXX) || exit 1
+chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
+REVIEW="$SESSION_DIR/review.json"
+DECISIONS="$SESSION_DIR/decisions.json"
+PLAN="$SESSION_DIR/plan.json"
+skills-refiner cleanup review --json > "$REVIEW"
+```
+
+Never place these artifacts in the current project/source repository. Create
+`$DECISIONS` inside the private session directory with the exact review
+fingerprint and one explicit decision for every candidate:
+
+```json
+{
+  "schema_version": "skills-refiner.cleanup.decisions.v1",
+  "review_fingerprint": "<copy the exact review_fingerprint value>",
+  "decisions": [
+    {"candidate_id": "<copy the exact candidate_id value>", "action": "later"}
+  ]
+}
+```
+
+Then compile and apply the immutable plan:
+
+```bash
+skills-refiner cleanup plan --review "$REVIEW" --decisions "$DECISIONS" --json > "$PLAN"
+skills-refiner cleanup apply --plan "$PLAN" --confirm 'sha256:...' --post-scan --json
+skills-refiner cleanup status 'sha256:...' --json
+skills-refiner cleanup undo 'sha256:...' --confirm 'sha256:...' --json
+rm -f -- "$REVIEW" "$DECISIONS" "$PLAN"
+rmdir -- "$SESSION_DIR"
+```
+
+Use the exact `plan_hash` from `$PLAN` for apply and each item's exact
+`transaction_id` for status/undo. `--persist-keep` on `cleanup plan` is the only
+Agent/IDE path that persists Keep decisions; without it, planning has no Keep
+side effect. Every candidate must be assigned `keep`, `later`, or `retire`—an
+omitted decision is invalid. `Inspect` is a TTY-only view, not a fourth JSON
+action. If the flow stops early, delete only those three session files and then
+remove their private directory; never clean up by deleting the current working
+tree.
+
+The TTY presents **Keep / Later / Inspect / Retire**. Blank input means Later,
+so nothing is selected for retirement by default. Keep is persisted only while
+the observed entry identity and topology still match; Later is session-local;
+Inspect shows evidence; Retire requires a second exact confirmation. Retire is a
+recoverable quarantine transaction under
+`~/.agents/skills-quarantine/transactions/`, not permanent deletion. There is no
+purge command.
+
+A multi-entry plan executes as ordered, independently undoable transactions and
+stops at the first failure. The original payloads of earlier committed
+transactions remain quarantined unless restored, and their IDs are reported in
+`committed_transaction_ids`; handle each transaction independently. With
+`--post-scan`, each committed item is reported as `QUARANTINED`, `REHYDRATED`,
+`RESTORE_CONFLICT`, or `INDETERMINATE`. An installer may repopulate the active
+path while the original payload remains quarantined, and a running Agent may
+retain cached state. Rehydrated entries are never automatically quarantined
+again—review the new evidence first.
+
+Machine-readable commands write one JSON document to stdout and diagnostics to
+stderr. Exit codes are stable at this boundary:
+
+| Exit | Meaning |
+|---:|---|
+| `0` | Success or a verified idempotent result |
+| `2` | Invalid/incomplete input, confirmation required/mismatched, or safe cancellation |
+| `3` | Unsupported runtime, platform, or mutation adapter; no mutation |
+| `10` | Blocked safety check or detected drift |
+| `20` | Recovery required or mutation outcome cannot be proven |
+| `21` | Restore/transaction conflict |
+| `130` | Interactive interruption |
+
 Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, and `skill-scan.v5` are schema versions, not product release numbers. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v5 preserves the v4 conservative runtime semantics while adding exact active-entry identity, a unified compatibility view, and content-bound GitHub installer-receipt evidence for later disposition planning. Its `entries` order is the documented concatenation `skills + skill_links + broken_symlinks`.
 
 ## Repository layout
@@ -171,7 +279,10 @@ Version note: the current product line is `skills-refiner 2.0`. JSON fields such
 **Governance & Observability:**
 - `skills/skill-hygiene/SKILL.md` — AI-driven skill evaluation framework
 - `skills/skill-hygiene/bin/skill-scan.sh` — topology and fact collector
-- `skills/skill-hygiene/tests/test-scan.sh` — integration tests
+- `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap and cleanup CLI launcher
+- `skills/skill-hygiene/lib/cleanup-*.mjs` — review, contract, planning, platform, and transaction logic
+- `skills/skill-hygiene/native/cleanup-macos-helper.c` — fail-closed macOS filesystem mutation helper
+- `skills/skill-hygiene/tests/test-scan.sh` and `test-cleanup-*` — scan and cleanup gates
 - `skills/skill-debug/SKILL.md` — three-layer observability
 - `skills/skill-debug/bin/skill-probe.sh` — discovery diagnostics
 - `skills/skill-debug/bin/skill-trace.sh` — activation trace injection/removal
@@ -219,6 +330,9 @@ bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 # Scan installed skills for health issues
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 
+# Guided local review; blank keeps retirement unselected (Later)
+skills-refiner cleanup
+
 # What local skill surfaces are likely discoverable from here?
 bash ~/.agents/skills/skill-debug/bin/skill-probe.sh
 
@@ -241,7 +355,7 @@ The `evals/` directory contains anchor-based evaluations for the analysis skills
 
 Cases 08–09 test the collaboration scenario with skill-creator.
 
-The governance skills (`skill-hygiene`, `skill-debug`) are validated through integration tests that create sandboxed skill topologies and verify scanner/tracer correctness. `skills/skill-debug/tests/test-doctor.sh` smoke-tests the read-only `skills-refiner-doctor.sh` bundle under an isolated `HOME`; `test-platform-contract.sh` gates spaced paths, BOM/CRLF round trips, and Windows permission failures. GitHub Actions runs the full suite on macOS and Ubuntu plus the bounded Git Bash contract on `windows-latest`.
+The governance skills (`skill-hygiene`, `skill-debug`) are validated through sandboxed integration tests. Portable scan/observability and cleanup contract/CLI gates run on macOS and Ubuntu; real cleanup mutation, native-helper fault injection, and successful transaction status/undo run only on macOS. `test-install-layout.sh` proves the selectively installed package works outside the checkout and preserves source Git state. `windows-latest` remains a bounded Git Bash read-only/trace contract and does not certify cleanup mutation.
 
 ## Contributing
 

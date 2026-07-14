@@ -1,6 +1,6 @@
 ---
 name: skill-hygiene
-description: Use when you need to audit, evaluate, or review installed agent skills for quality, health, and governance. Triggers include skill sprawl, concern about stale or broken skills, pre-migration review, or periodic inventory check.
+description: Use when you need to audit, evaluate, govern, or safely retire locally installed or distributed agent skills. Triggers include skill sprawl, stale, broken, or conflicting skills, local cleanup or quarantine, pre-migration review, and periodic inventory checks.
 ---
 
 # skill-hygiene
@@ -28,6 +28,81 @@ Optional combined bundle (requires `skill-debug`):
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
 ```
+
+## Reviewing and Safely Retiring Local Entries
+
+Scanner evidence is not a retirement verdict. Use the cleanup flow only when the
+user asks to govern skills already installed or distributed on this machine.
+Standalone authoring/source repositories are review-only and must never become
+mutation targets.
+
+For a human terminal on a supported macOS host, use the guided flow:
+
+```bash
+SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
+  bash ~/.agents/skills/skill-hygiene/bin/skills-refiner cleanup
+```
+
+If a verified launcher has already been installed with `setup-cli`, the shorter
+form is `skills-refiner cleanup`. Present the evidence and preserve the command's
+four choices:
+
+- **Keep** records an observation-bound decision. It remains current only while
+  the entry identity and topology still match.
+- **Later** is session-local and is the blank/default response. Nothing is
+  selected for retirement by default.
+- **Inspect** shows more evidence without deciding.
+- **Retire** creates a recoverable quarantine transaction and requires a second,
+  exact confirmation. It is not deletion or purge.
+
+For an Agent/IDE or any non-TTY workflow, use the JSON commands instead. Never
+write review, decision, or plan artifacts into the current project/source
+repository; keep them in a private temporary session directory:
+
+```bash
+SESSION_DIR=$(mktemp -d /tmp/skills-refiner-cleanup.XXXXXX) || exit 1
+chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
+REVIEW="$SESSION_DIR/review.json"
+DECISIONS="$SESSION_DIR/decisions.json"
+PLAN="$SESSION_DIR/plan.json"
+NODE24=/absolute/path/to/node24
+LAUNCHER="$HOME/.agents/skills/skill-hygiene/bin/skills-refiner"
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup review --json > "$REVIEW"
+# Build "$DECISIONS" from that exact review. Every candidate requires exactly
+# one explicit action: keep, later, or retire. Then continue:
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup plan \
+  --review "$REVIEW" --decisions "$DECISIONS" --json > "$PLAN"
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup apply \
+  --plan "$PLAN" --confirm 'sha256:...' --post-scan --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup status 'sha256:...' --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup undo \
+  'sha256:...' --confirm 'sha256:...' --json
+rm -f -- "$REVIEW" "$DECISIONS" "$PLAN"
+rmdir -- "$SESSION_DIR"
+```
+
+Take the apply confirmation from the exact `plan_hash` and status/undo identity
+from the exact item `transaction_id`; never synthesize either value. Add
+`--persist-keep` to `cleanup plan` only when the user explicitly wants Keep
+decisions stored. Without it, Agent/IDE planning does not persist Keep.
+If the flow stops early, remove only the three files and private session
+directory created above; never clean up by deleting the current working tree.
+
+Mutation is currently supported only by the macOS adapter and requires Node.js
+major 24; the first native-helper compilation also requires Apple Command Line
+Tools. Linux/Ubuntu may review, but plan/apply/status/undo fail closed with exit
+`3` and zero mutation. Windows Git Bash retains only the documented bounded
+read-only surface; native Windows cleanup and `setup-cli` are not implemented.
+
+Retired payloads and transaction records live under
+`~/.agents/skills-quarantine/transactions/` and remain individually undoable.
+A multi-entry plan stops on the first failure; transactions committed before the
+failure retain their original quarantined payloads and must be handled
+individually. Post-apply evidence uses `QUARANTINED`, `REHYDRATED`,
+`RESTORE_CONFLICT`, or `INDETERMINATE`. Installers may repopulate an active path
+while that original payload remains quarantined, and running Agents may cache
+old skill state. Never automatically re-quarantine a rehydrated entry; review it
+again.
 
 ## Understanding the Skill Topology
 
@@ -167,7 +242,12 @@ Statistics, topology map, provenance distribution.
 
 ## Guardrails
 
-- **NEVER auto-delete or auto-archive without explicit user confirmation.**
+- **NEVER delete, purge, or manually move a skill as a substitute for the
+  transaction workflow.** Retire only through the cleanup CLI after exact user
+  confirmation.
+- Never mutate a standalone authoring/source repository. Only the installed or
+  distributed entry identified by the review may be quarantined.
+- Never automatically re-quarantine an entry reported as `REHYDRATED`.
 - When uncertain, present the observation and let the user decide.
 - Distinguish between "this is broken" (evidence-based) and "this might be stale" (heuristic).
 - Respect that the user's skills may have workflows you don't fully understand.
