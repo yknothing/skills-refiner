@@ -197,8 +197,19 @@ test('plans are deterministic, link-first, content-free, and contract-valid', ()
   decisions.decisions.find(({ candidate_id: id }) => id === link.candidate_id).action = 'retire';
   decisions.decisions.find(({ candidate_id: id }) => id === installed.candidate_id).action = 'retire';
 
-  const first = await compilePlan({ review, decisions, created_at: '2026-07-14T00:00:00Z' }, platformFacts());
-  const second = await compilePlan({ review, decisions, created_at: '2099-01-01T00:00:00Z' }, platformFacts());
+  const authorization_id = '0'.repeat(32);
+  const first = await compilePlan({
+    review,
+    decisions,
+    created_at: '2026-07-14T00:00:00Z',
+    authorization_id,
+  }, platformFacts());
+  const second = await compilePlan({
+    review,
+    decisions,
+    created_at: '2099-01-01T00:00:00Z',
+    authorization_id,
+  }, platformFacts());
   assert.equal(first.plan_hash, second.plan_hash);
   assert.deepEqual(first.items.map(({ item_hash: hash }) => hash), second.items.map(({ item_hash: hash }) => hash));
   assert.equal(first.items[0].entry_kind, 'symlink');
@@ -206,6 +217,14 @@ test('plans are deterministic, link-first, content-free, and contract-valid', ()
   assert.ok(first.items.every(({ entry_path: path }) => path.startsWith(root)));
   assert.equal(JSON.stringify(first).includes('Use when exercising cleanup fixtures'), false);
   assert.equal(validatePlan(first).plan_hash, first.plan_hash);
+
+  const newlyAuthorized = await compilePlan({
+    review,
+    decisions,
+    created_at: '2026-07-14T00:00:00Z',
+    authorization_id: '1'.repeat(32),
+  }, platformFacts());
+  assert.notEqual(newlyAuthorized.plan_hash, first.plan_hash);
 
   const changedTransaction = structuredClone(first);
   changedTransaction.items[0].transaction_id = sha256Json({ wrong: true });

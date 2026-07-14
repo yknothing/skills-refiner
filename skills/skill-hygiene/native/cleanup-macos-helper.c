@@ -2,6 +2,7 @@
 
 #include <sys/acl.h>
 #include <sys/attr.h>
+#include <sys/file.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -11,6 +12,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <libproc.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdint.h>
@@ -43,6 +45,7 @@
 #define MAX_MANIFEST_OBJECTS 100000ULL
 #define MAX_MANIFEST_DEPTH 64U
 #define SHA256_HEX_BYTES 65U
+#define MAX_SAFE_JSON_INTEGER 9007199254740991ULL
 
 typedef struct {
     uint64_t content_bytes;
@@ -1284,14 +1287,756 @@ static int publish_state(const char *home_path, const char *role,
     return 0;
 }
 
+static int valid_sha256_identifier(const char *value) {
+    if (value == NULL || strlen(value) != 71U || strncmp(value, "sha256:", 7U) != 0) return 0;
+    for (size_t index = 7U; index < 71U; index += 1U) {
+        if (!((value[index] >= '0' && value[index] <= '9')
+              || (value[index] >= 'a' && value[index] <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int valid_lower_hex(const char *value, size_t expected_length) {
+    if (value == NULL || strlen(value) != expected_length) return 0;
+    for (size_t index = 0U; index < expected_length; index += 1U) {
+        if (!((value[index] >= '0' && value[index] <= '9')
+              || (value[index] >= 'a' && value[index] <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int write_new_record(int directory_fd, const char *leaf,
+                            const unsigned char *bytes, size_t length) {
+    int fd = openat(directory_fd, leaf, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+    if (fd < 0 || fchmod(fd, 0600) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    size_t written = 0U;
+    int result = 0;
+    while (written < length) {
+        ssize_t part = write(fd, bytes + written, length - written);
+        if (part <= 0) {
+            result = -1;
+            break;
+        }
+        written += (size_t)part;
+    }
+    int durable = fsync(fd) == 0;
+    int closed = close(fd) == 0;
+    if (!durable || !closed) result = -1;
+    if (result != 0) unlinkat(directory_fd, leaf, 0);
+    return result;
+}
+
+static void remove_transaction_temporary(int transactions_fd, const char *temporary) {
+    int temporary_fd = openat(transactions_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (temporary_fd < 0) return;
+    unlinkat(temporary_fd, "plan.json", 0);
+    unlinkat(temporary_fd, "manifest.json", 0);
+    unlinkat(temporary_fd, "state.json", 0);
+    unlinkat(temporary_fd, "events.jsonl", 0);
+    unlinkat(temporary_fd, "payload", AT_REMOVEDIR);
+    close(temporary_fd);
+    unlinkat(transactions_fd, temporary, AT_REMOVEDIR);
+}
+
+static int split_transaction_records(unsigned char *bytes, size_t length,
+                                     unsigned char *records[3], size_t lengths[3]) {
+    size_t start = 0U;
+    size_t record = 0U;
+    for (size_t index = 0U; index < length; index += 1U) {
+        if (bytes[index] != '\n') continue;
+        if (record >= 3U || index == start) return -1;
+        records[record] = bytes + start;
+        lengths[record] = index - start;
+        record += 1U;
+        start = index + 1U;
+    }
+    return record == 3U && start == length ? 0 : -1;
+}
+
+static int transaction_init(const char *home_path, const char *transaction_id) {
+    if (!valid_sha256_identifier(transaction_id)) return emit_error("invalid_transaction_id");
+    const char *storage_key = transaction_id + 7U;
+    unsigned char *bytes = NULL;
+    size_t length = 0U;
+    if (read_bounded_stdin(&bytes, &length) != 0) return emit_error("transaction_input_invalid");
+    unsigned char *records[3];
+    size_t lengths[3];
+    if (split_transaction_records(bytes, length, records, lengths) != 0) {
+        free(bytes);
+        return emit_error("transaction_input_invalid");
+    }
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        free(bytes);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 1);
+    int transactions_fd = quarantine_fd < 0
+        ? -1
+        : open_relative_directory(quarantine_fd, "transactions", 1, 1);
+    if (quarantine_fd >= 0) close(quarantine_fd);
+    close(home_fd);
+    if (transactions_fd < 0) {
+        free(bytes);
+        return emit_error("unsafe_transaction_root");
+    }
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(temporary, sizeof(temporary), ".skills-refiner-tx-%ld-%08x",
+        (long)getpid(), arc4random());
+    int result = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1
+        : mkdirat(transactions_fd, temporary, 0700);
+    int temporary_fd = result == 0
+        ? openat(transactions_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        : -1;
+    if (temporary_fd < 0 || fchmod(temporary_fd, 0700) != 0) result = -1;
+    int payload_fd = result == 0 && mkdirat(temporary_fd, "payload", 0700) == 0
+        ? openat(temporary_fd, "payload", O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        : -1;
+    if (payload_fd < 0 || fchmod(payload_fd, 0700) != 0 || fsync(payload_fd) != 0) result = -1;
+    if (payload_fd >= 0) close(payload_fd);
+    if (result == 0 && write_new_record(temporary_fd, "plan.json", records[0], lengths[0]) != 0) result = -1;
+    if (result == 0 && write_new_record(temporary_fd, "manifest.json", records[1], lengths[1]) != 0) result = -1;
+    if (result == 0 && write_new_record(temporary_fd, "state.json", records[2], lengths[2]) != 0) result = -1;
+    if (result == 0 && write_new_record(temporary_fd, "events.jsonl", (const unsigned char *)"", 0U) != 0) {
+        result = -1;
+    }
+    if (result == 0 && fsync(temporary_fd) != 0) result = -1;
+    if (temporary_fd >= 0) close(temporary_fd);
+    free(bytes);
+    if (result != 0) {
+        remove_transaction_temporary(transactions_fd, temporary);
+        close(transactions_fd);
+        return emit_error("transaction_init_failed");
+    }
+    crash_at_test_seam("before_transaction_publish");
+    int renamed = renameatx_np(
+        transactions_fd,
+        temporary,
+        transactions_fd,
+        storage_key,
+        RENAME_EXCL
+    );
+    int rename_errno = errno;
+    if (renamed != 0) {
+        remove_transaction_temporary(transactions_fd, temporary);
+        close(transactions_fd);
+        if (rename_errno == EEXIST) {
+            printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+                   "\"operation\":\"transaction-init\",\"result\":\"existing\"}\n",
+                   HELPER_PROTOCOL);
+            return 0;
+        }
+        return emit_error("transaction_publish_failed");
+    }
+    crash_at_test_seam("after_transaction_publish");
+    int durable = fsync(transactions_fd) == 0;
+    close(transactions_fd);
+    if (!durable) return emit_recovery_required("transaction_durability_unknown");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"transaction-init\",\"result\":\"created\"}\n",
+           HELPER_PROTOCOL);
+    return 0;
+}
+
+static int read_transaction_record(int transaction_fd, const char *leaf,
+                                   unsigned char **bytes, size_t *length) {
+    int fd = openat(transaction_fd, leaf, O_RDONLY | O_NOFOLLOW);
+    struct stat status;
+    char digest[SHA256_HEX_BYTES];
+    if (fd < 0 || fstat(fd, &status) != 0 || (status.st_mode & 0777) != 0600
+        || read_regular_fd_bounded(fd, bytes, length, digest, MAX_INPUT_BYTES) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
+static int read_lock_owner(int quarantine_fd, unsigned char **bytes, size_t *length);
+
+static int probe_transaction(const char *home_path, const char *transaction_id) {
+    if (!valid_sha256_identifier(transaction_id)) return emit_error("invalid_transaction_id");
+    const char *storage_key = transaction_id + 7U;
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int transactions_fd = quarantine_fd < 0
+        ? -1
+        : open_relative_directory(quarantine_fd, "transactions", 0, 1);
+    int transaction_fd = transactions_fd < 0
+        ? -1
+        : openat(transactions_fd, storage_key, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (transactions_fd >= 0) close(transactions_fd);
+    close(home_fd);
+    if (transaction_fd < 0 || verify_directory_fd(transaction_fd, 1) != 0) {
+        if (transaction_fd >= 0) close(transaction_fd);
+        if (quarantine_fd >= 0) close(quarantine_fd);
+        return emit_error("transaction_unavailable");
+    }
+    int payload_fd = openat(transaction_fd, "payload", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (payload_fd < 0 || verify_directory_fd(payload_fd, 1) != 0) {
+        if (payload_fd >= 0) close(payload_fd);
+        close(transaction_fd);
+        close(quarantine_fd);
+        return emit_recovery_required("transaction_records_unavailable");
+    }
+    close(payload_fd);
+    const char *leaves[3] = {"plan.json", "manifest.json", "state.json"};
+    unsigned char *records[3] = {NULL, NULL, NULL};
+    size_t lengths[3] = {0U, 0U, 0U};
+    size_t total = 0U;
+    int result = 0;
+    for (size_t index = 0U; index < 3U; index += 1U) {
+        if (read_transaction_record(transaction_fd, leaves[index], &records[index], &lengths[index]) != 0
+            || lengths[index] > MAX_INPUT_BYTES - total) {
+            result = -1;
+            break;
+        }
+        total += lengths[index];
+    }
+    unsigned char *lock_owner = NULL;
+    size_t lock_owner_length = 0U;
+    int have_lock = 0;
+    struct stat lock_status;
+    if (result == 0 && fstatat(quarantine_fd, "lock", &lock_status, AT_SYMLINK_NOFOLLOW) == 0) {
+        have_lock = 1;
+        if (read_lock_owner(quarantine_fd, &lock_owner, &lock_owner_length) != 0
+            || lock_owner_length > MAX_INPUT_BYTES - total) result = -1;
+    } else if (result == 0 && errno != ENOENT) {
+        result = -1;
+    }
+    close(quarantine_fd);
+    close(transaction_fd);
+    if (result != 0) {
+        for (size_t index = 0U; index < 3U; index += 1U) free(records[index]);
+        free(lock_owner);
+        return emit_recovery_required("transaction_records_unavailable");
+    }
+    char *encoded[3] = {NULL, NULL, NULL};
+    for (size_t index = 0U; index < 3U; index += 1U) {
+        encoded[index] = base64_encode(records[index], lengths[index]);
+        free(records[index]);
+        if (encoded[index] == NULL) result = -1;
+    }
+    if (result != 0) {
+        for (size_t index = 0U; index < 3U; index += 1U) free(encoded[index]);
+        free(lock_owner);
+        return emit_recovery_required("transaction_records_unavailable");
+    }
+    char *encoded_lock = have_lock ? base64_encode(lock_owner, lock_owner_length) : NULL;
+    free(lock_owner);
+    if (have_lock && encoded_lock == NULL) {
+        for (size_t index = 0U; index < 3U; index += 1U) free(encoded[index]);
+        return emit_recovery_required("transaction_records_unavailable");
+    }
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"probe-transaction\","
+           "\"plan_base64\":\"%s\",\"manifest_base64\":\"%s\",\"state_base64\":\"%s\","
+           "\"lock_base64\":",
+           HELPER_PROTOCOL, encoded[0], encoded[1], encoded[2]);
+    if (encoded_lock == NULL) printf("null");
+    else printf("\"%s\"", encoded_lock);
+    printf("}\n");
+    for (size_t index = 0U; index < 3U; index += 1U) free(encoded[index]);
+    free(encoded_lock);
+    return 0;
+}
+
+static int process_start_identity(pid_t pid, uint64_t *seconds, uint64_t *microseconds) {
+    struct proc_bsdinfo information;
+    int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &information, sizeof(information));
+    if (bytes != (int)sizeof(information)) return -1;
+    *seconds = information.pbi_start_tvsec;
+    *microseconds = information.pbi_start_tvusec;
+    return 0;
+}
+
+static int parse_pid(const char *value, pid_t *pid) {
+    if (value == NULL || value[0] == '\0') return -1;
+    errno = 0;
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0U || parsed > INT_MAX) return -1;
+    *pid = (pid_t)parsed;
+    return 0;
+}
+
+static int format_lock_owner(char *output, size_t output_size,
+                             const char *transaction_id, const char *plan_hash,
+                             const char *nonce, pid_t pid,
+                             uint64_t start_seconds, uint64_t start_microseconds) {
+    int length = snprintf(
+        output,
+        output_size,
+        "{\"nonce\":\"%s\",\"pid\":%d,\"plan_hash\":\"%s\","
+        "\"process_start_sec\":%llu,\"process_start_usec\":%llu,"
+        "\"transaction_id\":\"%s\"}",
+        nonce,
+        pid,
+        plan_hash,
+        (unsigned long long)start_seconds,
+        (unsigned long long)start_microseconds,
+        transaction_id
+    );
+    return length < 0 || (size_t)length >= output_size ? -1 : length;
+}
+
+static int lock_acquire(const char *home_path, const char *transaction_id,
+                        const char *plan_hash, const char *nonce, const char *pid_value) {
+    pid_t pid;
+    uint64_t start_seconds;
+    uint64_t start_microseconds;
+    if (!valid_sha256_identifier(transaction_id) || !valid_sha256_identifier(plan_hash)
+        || !valid_lower_hex(nonce, 64U) || parse_pid(pid_value, &pid) != 0
+        || pid != getppid()
+        || process_start_identity(pid, &start_seconds, &start_microseconds) != 0) {
+        return emit_error("invalid_lock_identity");
+    }
+    char owner[1024];
+    int owner_length = format_lock_owner(
+        owner,
+        sizeof(owner),
+        transaction_id,
+        plan_hash,
+        nonce,
+        pid,
+        start_seconds,
+        start_microseconds
+    );
+    if (owner_length < 0) return emit_error("invalid_lock_identity");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    close(home_fd);
+    if (quarantine_fd < 0) return emit_error("unsafe_lock_root");
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(temporary, sizeof(temporary), ".skills-refiner-lock-%ld-%08x",
+        (long)getpid(), arc4random());
+    int result = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1
+        : mkdirat(quarantine_fd, temporary, 0700);
+    int temporary_fd = result == 0
+        ? openat(quarantine_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        : -1;
+    if (temporary_fd < 0 || fchmod(temporary_fd, 0700) != 0
+        || write_new_record(temporary_fd, "owner.json", (const unsigned char *)owner,
+                            (size_t)owner_length) != 0
+        || fsync(temporary_fd) != 0) result = -1;
+    if (temporary_fd >= 0) close(temporary_fd);
+    if (result != 0) {
+        int cleanup_fd = openat(quarantine_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (cleanup_fd >= 0) {
+            unlinkat(cleanup_fd, "owner.json", 0);
+            close(cleanup_fd);
+        }
+        unlinkat(quarantine_fd, temporary, AT_REMOVEDIR);
+        close(quarantine_fd);
+        return emit_error("lock_acquire_failed");
+    }
+    crash_at_test_seam("before_lock_publish");
+    int renamed = renameatx_np(quarantine_fd, temporary, quarantine_fd, "lock", RENAME_EXCL);
+    int rename_errno = errno;
+    if (renamed != 0) {
+        int cleanup_fd = openat(quarantine_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (cleanup_fd >= 0) {
+            unlinkat(cleanup_fd, "owner.json", 0);
+            close(cleanup_fd);
+        }
+        unlinkat(quarantine_fd, temporary, AT_REMOVEDIR);
+        close(quarantine_fd);
+        if (rename_errno == EEXIST) return emit_error("lock_held");
+        return emit_error("lock_acquire_failed");
+    }
+    crash_at_test_seam("after_lock_publish");
+    int durable = fsync(quarantine_fd) == 0;
+    close(quarantine_fd);
+    if (!durable) return emit_recovery_required("lock_durability_unknown");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"lock-acquire\","
+           "\"owner\":%s}\n", HELPER_PROTOCOL, owner);
+    return 0;
+}
+
+static int read_lock_owner(int quarantine_fd, unsigned char **bytes, size_t *length) {
+    int lock_fd = openat(quarantine_fd, "lock", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (lock_fd < 0 || verify_directory_fd(lock_fd, 1) != 0) {
+        if (lock_fd >= 0) close(lock_fd);
+        return -1;
+    }
+    int result = read_transaction_record(lock_fd, "owner.json", bytes, length);
+    close(lock_fd);
+    return result;
+}
+
+static int move_lock_to_transaction(const char *home_path, const char *transaction_id,
+                                    const char *plan_hash, const char *nonce,
+                                    const char *pid_value, const char *start_seconds_value,
+                                    const char *start_microseconds_value, int require_stale) {
+    pid_t pid;
+    if (!valid_sha256_identifier(transaction_id) || !valid_sha256_identifier(plan_hash)
+        || !valid_lower_hex(nonce, 64U) || parse_pid(pid_value, &pid) != 0) {
+        return emit_error("invalid_lock_identity");
+    }
+    const char *storage_key = transaction_id + 7U;
+    errno = 0;
+    char *seconds_end = NULL;
+    char *microseconds_end = NULL;
+    unsigned long long start_seconds = strtoull(start_seconds_value, &seconds_end, 10);
+    unsigned long long start_microseconds = strtoull(start_microseconds_value, &microseconds_end, 10);
+    if (errno != 0 || seconds_end == start_seconds_value || *seconds_end != '\0'
+        || microseconds_end == start_microseconds_value || *microseconds_end != '\0') {
+        return emit_error("invalid_lock_identity");
+    }
+    char expected[1024];
+    int expected_length = format_lock_owner(
+        expected,
+        sizeof(expected),
+        transaction_id,
+        plan_hash,
+        nonce,
+        pid,
+        (uint64_t)start_seconds,
+        (uint64_t)start_microseconds
+    );
+    if (expected_length < 0) return emit_error("invalid_lock_identity");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int transactions_fd = quarantine_fd < 0
+        ? -1
+        : open_relative_directory(quarantine_fd, "transactions", 0, 1);
+    int transaction_fd = transactions_fd < 0
+        ? -1
+        : openat(transactions_fd, storage_key, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (transactions_fd >= 0) close(transactions_fd);
+    close(home_fd);
+    if (quarantine_fd < 0 || transaction_fd < 0 || verify_directory_fd(transaction_fd, 1) != 0) {
+        if (quarantine_fd >= 0) close(quarantine_fd);
+        if (transaction_fd >= 0) close(transaction_fd);
+        return emit_recovery_required("lock_identity_unavailable");
+    }
+    unsigned char *observed = NULL;
+    size_t observed_length = 0U;
+    if (read_lock_owner(quarantine_fd, &observed, &observed_length) != 0
+        || observed_length != (size_t)expected_length
+        || memcmp(observed, expected, observed_length) != 0) {
+        free(observed);
+        close(quarantine_fd);
+        close(transaction_fd);
+        return emit_recovery_required("lock_identity_mismatch");
+    }
+    free(observed);
+    if (require_stale) {
+        uint64_t live_seconds;
+        uint64_t live_microseconds;
+        if (process_start_identity(pid, &live_seconds, &live_microseconds) == 0
+            && live_seconds == (uint64_t)start_seconds
+            && live_microseconds == (uint64_t)start_microseconds) {
+            close(quarantine_fd);
+            close(transaction_fd);
+            return emit_error("lock_live");
+        }
+        int kill_result = kill(pid, 0);
+        int kill_errno = errno;
+        if (kill_result == 0 || kill_errno == EPERM) {
+            uint64_t retry_seconds;
+            uint64_t retry_microseconds;
+            if (process_start_identity(pid, &retry_seconds, &retry_microseconds) != 0) {
+                close(quarantine_fd);
+                close(transaction_fd);
+                return emit_recovery_required("lock_liveness_ambiguous");
+            }
+            if (retry_seconds == (uint64_t)start_seconds
+                && retry_microseconds == (uint64_t)start_microseconds) {
+                close(quarantine_fd);
+                close(transaction_fd);
+                return emit_error("lock_live");
+            }
+        } else if (kill_errno != ESRCH) {
+            close(quarantine_fd);
+            close(transaction_fd);
+            return emit_recovery_required("lock_liveness_ambiguous");
+        }
+    } else {
+        uint64_t live_seconds;
+        uint64_t live_microseconds;
+        if (pid != getppid()
+            || process_start_identity(pid, &live_seconds, &live_microseconds) != 0
+            || live_seconds != (uint64_t)start_seconds
+            || live_microseconds != (uint64_t)start_microseconds) {
+            close(quarantine_fd);
+            close(transaction_fd);
+            return emit_error("lock_release_not_owner");
+        }
+    }
+    char destination[NAME_MAX + 1U];
+    int destination_length = snprintf(destination, sizeof(destination), "%s-lock-%s",
+        require_stale ? "stale" : "released", nonce);
+    int renamed = destination_length < 0 || (size_t)destination_length >= sizeof(destination)
+        ? -1
+        : renameatx_np(quarantine_fd, "lock", transaction_fd, destination, RENAME_EXCL);
+    int rename_errno = errno;
+    if (renamed != 0) {
+        close(quarantine_fd);
+        close(transaction_fd);
+        if (rename_errno == EEXIST) return emit_recovery_required("lock_archive_conflict");
+        return emit_recovery_required("lock_move_ambiguous");
+    }
+    int durable = fsync(quarantine_fd) == 0 && fsync(transaction_fd) == 0;
+    close(quarantine_fd);
+    close(transaction_fd);
+    if (!durable) return emit_recovery_required("lock_durability_unknown");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"%s\"}\n",
+           HELPER_PROTOCOL, require_stale ? "lock-isolate-stale" : "lock-release");
+    return 0;
+}
+
+static int transaction_advance(const char *home_path, const char *transaction_id,
+                               const char *plan_hash, const char *expected_state_hash,
+                               const char *nonce, const char *pid_value,
+                               const char *start_seconds_value,
+                               const char *start_microseconds_value,
+                               const char *expected_sequence_value,
+                               const char *next_sequence_value) {
+    pid_t pid;
+    if (!valid_sha256_identifier(transaction_id) || !valid_sha256_identifier(plan_hash)
+        || !valid_sha256_identifier(expected_state_hash) || !valid_lower_hex(nonce, 64U)
+        || parse_pid(pid_value, &pid) != 0 || pid != getppid()) {
+        return emit_error("invalid_state_lease");
+    }
+    errno = 0;
+    char *expected_sequence_end = NULL;
+    unsigned long long expected_sequence = strtoull(
+        expected_sequence_value,
+        &expected_sequence_end,
+        10
+    );
+    if (errno != 0 || expected_sequence_end == expected_sequence_value
+        || *expected_sequence_end != '\0') return emit_error("invalid_state_sequence");
+    errno = 0;
+    char *next_sequence_end = NULL;
+    unsigned long long next_sequence = strtoull(next_sequence_value, &next_sequence_end, 10);
+    if (errno != 0 || next_sequence_end == next_sequence_value || *next_sequence_end != '\0'
+        || expected_sequence >= MAX_SAFE_JSON_INTEGER
+        || next_sequence != expected_sequence + 1U) {
+        return emit_error("invalid_state_sequence");
+    }
+    errno = 0;
+    char *seconds_end = NULL;
+    unsigned long long start_seconds = strtoull(start_seconds_value, &seconds_end, 10);
+    if (errno != 0 || seconds_end == start_seconds_value || *seconds_end != '\0') {
+        return emit_error("invalid_state_lease");
+    }
+    errno = 0;
+    char *microseconds_end = NULL;
+    unsigned long long start_microseconds = strtoull(
+        start_microseconds_value,
+        &microseconds_end,
+        10
+    );
+    if (errno != 0 || microseconds_end == start_microseconds_value || *microseconds_end != '\0') {
+        return emit_error("invalid_state_lease");
+    }
+    uint64_t live_seconds;
+    uint64_t live_microseconds;
+    if (process_start_identity(pid, &live_seconds, &live_microseconds) != 0
+        || live_seconds != (uint64_t)start_seconds
+        || live_microseconds != (uint64_t)start_microseconds) {
+        return emit_error("state_lease_not_live");
+    }
+    char expected_owner[1024];
+    int expected_owner_length = format_lock_owner(
+        expected_owner,
+        sizeof(expected_owner),
+        transaction_id,
+        plan_hash,
+        nonce,
+        pid,
+        (uint64_t)start_seconds,
+        (uint64_t)start_microseconds
+    );
+    if (expected_owner_length < 0) return emit_error("invalid_state_lease");
+    unsigned char *next_state = NULL;
+    size_t next_state_length = 0U;
+    if (read_bounded_stdin(&next_state, &next_state_length) != 0 || next_state_length == 0U) {
+        free(next_state);
+        return emit_error("state_input_invalid");
+    }
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        free(next_state);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int transactions_fd = quarantine_fd < 0
+        ? -1
+        : open_relative_directory(quarantine_fd, "transactions", 0, 1);
+    int transaction_fd = transactions_fd < 0
+        ? -1
+        : openat(transactions_fd, transaction_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (transactions_fd >= 0) close(transactions_fd);
+    close(home_fd);
+    if (quarantine_fd < 0 || transaction_fd < 0 || verify_directory_fd(transaction_fd, 1) != 0) {
+        if (quarantine_fd >= 0) close(quarantine_fd);
+        if (transaction_fd >= 0) close(transaction_fd);
+        free(next_state);
+        return emit_recovery_required("transaction_records_unavailable");
+    }
+    if (flock(transaction_fd, LOCK_EX | LOCK_NB) != 0) {
+        int lock_errno = errno;
+        close(quarantine_fd);
+        close(transaction_fd);
+        free(next_state);
+        if (lock_errno == EWOULDBLOCK) return emit_error("state_cas_mismatch");
+        return emit_recovery_required("state_cas_lock_unavailable");
+    }
+    unsigned char *observed_owner = NULL;
+    size_t observed_owner_length = 0U;
+    if (read_lock_owner(quarantine_fd, &observed_owner, &observed_owner_length) != 0
+        || observed_owner_length != (size_t)expected_owner_length
+        || memcmp(observed_owner, expected_owner, observed_owner_length) != 0) {
+        free(observed_owner);
+        close(quarantine_fd);
+        close(transaction_fd);
+        free(next_state);
+        return emit_error("state_lease_mismatch");
+    }
+    free(observed_owner);
+    close(quarantine_fd);
+    int state_fd = openat(transaction_fd, "state.json", O_RDONLY | O_NOFOLLOW);
+    struct stat state_status;
+    unsigned char *current_state = NULL;
+    size_t current_state_length = 0U;
+    char current_digest[SHA256_HEX_BYTES];
+    int state_valid = state_fd >= 0 && fstat(state_fd, &state_status) == 0
+        && (state_status.st_mode & 0777) == 0600
+        && read_regular_fd_bounded(
+            state_fd,
+            &current_state,
+            &current_state_length,
+            current_digest,
+            MAX_INPUT_BYTES
+        ) == 0;
+    if (state_fd >= 0) close(state_fd);
+    if (!state_valid || strcmp(expected_state_hash + 7U, current_digest) != 0) {
+        free(current_state);
+        close(transaction_fd);
+        free(next_state);
+        return emit_error(state_valid ? "state_cas_mismatch" : "transaction_records_unavailable");
+    }
+    char current_sequence_token[64];
+    char next_sequence_token[64];
+    int current_sequence_length = snprintf(
+        current_sequence_token,
+        sizeof(current_sequence_token),
+        ",\"sequence\":%llu,\"state\":",
+        expected_sequence
+    );
+    int next_sequence_length = snprintf(
+        next_sequence_token,
+        sizeof(next_sequence_token),
+        ",\"sequence\":%llu,\"state\":",
+        next_sequence
+    );
+    if (current_sequence_length < 0 || next_sequence_length < 0
+        || (size_t)current_sequence_length >= sizeof(current_sequence_token)
+        || (size_t)next_sequence_length >= sizeof(next_sequence_token)
+        ) {
+        free(current_state);
+        close(transaction_fd);
+        free(next_state);
+        return emit_error("invalid_state_sequence");
+    }
+    unsigned char *current_sequence_position = memmem(
+        current_state,
+        current_state_length,
+        current_sequence_token,
+        (size_t)current_sequence_length
+    );
+    unsigned char *next_sequence_position = memmem(
+        next_state,
+        next_state_length,
+        next_sequence_token,
+        (size_t)next_sequence_length
+    );
+    if (current_sequence_position == NULL || next_sequence_position == NULL
+        || memmem(
+            current_sequence_position + 1U,
+            current_state_length - (size_t)(current_sequence_position + 1U - current_state),
+            current_sequence_token,
+            (size_t)current_sequence_length
+        ) != NULL
+        || memmem(
+            next_sequence_position + 1U,
+            next_state_length - (size_t)(next_sequence_position + 1U - next_state),
+            next_sequence_token,
+            (size_t)next_sequence_length
+        ) != NULL) {
+        free(current_state);
+        close(transaction_fd);
+        free(next_state);
+        return emit_error("invalid_state_sequence");
+    }
+    free(current_state);
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(temporary, sizeof(temporary), ".skills-refiner-state-%ld-%08x",
+        (long)getpid(), arc4random());
+    int temporary_fd = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1
+        : openat(transaction_fd, temporary, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+    int result = 0;
+    int published = 0;
+    if (temporary_fd < 0 || fchmod(temporary_fd, 0600) != 0) result = -1;
+    size_t written = 0U;
+    while (result == 0 && written < next_state_length) {
+        ssize_t part = write(temporary_fd, next_state + written, next_state_length - written);
+        if (part <= 0) result = -1;
+        else written += (size_t)part;
+    }
+    if (temporary_fd >= 0) {
+        int durable = result == 0 && fsync(temporary_fd) == 0;
+        int closed = close(temporary_fd) == 0;
+        if (!durable || !closed) result = -1;
+    }
+    if (result == 0) crash_at_test_seam("before_transaction_state_publish");
+    if (result == 0 && renameat(transaction_fd, temporary, transaction_fd, "state.json") == 0) {
+        published = 1;
+        crash_at_test_seam("after_transaction_state_rename");
+    } else if (result == 0) {
+        result = -1;
+    }
+    if (result == 0 && fsync(transaction_fd) != 0) result = -1;
+    if (!published) unlinkat(transaction_fd, temporary, 0);
+    free(next_state);
+    close(transaction_fd);
+    if (result != 0 && published) return emit_recovery_required("state_durability_unknown");
+    if (result != 0) return emit_error("state_publish_failed");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"transaction-advance\"}\n",
+           HELPER_PROTOCOL);
+    return 0;
+}
+
 static int directory_has_git_marker(int directory_fd) {
     struct stat marker;
     if (fstatat(directory_fd, ".git", &marker, AT_SYMLINK_NOFOLLOW) == 0) return 1;
     return errno == ENOENT ? 0 : -1;
 }
 
-static int real_directory_has_git_ancestor(int home_fd, const char *active_relative,
-                                           const char *entry_leaf) {
+static int open_active_directory_without_git(int home_fd, const char *active_relative,
+                                             int *active_fd) {
     int current = dup(home_fd);
     if (current < 0) return -1;
     int marker = directory_has_git_marker(current);
@@ -1331,12 +2076,158 @@ static int real_directory_has_git_ancestor(int home_fd, const char *active_relat
         component = separator + 1;
     }
     free(copy);
-    int entry_fd = openat(current, entry_leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
-    close(current);
-    if (entry_fd < 0) return -1;
-    marker = directory_has_git_marker(entry_fd);
-    close(entry_fd);
-    return marker;
+    *active_fd = current;
+    return 0;
+}
+
+static int active_directory_still_bound_without_git(int home_fd, const char *active_relative,
+                                                    int bound_fd) {
+    int observed_fd = -1;
+    int result = open_active_directory_without_git(home_fd, active_relative, &observed_fd);
+    if (result != 0) return result;
+    struct stat observed;
+    struct stat bound;
+    int same_directory = fstat(observed_fd, &observed) == 0
+        && fstat(bound_fd, &bound) == 0
+        && observed.st_dev == bound.st_dev
+        && observed.st_ino == bound.st_ino;
+    close(observed_fd);
+    if (!same_directory) return -1;
+    return directory_has_git_marker(bound_fd);
+}
+
+static int reconcile_leaf(int parent_fd, const char *leaf,
+                          const char *expected_device, const char *expected_inode,
+                          const char *expected_manifest, int *present, int *matches) {
+    struct stat status;
+    if (fstatat(parent_fd, leaf, &status, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno == ENOENT) {
+            *present = 0;
+            *matches = 0;
+            return 0;
+        }
+        return -1;
+    }
+    *present = 1;
+    char actual_device[32];
+    char actual_inode[32];
+    int device_length = snprintf(actual_device, sizeof(actual_device), "%llu",
+        (unsigned long long)status.st_dev);
+    int inode_length = snprintf(actual_inode, sizeof(actual_inode), "%llu",
+        (unsigned long long)status.st_ino);
+    if (device_length < 0 || inode_length < 0
+        || strcmp(actual_device, expected_device) != 0
+        || strcmp(actual_inode, expected_inode) != 0) {
+        *matches = 0;
+        return 0;
+    }
+    entry_identity identity;
+    enum identity_result identity_status = calculate_entry_identity(parent_fd, leaf, &status, &identity);
+    if (identity_status != IDENTITY_OK) {
+        *matches = 0;
+        return 0;
+    }
+    char actual_manifest[sizeof("sha256:") + SHA256_HEX_BYTES];
+    int manifest_length = snprintf(actual_manifest, sizeof(actual_manifest), "sha256:%s",
+        identity.manifest_hex);
+    free(identity.raw_target_base64);
+    *matches = manifest_length >= 0 && (size_t)manifest_length < sizeof(actual_manifest)
+        && strcmp(actual_manifest, expected_manifest) == 0;
+    return 0;
+}
+
+static int reconcile_entry(const char *home_path, const char *active_root,
+                           const char *entry_path, const char *transaction_id,
+                           const char *payload_leaf, const char *expected_device,
+                           const char *expected_inode, const char *expected_manifest) {
+    char active_leaf[NAME_MAX + 1U];
+    if (!allowed_active_root(home_path, active_root)
+        || split_immediate_child(entry_path, active_root, active_leaf) != 0
+        || !valid_sha256_identifier(transaction_id) || !valid_component(payload_leaf)) {
+        return emit_error("invalid_reconcile_identity");
+    }
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    const char *active_relative = relative_to_home(home_path, active_root);
+    int active_fd = -1;
+    int git_marker = active_relative == NULL
+        ? -1
+        : open_active_directory_without_git(home_fd, active_relative, &active_fd);
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int transactions_fd = quarantine_fd < 0
+        ? -1
+        : open_relative_directory(quarantine_fd, "transactions", 0, 1);
+    int transaction_fd = transactions_fd < 0
+        ? -1
+        : openat(transactions_fd, transaction_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    int payload_fd = transaction_fd < 0
+        ? -1
+        : openat(transaction_fd, "payload", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (quarantine_fd >= 0) close(quarantine_fd);
+    if (transactions_fd >= 0) close(transactions_fd);
+    if (transaction_fd >= 0) close(transaction_fd);
+    close(home_fd);
+    if (git_marker != 0) {
+        if (active_fd >= 0) close(active_fd);
+        if (payload_fd >= 0) close(payload_fd);
+        return emit_error("authoring_source_changed");
+    }
+    if (active_fd < 0 || payload_fd < 0 || verify_directory_fd(payload_fd, 1) != 0) {
+        if (active_fd >= 0) close(active_fd);
+        if (payload_fd >= 0) close(payload_fd);
+        return emit_recovery_required("reconcile_paths_unavailable");
+    }
+    int original_present = 0;
+    int original_matches = 0;
+    int payload_present = 0;
+    int payload_matches = 0;
+    int result = reconcile_leaf(
+        active_fd,
+        active_leaf,
+        expected_device,
+        expected_inode,
+        expected_manifest,
+        &original_present,
+        &original_matches
+    );
+    if (result == 0) {
+        result = reconcile_leaf(
+            payload_fd,
+            payload_leaf,
+            expected_device,
+            expected_inode,
+            expected_manifest,
+            &payload_present,
+            &payload_matches
+        );
+    }
+    close(active_fd);
+    close(payload_fd);
+    if (result != 0 || (payload_present && !payload_matches)) {
+        return emit_recovery_required("reconcile_identity_mismatch");
+    }
+    const char *location;
+    if (payload_present) {
+        if (!original_present) location = "quarantine";
+        else location = original_matches ? "both" : "rehydrated";
+    } else if (!original_present) {
+        location = "neither";
+    } else {
+        location = original_matches ? "original" : "original_drift";
+    }
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"reconcile\","
+           "\"location\":\"%s\",\"original_present\":%s,\"original_matches\":%s,"
+           "\"payload_present\":%s,\"payload_matches\":%s}\n",
+           HELPER_PROTOCOL,
+           location,
+           original_present ? "true" : "false",
+           original_matches ? "true" : "false",
+           payload_present ? "true" : "false",
+           payload_matches ? "true" : "false");
+    return 0;
 }
 
 static int rename_exclusive(const char *home_path, const char *active_root, const char *entry_path,
@@ -1353,18 +2244,23 @@ static int rename_exclusive(const char *home_path, const char *active_root, cons
         return emit_error("unsafe_home");
     }
     const char *active_relative = relative_to_home(home_path, active_root);
-    int source_fd = active_relative == NULL ? -1 : open_relative_directory(home_fd, active_relative, 0, 0);
+    int source_fd = -1;
+    int active_git_marker = active_relative == NULL
+        ? -1
+        : open_active_directory_without_git(home_fd, active_relative, &source_fd);
     int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 1);
     int destination_fd = quarantine_fd;
     if (quarantine_fd >= 0 && strcmp(destination_relative, ".") != 0) {
         destination_fd = open_relative_directory(quarantine_fd, destination_relative, 1, 1);
         close(quarantine_fd);
     }
-    if (source_fd < 0 || destination_fd < 0) {
+    if (active_git_marker != 0 || source_fd < 0 || destination_fd < 0) {
         if (source_fd >= 0) close(source_fd);
         if (destination_fd >= 0) close(destination_fd);
         close(home_fd);
-        return emit_error("unsafe_rename_parent");
+        return emit_error(active_git_marker == 0
+            ? "unsafe_rename_parent"
+            : "authoring_source_changed");
     }
     struct stat source_parent;
     struct stat destination_parent;
@@ -1416,19 +2312,8 @@ static int rename_exclusive(const char *home_path, const char *active_root, cons
         close(home_fd);
         return emit_error("identity_changed");
     }
-    if (strcmp(current_identity.kind, "directory") == 0) {
-        int git_marker = real_directory_has_git_ancestor(home_fd, active_relative, source_leaf);
-        char receipt_digest[SHA256_HEX_BYTES];
-        if (git_marker != 0
-            || hash_install_receipt_from_home_fd(home_fd, receipt_digest) != 0
-            || strcmp(receipt_digest, expected_receipt) != 0) {
-            free(current_identity.raw_target_base64);
-            close(source_fd);
-            close(destination_fd);
-            close(home_fd);
-            return emit_error(git_marker == 0 ? "receipt_drift" : "authoring_source_changed");
-        }
-    } else if (strcmp(expected_receipt, "-") != 0) {
+    int directory_entry = strcmp(current_identity.kind, "directory") == 0;
+    if (!directory_entry && strcmp(expected_receipt, "-") != 0) {
         free(current_identity.raw_target_base64);
         close(source_fd);
         close(destination_fd);
@@ -1436,6 +2321,63 @@ static int rename_exclusive(const char *home_path, const char *active_root, cons
         return emit_error("identity_changed");
     }
     free(current_identity.raw_target_base64);
+    struct stat source_revalidated;
+    entry_identity revalidated_identity;
+    enum identity_result revalidated_status = fstatat(
+        source_fd,
+        source_leaf,
+        &source_revalidated,
+        AT_SYMLINK_NOFOLLOW
+    ) == 0
+        && source_revalidated.st_dev == source_before.st_dev
+        && source_revalidated.st_ino == source_before.st_ino
+        ? calculate_entry_identity(source_fd, source_leaf, &source_revalidated, &revalidated_identity)
+        : IDENTITY_UNAVAILABLE;
+    char revalidated_manifest[sizeof("sha256:") + SHA256_HEX_BYTES];
+    int revalidated_manifest_length = revalidated_status == IDENTITY_OK
+        ? snprintf(revalidated_manifest, sizeof(revalidated_manifest), "sha256:%s",
+                   revalidated_identity.manifest_hex)
+        : -1;
+    int revalidated_matches = revalidated_status == IDENTITY_OK
+        && revalidated_manifest_length >= 0
+        && (size_t)revalidated_manifest_length < sizeof(revalidated_manifest)
+        && strcmp(revalidated_manifest, expected_manifest) == 0;
+    if (revalidated_status == IDENTITY_OK) free(revalidated_identity.raw_target_base64);
+    if (!revalidated_matches) {
+        close(source_fd);
+        close(destination_fd);
+        close(home_fd);
+        return emit_error(revalidated_status == IDENTITY_AUTHORING_SOURCE
+            ? "authoring_source_changed"
+            : "identity_changed");
+    }
+    if (directory_entry) {
+        char receipt_digest[SHA256_HEX_BYTES];
+        if (hash_install_receipt_from_home_fd(home_fd, receipt_digest) != 0
+            || strcmp(receipt_digest, expected_receipt) != 0) {
+            close(source_fd);
+            close(destination_fd);
+            close(home_fd);
+            return emit_error("receipt_drift");
+        }
+    }
+    int binding_status = active_directory_still_bound_without_git(
+        home_fd,
+        active_relative,
+        source_fd
+    );
+    int entry_git_marker = 0;
+    if (binding_status == 0 && directory_entry) {
+        int entry_fd = openat(source_fd, source_leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        entry_git_marker = entry_fd < 0 ? -1 : directory_has_git_marker(entry_fd);
+        if (entry_fd >= 0) close(entry_fd);
+    }
+    if (binding_status != 0 || entry_git_marker != 0) {
+        close(source_fd);
+        close(destination_fd);
+        close(home_fd);
+        return emit_error("authoring_source_changed");
+    }
     close(home_fd);
     int rename_result = renameatx_np(source_fd, source_leaf, destination_fd, destination_leaf, RENAME_EXCL);
     int rename_errno = errno;
@@ -1515,6 +2457,165 @@ static int rename_exclusive(const char *home_path, const char *active_root, cons
     return 0;
 }
 
+static int restore_exclusive(const char *home_path, const char *active_root,
+                             const char *entry_path, const char *transaction_id,
+                             const char *payload_leaf, const char *expected_device,
+                             const char *expected_inode, const char *expected_manifest) {
+    char destination_leaf[NAME_MAX + 1U];
+    if (!allowed_active_root(home_path, active_root)
+        || split_immediate_child(entry_path, active_root, destination_leaf) != 0
+        || !valid_sha256_identifier(transaction_id) || !valid_component(payload_leaf)) {
+        return emit_error("invalid_restore_identity");
+    }
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    const char *active_relative = relative_to_home(home_path, active_root);
+    int destination_fd = -1;
+    int active_git_marker = active_relative == NULL
+        ? -1
+        : open_active_directory_without_git(home_fd, active_relative, &destination_fd);
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int transactions_fd = quarantine_fd < 0
+        ? -1
+        : open_relative_directory(quarantine_fd, "transactions", 0, 1);
+    int transaction_fd = transactions_fd < 0
+        ? -1
+        : openat(transactions_fd, transaction_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    int source_fd = transaction_fd < 0
+        ? -1
+        : openat(transaction_fd, "payload", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (quarantine_fd >= 0) close(quarantine_fd);
+    if (transactions_fd >= 0) close(transactions_fd);
+    if (transaction_fd >= 0) close(transaction_fd);
+    if (active_git_marker != 0) {
+        if (source_fd >= 0) close(source_fd);
+        if (destination_fd >= 0) close(destination_fd);
+        close(home_fd);
+        return emit_error("authoring_source_changed");
+    }
+    if (source_fd < 0 || destination_fd < 0 || verify_directory_fd(source_fd, 1) != 0) {
+        if (source_fd >= 0) close(source_fd);
+        if (destination_fd >= 0) close(destination_fd);
+        close(home_fd);
+        return emit_recovery_required("restore_paths_unavailable");
+    }
+    struct stat source_parent;
+    struct stat destination_parent;
+    int source_present = 0;
+    int source_matches = 0;
+    if (fstat(source_fd, &source_parent) != 0 || fstat(destination_fd, &destination_parent) != 0
+        || source_parent.st_dev != destination_parent.st_dev
+        || reconcile_leaf(
+            source_fd,
+            payload_leaf,
+            expected_device,
+            expected_inode,
+            expected_manifest,
+            &source_present,
+            &source_matches
+        ) != 0 || !source_present || !source_matches) {
+        close(source_fd);
+        close(destination_fd);
+        close(home_fd);
+        return emit_recovery_required("restore_identity_mismatch");
+    }
+    struct stat occupied;
+    if (fstatat(destination_fd, destination_leaf, &occupied, AT_SYMLINK_NOFOLLOW) == 0) {
+        close(source_fd);
+        close(destination_fd);
+        close(home_fd);
+        return emit_error("restore_destination_occupied");
+    }
+    if (errno != ENOENT) {
+        close(source_fd);
+        close(destination_fd);
+        close(home_fd);
+        return emit_recovery_required("restore_destination_ambiguous");
+    }
+    int binding_status = active_directory_still_bound_without_git(
+        home_fd,
+        active_relative,
+        destination_fd
+    );
+    if (binding_status != 0) {
+        close(source_fd);
+        close(destination_fd);
+        close(home_fd);
+        return emit_error("authoring_source_changed");
+    }
+    close(home_fd);
+    int renamed = renameatx_np(
+        source_fd,
+        payload_leaf,
+        destination_fd,
+        destination_leaf,
+        RENAME_EXCL
+    );
+    int rename_errno = errno;
+    if (renamed != 0) {
+        int payload_still_present = 0;
+        int payload_still_matches = 0;
+        struct stat destination_after_failure;
+        int destination_exists = fstatat(
+            destination_fd,
+            destination_leaf,
+            &destination_after_failure,
+            AT_SYMLINK_NOFOLLOW
+        ) == 0;
+        int source_coherent = reconcile_leaf(
+            source_fd,
+            payload_leaf,
+            expected_device,
+            expected_inode,
+            expected_manifest,
+            &payload_still_present,
+            &payload_still_matches
+        ) == 0 && payload_still_present && payload_still_matches;
+        close(source_fd);
+        close(destination_fd);
+        if (rename_errno == EEXIST && source_coherent && destination_exists) {
+            return emit_error("restore_destination_occupied");
+        }
+        return emit_recovery_required("restore_move_ambiguous");
+    }
+    crash_at_test_seam("after_restore_rename");
+    int payload_after_present = 0;
+    int payload_after_matches = 0;
+    int destination_after_present = 0;
+    int destination_after_matches = 0;
+    int postcondition = reconcile_leaf(
+        source_fd,
+        payload_leaf,
+        expected_device,
+        expected_inode,
+        expected_manifest,
+        &payload_after_present,
+        &payload_after_matches
+    ) == 0 && reconcile_leaf(
+        destination_fd,
+        destination_leaf,
+        expected_device,
+        expected_inode,
+        expected_manifest,
+        &destination_after_present,
+        &destination_after_matches
+    ) == 0 && !payload_after_present && destination_after_present && destination_after_matches;
+    int source_durable = fsync(source_fd) == 0;
+    int destination_durable = fsync(destination_fd) == 0;
+    close(source_fd);
+    close(destination_fd);
+    if (!postcondition || !source_durable || !destination_durable) {
+        return emit_recovery_required("restore_recovery_required");
+    }
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"restore-exclusive\","
+           "\"manifest_hash\":\"%s\"}\n",
+           HELPER_PROTOCOL, expected_manifest);
+    return 0;
+}
+
 static int emit_identity(void) {
     struct utsname information;
     if (uname(&information) != 0) return emit_error("identity_unavailable");
@@ -1542,6 +2643,45 @@ int main(int argument_count, char **arguments) {
     }
     if (strcmp(command, "publish-state") == 0 && argument_count == 6) {
         return publish_state(arguments[2], arguments[3], arguments[4], arguments[5]);
+    }
+    if (strcmp(command, "transaction-init") == 0 && argument_count == 4) {
+        return transaction_init(arguments[2], arguments[3]);
+    }
+    if (strcmp(command, "probe-transaction") == 0 && argument_count == 4) {
+        return probe_transaction(arguments[2], arguments[3]);
+    }
+    if (strcmp(command, "lock-acquire") == 0 && argument_count == 7) {
+        return lock_acquire(arguments[2], arguments[3], arguments[4], arguments[5], arguments[6]);
+    }
+    if (strcmp(command, "lock-release") == 0 && argument_count == 9) {
+        return move_lock_to_transaction(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], 0
+        );
+    }
+    if (strcmp(command, "lock-isolate-stale") == 0 && argument_count == 9) {
+        return move_lock_to_transaction(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], 1
+        );
+    }
+    if (strcmp(command, "transaction-advance") == 0 && argument_count == 12) {
+        return transaction_advance(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], arguments[9], arguments[10], arguments[11]
+        );
+    }
+    if (strcmp(command, "reconcile") == 0 && argument_count == 10) {
+        return reconcile_entry(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], arguments[9]
+        );
+    }
+    if (strcmp(command, "restore-exclusive") == 0 && argument_count == 10) {
+        return restore_exclusive(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], arguments[9]
+        );
     }
     if (strcmp(command, "rename-exclusive") == 0 && argument_count == 11) {
         return rename_exclusive(arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],

@@ -47,6 +47,7 @@ stderr_file="$SANDBOX/stderr"
 scan_file="$SANDBOX/scan.json"
 review_file="$SANDBOX/review.json"
 decisions_file="$SANDBOX/decisions.json"
+plan_file="$SANDBOX/plan.json"
 
 [ -x "$NODE24_BIN" ] || { echo "Node 24 test runtime missing: $NODE24_BIN" >&2; exit 1; }
 assert_eq "certified Node major" "24" "$($NODE24_BIN -p 'process.versions.node.split(".")[0]')"
@@ -60,6 +61,8 @@ assert_eq "missing Node exits unsupported" "3" "$RUN_STATUS"
 assert_eq "missing Node emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
 assert_eq "missing Node error schema" "skills-refiner.cleanup.error.v1" "$(jq -r '.schema_version' "$stdout_file")"
 assert_eq "missing Node has no mutation" "false" "$(jq -r '.mutation_occurred' "$stdout_file")"
+assert_eq "missing Node mutation outcome is explicit" "unchanged" "$(jq -r '.mutation_outcome' "$stdout_file")"
+assert_eq "missing Node has no historical mutation" "false" "$(jq -r '.transaction_has_mutated' "$stdout_file")"
 assert_eq "missing Node has overall status" "unsupported" "$(jq -r '.overall_status' "$stdout_file")"
 assert_eq "missing Node has no committed transactions" "0" "$(jq '.committed_transaction_ids | length' "$stdout_file")"
 assert_eq "missing Node diagnostics stay on stderr" "1" "$(grep -c 'requires Node.js major 24' "$stderr_file")"
@@ -126,6 +129,68 @@ assert_eq "macOS retirement plan exits cleanly" "0" "$RUN_STATUS"
 assert_eq "macOS retirement plan has one item" "1" "$(jq '.items | length' "$stdout_file")"
 assert_eq "macOS plan uses native helper identity" "macos-native.v1" "$(jq -r '.items[0].execution_identity.adapter' "$stdout_file")"
 assert_eq "macOS plan binds helper protocol" "skills-refiner.macos-helper.v1" "$(jq -r '.items[0].execution_identity.helper_protocol' "$stdout_file")"
+cp "$stdout_file" "$plan_file"
+plan_hash=$(jq -r '.plan_hash' "$plan_file")
+transaction_id=$(jq -r '.items[0].transaction_id' "$plan_file")
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm wrong --json
+assert_eq "wrong apply confirmation exits invalid" "2" "$RUN_STATUS"
+assert_eq "wrong apply confirmation has no mutation" "false" "$(jq -r '.mutation_occurred' "$stdout_file")"
+assert_eq "wrong apply confirmation preserves entry" "true" "$([ -L "$SANDBOX/home/.claude/skills/source-skill" ] && echo true || echo false)"
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    SKILLS_REFINER_TEST_FAULT=before_state_planned SKILLS_REFINER_TEST_ROOT=/ \
+    "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$plan_hash" --json
+assert_eq "unsafe fault root exits invalid" "2" "$RUN_STATUS"
+assert_eq "unsafe fault root has stable error" "unsafe_test_fault_root" "$(jq -r '.error_code' "$stdout_file")"
+assert_eq "unsafe fault root preserves entry" "true" "$([ -L "$SANDBOX/home/.claude/skills/source-skill" ] && echo true || echo false)"
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$plan_hash" --json
+assert_eq "single-item apply commits" "0" "$RUN_STATUS"
+assert_eq "apply status is committed" "committed" "$(jq -r '.status' "$stdout_file")"
+assert_eq "apply reports current mutation" "true" "$(jq -r '.mutation_occurred' "$stdout_file")"
+assert_eq "apply removes active link" "false" "$([ -e "$SANDBOX/home/.claude/skills/source-skill" ] || [ -L "$SANDBOX/home/.claude/skills/source-skill" ] && echo true || echo false)"
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup status --json "$transaction_id"
+assert_eq "status reads historical helper" "0" "$RUN_STATUS"
+assert_eq "status reports committed" "committed" "$(jq -r '.status' "$stdout_file")"
+assert_eq "status does not claim current mutation" "false" "$(jq -r '.mutation_occurred' "$stdout_file")"
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup undo "$transaction_id" --confirm "$transaction_id" --evil --json
+assert_eq "undo rejects an unconsumed trailing option" "2" "$RUN_STATUS"
+assert_eq "invalid undo does not mutate" "false" "$(jq -r '.mutation_occurred' "$stdout_file")"
+
+ln -s "$SANDBOX/source-two" "$SANDBOX/home/.claude/skills/source-skill"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup undo --json "$transaction_id" --confirm "$transaction_id"
+assert_eq "occupied undo exits conflict" "21" "$RUN_STATUS"
+assert_eq "occupied undo reports stable error" "restore_destination_occupied" "$(jq -r '.error_code' "$stdout_file")"
+assert_eq "occupied undo reports no current mutation" "false" "$(jq -r '.mutation_occurred' "$stdout_file")"
+assert_eq "occupied undo preserves historical mutation" "true" "$(jq -r '.transaction_has_mutated' "$stdout_file")"
+assert_eq "occupied undo reports its committed transaction" "$transaction_id" "$(jq -r '.committed_transaction_ids[0]' "$stdout_file")"
+assert_eq "occupied undo reports command context" "undo" "$(jq -r '.command' "$stdout_file")"
+assert_eq "occupied undo reports durable state" "COMMITTED" "$(jq -r '.state' "$stdout_file")"
+assert_eq "occupied undo reports observed location" "rehydrated" "$(jq -r '.location' "$stdout_file")"
+rm "$SANDBOX/home/.claude/skills/source-skill"
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup undo --json "$transaction_id" --confirm "$transaction_id"
+assert_eq "undo restores transaction" "0" "$RUN_STATUS"
+assert_eq "undo status is restored" "restored" "$(jq -r '.status' "$stdout_file")"
+assert_eq "undo restores raw symlink" "$SANDBOX/source-one" "$(readlink "$SANDBOX/home/.claude/skills/source-skill")"
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup apply --plan "$plan_file" --confirm "$plan_hash" --json
+assert_eq "restored transaction rejects replay" "10" "$RUN_STATUS"
+assert_eq "replay reports stable error" "replay_protected" "$(jq -r '.error_code' "$stdout_file")"
+assert_eq "replay reports no current mutation" "false" "$(jq -r '.mutation_occurred' "$stdout_file")"
+assert_eq "replay preserves historical mutation" "true" "$(jq -r '.transaction_has_mutated' "$stdout_file")"
+assert_eq "replay has no currently committed transaction" "0" "$(jq '.committed_transaction_ids | length' "$stdout_file")"
+assert_eq "replay reports durable state" "RESTORED" "$(jq -r '.state' "$stdout_file")"
 
 rm "$SANDBOX/home/.claude/skills/source-skill"
 ln -s "$SANDBOX/source-two" "$SANDBOX/home/.claude/skills/source-skill"

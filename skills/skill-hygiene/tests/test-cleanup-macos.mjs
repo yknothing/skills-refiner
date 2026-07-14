@@ -14,6 +14,7 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
@@ -227,6 +228,32 @@ test('helper response parsing rejects malformed, oversized, and unknown response
       { mutationMayHaveOccurred: true },
     ),
     expectAdapterError('recovery_required', 'helper_mutation_result_unknown'),
+  );
+  assert.throws(
+    () => __testing.parseHelperResult({
+      stdout: JSON.stringify({
+        protocol: 'skills-refiner.macos-helper.v1',
+        status: 'recovery_required',
+        reason: 'probe_ambiguous',
+      }),
+      status: 20,
+    }),
+    (error) => error instanceof MacosAdapterError
+      && error.reason === 'probe_ambiguous'
+      && error.mutationMayHaveOccurred === false,
+  );
+  assert.throws(
+    () => __testing.parseHelperResult({
+      stdout: JSON.stringify({
+        protocol: 'skills-refiner.macos-helper.v1',
+        status: 'recovery_required',
+        reason: 'rename_ambiguous',
+      }),
+      status: 20,
+    }, { mutationMayHaveOccurred: true }),
+    (error) => error instanceof MacosAdapterError
+      && error.reason === 'rename_ambiguous'
+      && error.mutationMayHaveOccurred === true,
   );
 });
 
@@ -850,7 +877,7 @@ test('runtime cache is source-bound, survives exact rebuild, and blocks tamperin
       }),
       expectAdapterError('unsupported', 'compiler_unavailable'),
     );
-    rmSync(runtimeRoot);
+    unlinkSync(runtimeRoot);
     renameSync(redirectedRuntime, runtimeRoot);
     __testing.ensureWithXcrun({ home: spacedHome });
 
@@ -864,7 +891,7 @@ test('runtime cache is source-bound, survives exact rebuild, and blocks tamperin
       }),
       expectAdapterError('unsupported', 'compiler_unavailable'),
     );
-    rmSync(runtimeRoot);
+    unlinkSync(runtimeRoot);
     renameSync(redirectedRuntime, runtimeRoot);
 
     rmSync(dirname(initial.path), { recursive: true, force: true });

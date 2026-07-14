@@ -10,7 +10,7 @@ done
 
 bootstrap_error() {
     if $JSON_REQUESTED; then
-        printf '%s\n' '{"schema_version":"skills-refiner.cleanup.error.v1","status":"unsupported","overall_status":"unsupported","error_code":"node_runtime_unavailable","mutation_occurred":false,"committed_transaction_ids":[]}'
+        printf '%s\n' '{"schema_version":"skills-refiner.cleanup.error.v1","status":"unsupported","overall_status":"unsupported","error_code":"node_runtime_unavailable","mutation_occurred":false,"mutation_outcome":"unchanged","transaction_has_mutated":false,"committed_transaction_ids":[]}'
     fi
     echo "[ERROR] cleanup requires Node.js major 24" >&2
     exit 3

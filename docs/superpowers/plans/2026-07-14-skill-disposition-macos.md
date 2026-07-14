@@ -638,10 +638,10 @@ open transaction metadata directly. Zero or multiple matching helpers returns
 
 Missing Command Line Tools returns exit `3` only when no valid referenced
 cached helper exists. A missing or changed referenced helper blocks status/undo
-without changing either path; if the original source and compiler are still
-available, the CLI may rebuild only when the binary hash exactly matches the
-transaction. There is no `/bin/mv`, copy/delete, or path-string mutation
-fallback.
+without changing either path. `status` and `undo` never compile or rebuild a
+helper: they enumerate verified content-addressed cache entries and proceed
+only when exactly one cached helper matches the transaction's stored execution
+identity. There is no `/bin/mv`, copy/delete, or path-string mutation fallback.
 
 Compile with:
 
@@ -858,12 +858,18 @@ not proceed to Task 5 unless the native macOS gate is green.
 
 - Create: `skills/skill-hygiene/lib/cleanup-transaction.mjs`
 - Create: `skills/skill-hygiene/tests/test-cleanup-transaction.mjs`
+- Modify: `skills/skill-hygiene/native/cleanup-macos-helper.c`
+- Modify: `skills/skill-hygiene/bin/skills-refiner`
+- Modify: `skills/skill-hygiene/lib/cleanup-macos.mjs`
 - Modify: `skills/skill-hygiene/lib/cleanup-cli.mjs`
 - Modify: `skills/skill-hygiene/lib/cleanup-contract.mjs`
-- Modify: `skills/skill-hygiene/tests/cleanup-fixtures.mjs`
+- Modify: `skills/skill-hygiene/lib/cleanup-core.mjs`
 - Modify: `skills/skill-hygiene/tests/test-cleanup-cli.sh`
+- Modify: `skills/skill-hygiene/tests/test-cleanup-contract.mjs`
+- Modify: `skills/skill-hygiene/tests/test-cleanup-core.mjs`
+- Modify: `skills/skill-hygiene/tests/test-cleanup-macos.mjs`
 
-- [ ] **Step 1: Write failing state-machine tests**
+- [x] **Step 1: Write failing state-machine tests**
 
 Use one-item plans and a sandboxed quarantine root. Assert only these forward
 transitions:
@@ -872,19 +878,21 @@ transitions:
 PLANNED -> CONFIRMED -> PREPARED -> APPLYING -> COMMITTED
 PLANNED|CONFIRMED|PREPARED -> BLOCKED|ABORTED
 APPLYING -> RECOVERY_REQUIRED when reconciliation is ambiguous
+COMMITTED -> RESTORE_PREPARED -> RESTORING -> RESTORED
+RESTORE_PREPARED|RESTORING -> RECOVERY_REQUIRED when reconciliation is ambiguous
 ```
 
 Reject unknown, missing, repeated, and backward transitions. A committed apply
 must be idempotent and return exit `0` with status `already_committed`.
 
-- [ ] **Step 2: Write failing storage and lock tests**
+- [x] **Step 2: Write failing storage and lock tests**
 
 Verify this owner-only layout outside every discovery root:
 
 ```text
 ~/.agents/skills-quarantine/
   lock/
-  transactions/TRANSACTION_ID/
+  transactions/STORAGE_KEY/
     plan.json
     manifest.json
     state.json
@@ -892,10 +900,16 @@ Verify this owner-only layout outside every discovery root:
     payload/OPAQUE_ITEM_ID
 ```
 
+The public transaction ID remains `sha256:<64 lowercase hex>`. The filesystem
+`STORAGE_KEY` is exactly the 64-hex suffix, so the durable layout is also valid
+on Windows filesystems even though Windows mutation remains unsupported in this
+macOS-first release.
+
 Start two apply processes for the same plan behind a barrier. Assert exactly
-one wins exclusive transaction creation, the loser performs no pre-lock write,
-both observe the same immutable plan bytes, and only the lock owner may advance
-state. Repeat with altered existing bytes and require
+one wins exclusive transaction creation. Each contender may write only its own
+private staging directory; the loser never rewrites the authoritative
+transaction. Both observe the same immutable plan bytes, and only the lock
+owner may advance state. Repeat with altered existing bytes and require
 `RECOVERY_REQUIRED` before lock acquisition.
 
 Acquire the global lock through exclusive directory creation. Record owner PID,
@@ -906,12 +920,14 @@ in the plan after hash calculation, and is recomputed by the validator. This
 makes it available to the caller even if apply is killed before stdout.
 
 Create and durably publish the transaction's `PLANNED` metadata before lock
-acquisition; this does not touch an active entry. The native helper creates the
-deterministic transaction directory with exclusive `mkdirat`. The winner writes
-immutable `plan.json` and the initial state. A concurrent loser opens the
+acquisition; this does not touch an active entry. The native helper writes a
+complete owner-only private staging directory, `fsync`s it, and publishes the
+deterministic transaction directory with `renameatx_np(..., RENAME_EXCL)`. The
+winner exposes immutable `plan.json` and the initial state atomically. A concurrent loser opens the
 existing directory read-only, verifies owner, mode, schema, canonical plan
 hash projection, item hash, transaction ID, platform, and execution identity,
-then waits for the global lock without rewriting any file. It does not compare
+then returns a bounded `lock_held` result if another live owner holds the global
+lock, without rewriting any authoritative file. It does not compare
 excluded presentation fields such as `created_at`. Any semantic mismatch is
 `RECOVERY_REQUIRED`.
 
@@ -922,7 +938,7 @@ ID/plan hash/nonce match, and journal/path reconciliation is unambiguous;
 otherwise it returns `RECOVERY_REQUIRED`. Transaction and payload names use
 opaque IDs, not skill names.
 
-- [ ] **Step 3: Implement write-ahead apply**
+- [x] **Step 3: Implement write-ahead apply**
 
 `applyItem` must perform exactly:
 
@@ -943,32 +959,37 @@ validate schema and confirmation
 -> release lock
 ```
 
-The transaction document uses schema
-`skills-refiner.cleanup.transaction.v1`. `events.jsonl` is diagnostic history;
-the durably replaced `state.json` is the authoritative state. Never declare
+The immutable manifest uses
+`skills-refiner.cleanup.transaction-manifest.v1`, the authoritative mutable
+state uses `skills-refiner.cleanup.transaction-state.v1`, and command results
+use `skills-refiner.cleanup.transaction.v1`. `events.jsonl` is diagnostic
+history; the durably replaced `state.json` is the authoritative state. Never declare
 commit before the postcondition and committed-state directory sync both pass.
 All transaction directory creation, metadata publication, diagnostic append,
 and lock operations go through the fd-bound native helper; Node never opens a
 path below active, quarantine, transaction, lock, or Keep roots directly.
 
-- [ ] **Step 4: Write failing reconciliation tests**
+- [x] **Step 4: Write failing reconciliation tests**
 
 For each state, compare no-follow identities at the original and quarantine
 paths:
 
 ```text
-only original matches   -> UNCHANGED
-only quarantine matches -> QUARANTINED
-both match              -> RECOVERY_REQUIRED
-neither matches         -> RECOVERY_REQUIRED
-either identity differs -> RECOVERY_REQUIRED
+only original matches                    -> UNCHANGED
+only quarantine matches                  -> QUARANTINED
+quarantine matches + different original  -> REHYDRATED / retryable undo conflict
+both exact or neither present            -> RECOVERY_REQUIRED
+payload differs                          -> RECOVERY_REQUIRED
+original differs before mutation intent  -> DRIFTED / BLOCKED
 ```
 
-`status` may finalize `COMMITTED` only when the durable intent proves mutation
-was authorized and the quarantine payload exactly matches the plan. It must not
-auto-move, auto-delete, auto-restore, overwrite, or merge an ambiguous state.
+`status` is read-only. It may report `ready_to_finalize_commit` only when the
+durable intent proves mutation was authorized and the quarantine payload
+exactly matches the plan; a retried `apply` performs the lease-bound final state
+advance. `status` must not auto-move, auto-delete, auto-restore, overwrite, or
+merge an ambiguous state.
 
-- [ ] **Step 5: Add deterministic fault seams and a real kill harness**
+- [x] **Step 5: Add deterministic fault seams and a real kill harness**
 
 Expose fault points only through an injected callback in the coordinator. The
 callback receives a phase and state so tests enumerate every boundary rather
@@ -1009,7 +1030,7 @@ committed/restored publication, invoke a fresh `cleanup status ID --json`,
 record the exit code and state, then converge with status or undo. Assert that
 no source repository content and no unrelated active entry changes.
 
-- [ ] **Step 6: Write failing undo and conflict tests**
+- [x] **Step 6: Write failing undo and conflict tests**
 
 Undo has its own confirmation, preflight, write-ahead intent, no-clobber move,
 verification, and durable result. Assert:
@@ -1020,17 +1041,19 @@ verification, and durable result. Assert:
 - repeated successful undo returns exit `0` with `already_restored`;
 - relative symlink raw targets are restored byte-for-byte;
 - the restore state machine is exactly `RESTORE_PREPARED -> RESTORING ->
-  RESTORED`, with `RESTORE_CONFLICT` and `RECOVERY_REQUIRED` terminal failures;
+  RESTORED`; an occupied destination returns a retryable conflict without a
+  terminal state transition, while true ambiguity advances to
+  `RECOVERY_REQUIRED`;
 - a single transaction restores safely without implying batch order.
 
-- [ ] **Step 7: Implement status and undo**
+- [x] **Step 7: Implement status and undo**
 
-Use the helper-backed `renameExclusive` for restore; never use `rm`,
+Use the helper-backed `restoreExclusive` for restore; never use `rm`,
 copy-and-delete, merge, or an overwriting rename. Keep committed transaction
 evidence after undo. Record a new durable restore state rather than deleting the
 quarantine history.
 
-- [ ] **Step 8: Run the transaction promotion gate**
+- [x] **Step 8: Run the transaction promotion gate**
 
 Run on native macOS:
 
@@ -1045,11 +1068,18 @@ Expected: all state, idempotency, conflict, injected-fault, real-`SIGKILL`,
 reconciliation, and undo tests pass. Any severe or ambiguous failure blocks
 mutation promotion; do not weaken assertions or success language.
 
-- [ ] **Step 9: Commit the single-item transaction batch**
+Adversarial review approved promotion with no P0/P1 findings. Non-blocking P2
+follow-ups remain recorded: broaden sanitizer coverage to the full lock/state
+matrix; add finer lock-archive and restore-parent durability kill/failure seams;
+either implement bounded durable `events.jsonl` appends or keep it explicitly
+non-authoritative; distinguish an overfull helper cache from identity ambiguity;
+and add bounded native cleanup for private crash-orphan staging directories.
+
+- [x] **Step 9: Commit the single-item transaction batch**
 
 ```bash
 test -z "$(git diff --cached --name-only)"
-git add skills/skill-hygiene/lib/cleanup-contract.mjs skills/skill-hygiene/lib/cleanup-cli.mjs skills/skill-hygiene/lib/cleanup-transaction.mjs skills/skill-hygiene/tests/cleanup-fixtures.mjs skills/skill-hygiene/tests/test-cleanup-cli.sh skills/skill-hygiene/tests/test-cleanup-transaction.mjs
+git add skills/skill-hygiene/native/cleanup-macos-helper.c skills/skill-hygiene/bin/skills-refiner skills/skill-hygiene/lib/cleanup-macos.mjs skills/skill-hygiene/lib/cleanup-contract.mjs skills/skill-hygiene/lib/cleanup-core.mjs skills/skill-hygiene/lib/cleanup-cli.mjs skills/skill-hygiene/lib/cleanup-transaction.mjs skills/skill-hygiene/tests/test-cleanup-cli.sh skills/skill-hygiene/tests/test-cleanup-contract.mjs skills/skill-hygiene/tests/test-cleanup-core.mjs skills/skill-hygiene/tests/test-cleanup-macos.mjs skills/skill-hygiene/tests/test-cleanup-transaction.mjs
 git diff --cached --check
 git commit -m "feat(cleanup): quarantine entries with recoverable transactions"
 ```

@@ -9,7 +9,9 @@ import {
   computePlanHash,
   deriveTransactionId,
   sha256Json,
+  transactionStorageKey,
   validatePlan,
+  validateTransactionResult,
 } from '../lib/cleanup-contract.mjs';
 
 function validPlan(overrides = {}) {
@@ -43,6 +45,7 @@ function validPlan(overrides = {}) {
     schema_version: SCHEMAS.plan,
     product_version: '2.0',
     platform: 'macos',
+    authorization_id: '0'.repeat(32),
     scan_fingerprint: sha256Json({ scan: 1 }),
     created_at: '2026-07-14T00:00:00.000Z',
     items: [
@@ -116,11 +119,22 @@ test('hash primitives are deterministic and schema-shaped', () => {
   assert.equal(sha256Json({ b: 2, a: 1 }), sha256Json({ a: 1, b: 2 }));
 });
 
+test('public transaction IDs map to Windows-safe storage keys', () => {
+  const transactionId = sha256Json({ transaction: 'portable' });
+  const storageKey = transactionStorageKey(transactionId);
+  assert.match(storageKey, /^[0-9a-f]{64}$/u);
+  assert.equal(storageKey.includes(':'), false);
+  assert.throws(() => transactionStorageKey(storageKey), /transaction_id/);
+});
+
 test('plan hash excludes created_at and derived transaction IDs', () => {
   const first = validPlan();
   const second = validPlan({ created_at: '2099-01-01T00:00:00.000Z' });
   assert.equal(first.plan_hash, second.plan_hash);
   assert.equal(computePlanHash(first), first.plan_hash);
+
+  const newAuthorization = validPlan({ authorization_id: '1'.repeat(32) });
+  assert.notEqual(first.plan_hash, newAuthorization.plan_hash);
 });
 
 test('plan validator rejects a scanner document before adapter work', () => {
@@ -205,4 +219,45 @@ test('execution identity drift is rejected before plan hashes can authorize it',
   plan.plan_hash = computePlanHash(plan);
   plan.items[0].transaction_id = deriveTransactionId(plan.plan_hash, plan.items[0].item_id);
   assert.throws(() => validatePlan(plan), /identity_hash/);
+});
+
+test('public transaction results expose exact machine-readable mutation truth', () => {
+  const transactionId = sha256Json({ transaction: 1 });
+  const committed = {
+    schema_version: SCHEMAS.transaction,
+    command: 'apply',
+    status: 'committed',
+    overall_status: 'committed',
+    transaction_id: transactionId,
+    state: 'COMMITTED',
+    location: 'quarantine',
+    mutation_occurred: true,
+    mutation_outcome: 'moved',
+    transaction_has_mutated: true,
+    committed_transaction_ids: [transactionId],
+  };
+  assert.equal(validateTransactionResult(committed), committed);
+
+  for (const invalid of [
+    { ...committed, unexpected: true },
+    { ...committed, mutation_occurred: false },
+    { ...committed, mutation_outcome: 'unknown' },
+    { ...committed, transaction_has_mutated: false },
+    { ...committed, committed_transaction_ids: [] },
+    { ...committed, command: 'status' },
+  ]) {
+    assert.throws(() => validateTransactionResult(invalid), /transaction[_ ]result/);
+  }
+
+  const restored = {
+    ...committed,
+    command: 'undo',
+    status: 'restored',
+    overall_status: 'restored',
+    state: 'RESTORED',
+    location: 'original',
+    mutation_outcome: 'restored',
+    committed_transaction_ids: [],
+  };
+  assert.equal(validateTransactionResult(restored), restored);
 });

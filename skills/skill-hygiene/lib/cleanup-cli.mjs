@@ -1,22 +1,50 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ContractError, SCHEMAS, validatePlan } from './cleanup-contract.mjs';
 import { CleanupCoreError, compilePlan, compileReview } from './cleanup-core.mjs';
 import { MacosAdapterError, createMacosAdapter } from './cleanup-macos.mjs';
+import {
+  CleanupTransactionError,
+  APPLY_FAULT_PHASES,
+  RESTORE_FAULT_PHASES,
+  applyItem,
+  statusTransaction,
+  undoTransaction,
+} from './cleanup-transaction.mjs';
 
 const SCANNER_PATH = fileURLToPath(new URL('../bin/skill-scan.sh', import.meta.url));
 const JSON_REQUESTED = process.argv.slice(2).includes('--json');
+const TEST_FAULT_PHASES = new Set([...APPLY_FAULT_PHASES, ...RESTORE_FAULT_PHASES]);
 
 class CliError extends Error {
-  constructor(errorCode, exitCode, overallStatus, diagnostic) {
+  constructor(errorCode, exitCode, overallStatus, diagnostic, {
+    mutationOccurred = false,
+    mutationOutcome = 'unchanged',
+    transactionHasMutated = false,
+    committedTransactionIds = [],
+    command,
+    transactionId,
+    transactionState,
+    transactionLocation,
+  } = {}) {
     super(diagnostic);
     this.name = 'CliError';
     this.errorCode = errorCode;
     this.exitCode = exitCode;
     this.overallStatus = overallStatus;
     this.diagnostic = diagnostic;
+    this.mutationOccurred = mutationOccurred;
+    this.mutationOutcome = mutationOutcome;
+    this.transactionHasMutated = transactionHasMutated;
+    this.committedTransactionIds = committedTransactionIds;
+    this.command = command;
+    this.transactionId = transactionId;
+    this.transactionState = transactionState;
+    this.transactionLocation = transactionLocation;
   }
 }
 
@@ -30,6 +58,37 @@ function unsupported(errorCode, diagnostic) {
 
 function blocked(errorCode, overallStatus, diagnostic) {
   throw new CliError(errorCode, 10, overallStatus, diagnostic);
+}
+
+function pathIsWithin(parent, child) {
+  const pathRelative = relative(parent, child);
+  return pathRelative.length === 0
+    || (!pathRelative.startsWith(`..${sep}`) && pathRelative !== '..' && !isAbsolute(pathRelative));
+}
+
+function transactionFaultCallback() {
+  const phase = process.env.SKILLS_REFINER_TEST_FAULT;
+  if (phase === undefined) return null;
+  const root = process.env.SKILLS_REFINER_TEST_ROOT;
+  try {
+    if (!TEST_FAULT_PHASES.has(phase) || typeof root !== 'string' || !isAbsolute(root)
+        || resolve(root) !== root) throw new Error('unsafe test fault request');
+    const resolvedRoot = realpathSync(root);
+    const resolvedTemp = realpathSync(tmpdir());
+    const resolvedHome = realpathSync(process.env.HOME);
+    const rootStatus = lstatSync(resolvedRoot);
+    if (resolvedRoot !== root || !pathIsWithin(resolvedTemp, resolvedRoot)
+        || !pathIsWithin(resolvedRoot, resolvedHome)
+        || !rootStatus.isDirectory() || rootStatus.isSymbolicLink()
+        || rootStatus.uid !== process.getuid() || (rootStatus.mode & 0o077) !== 0) {
+      throw new Error('unsafe test fault request');
+    }
+  } catch {
+    invalid('unsafe_test_fault_root', '[ERROR] Cleanup rejected an unsafe test fault request.');
+  }
+  return async (observedPhase) => {
+    if (observedPhase === phase) process.kill(process.pid, 'SIGKILL');
+  };
 }
 
 function parseJson(text) {
@@ -140,7 +199,7 @@ async function runPlan(args) {
   );
 }
 
-function runApply(args) {
+async function runApply(args) {
   rejectUnknownOptions(args, new Set(['--plan', '--confirm']));
   const planPath = parseNamedFileOption(args, '--plan');
   if (!planPath) invalid();
@@ -153,7 +212,64 @@ function runApply(args) {
     }
     throw error;
   }
-  unsupported('platform_adapter_unavailable', '[ERROR] No certified mutation adapter is available yet.');
+  const confirmation = parseNamedFileOption(args, '--confirm');
+  if (!confirmation) invalid('confirmation_required', '[ERROR] Apply requires an exact plan confirmation.');
+  if (process.platform !== 'darwin') {
+    unsupported('platform_adapter_unavailable', '[ERROR] No certified mutation adapter is available on this platform.');
+  }
+  return applyItem({
+    home: process.env.HOME,
+    plan,
+    confirmation,
+    fault: transactionFaultCallback(),
+  });
+}
+
+function parseTransactionArguments(args, { allowConfirmation = false } = {}) {
+  const positional = [];
+  let confirmation = null;
+  let jsonSeen = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--json') {
+      if (jsonSeen) invalid();
+      jsonSeen = true;
+      continue;
+    }
+    if (argument === '--confirm') {
+      if (!allowConfirmation || confirmation !== null || index + 1 >= args.length
+          || args[index + 1].startsWith('--')) invalid();
+      confirmation = args[index + 1];
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith('--')) invalid();
+    positional.push(argument);
+  }
+  if (positional.length !== 1) invalid();
+  return { transactionId: positional[0], confirmation };
+}
+
+function runStatus(args) {
+  const { transactionId } = parseTransactionArguments(args);
+  return statusTransaction({ home: process.env.HOME, transactionId });
+}
+
+async function runUndo(args) {
+  const { transactionId, confirmation } = parseTransactionArguments(
+    args,
+    { allowConfirmation: true },
+  );
+  if (!confirmation) invalid('confirmation_required', '[ERROR] Undo requires an exact transaction confirmation.');
+  if (process.platform !== 'darwin') {
+    unsupported('platform_adapter_unavailable', '[ERROR] No certified mutation adapter is available on this platform.');
+  }
+  return undoTransaction({
+    home: process.env.HOME,
+    transactionId,
+    confirmation,
+    fault: transactionFaultCallback(),
+  });
 }
 
 function helpText() {
@@ -164,6 +280,8 @@ function helpText() {
     '  skills-refiner cleanup review [--scan FILE] [--json]',
     '  skills-refiner cleanup plan --review FILE --decisions FILE [--json]',
     '  skills-refiner cleanup apply --plan FILE --confirm HASH [--json]',
+    '  skills-refiner cleanup status TRANSACTION_ID [--json]',
+    '  skills-refiner cleanup undo TRANSACTION_ID --confirm TRANSACTION_ID [--json]',
     '  skills-refiner cleanup --help',
     '',
   ].join('\n');
@@ -180,22 +298,28 @@ async function run(argv) {
   }
   if (command === 'review') return { kind: 'result', value: runReview(args) };
   if (command === 'plan') return { kind: 'result', value: await runPlan(args) };
-  if (command === 'apply') return { kind: 'result', value: runApply(args) };
-  if (['status', 'undo'].includes(command)) {
-    unsupported('command_not_implemented', '[ERROR] This cleanup command is not implemented yet.');
-  }
+  if (command === 'apply') return { kind: 'result', value: await runApply(args) };
+  if (command === 'status') return { kind: 'result', value: runStatus(args) };
+  if (command === 'undo') return { kind: 'result', value: await runUndo(args) };
   invalid();
 }
 
 function errorResult(error) {
-  return {
+  const result = {
     schema_version: SCHEMAS.error,
     status: error.overallStatus,
     overall_status: error.overallStatus,
     error_code: error.errorCode,
-    mutation_occurred: false,
-    committed_transaction_ids: [],
+    mutation_occurred: error.mutationOccurred,
+    mutation_outcome: error.mutationOutcome,
+    transaction_has_mutated: error.transactionHasMutated,
+    committed_transaction_ids: error.committedTransactionIds,
   };
+  if (error.command !== undefined) result.command = error.command;
+  if (error.transactionId !== undefined) result.transaction_id = error.transactionId;
+  if (error.transactionState !== undefined) result.state = error.transactionState;
+  if (error.transactionLocation !== undefined) result.location = error.transactionLocation;
+  return result;
 }
 
 try {
@@ -231,6 +355,7 @@ try {
   } else if (error instanceof MacosAdapterError) {
     const isUnsupported = error.code === 'unsupported';
     const requiresRecovery = error.code === 'recovery_required';
+    const mutationAmbiguous = requiresRecovery && error.mutationMayHaveOccurred;
     const isDrift = ['identity_changed', 'receipt_drift', 'installed_tree_drift'].includes(error.reason);
     mapped = new CliError(
       error.reason,
@@ -239,6 +364,35 @@ try {
         ? 'unsupported'
         : (requiresRecovery ? 'recovery_required' : (isDrift ? 'drifted' : 'blocked')),
       '[ERROR] The macOS cleanup safety adapter blocked the operation.',
+      mutationAmbiguous ? {
+        mutationOccurred: true,
+        mutationOutcome: 'unknown',
+        transactionHasMutated: true,
+      } : {},
+    );
+  } else if (error instanceof CleanupTransactionError) {
+    const exitCode = {
+      invalid: 2,
+      unsupported: 3,
+      blocked: 10,
+      recovery_required: 20,
+      conflict: 21,
+    }[error.status] ?? 20;
+    mapped = new CliError(
+      error.code,
+      exitCode,
+      error.status,
+      '[ERROR] Cleanup transaction safety checks did not converge.',
+      {
+        mutationOccurred: error.mutationOccurred ?? false,
+        mutationOutcome: error.mutationOutcome ?? 'unchanged',
+        transactionHasMutated: error.transactionHasMutated ?? false,
+        committedTransactionIds: error.committedTransactionIds ?? [],
+        command: error.command,
+        transactionId: error.transactionId,
+        transactionState: error.transactionState,
+        transactionLocation: error.transactionLocation,
+      },
     );
   } else {
     mapped = new CliError(
@@ -246,6 +400,7 @@ try {
       20,
       'recovery_required',
       '[ERROR] Cleanup encountered an internal error.',
+      { mutationOccurred: true, mutationOutcome: 'unknown', transactionHasMutated: true },
     );
   }
   if (JSON_REQUESTED) process.stdout.write(`${JSON.stringify(errorResult(mapped))}\n`);

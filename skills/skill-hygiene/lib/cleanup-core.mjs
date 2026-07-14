@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { basename } from 'node:path';
 
 import {
@@ -402,7 +403,12 @@ function itemOrder(left, right) {
   return compareStrings(left.candidate.candidate_id, right.candidate.candidate_id);
 }
 
-export async function compilePlan({ review, decisions, created_at: createdAt }, platform) {
+export async function compilePlan({
+  review,
+  decisions,
+  created_at: createdAt,
+  authorization_id: authorizationId,
+}, platform) {
   if (review.execution_eligible !== true) fail('offline_review', 'offline review cannot compile an executable plan');
   if (!platform || typeof platform.name !== 'string' || typeof platform.inspectForPlan !== 'function') {
     fail('platform_adapter_unavailable', 'platform adapter is unavailable');
@@ -448,6 +454,7 @@ export async function compilePlan({ review, decisions, created_at: createdAt }, 
     schema_version: SCHEMAS.plan,
     product_version: '2.0',
     platform: platform.name,
+    authorization_id: authorizationId ?? randomBytes(16).toString('hex'),
     scan_fingerprint: review.scan_fingerprint,
     created_at: createdAt ?? new Date().toISOString(),
     items,

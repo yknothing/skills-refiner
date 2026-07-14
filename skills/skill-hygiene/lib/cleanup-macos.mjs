@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -47,16 +47,19 @@ const ACTIVE_ROOTS = new Set([
 const helperCache = new Map();
 
 export class MacosAdapterError extends Error {
-  constructor(code, reason, message = 'macOS cleanup adapter blocked the operation') {
+  constructor(code, reason, message = 'macOS cleanup adapter blocked the operation', {
+    mutationMayHaveOccurred = false,
+  } = {}) {
     super(message);
     this.name = 'MacosAdapterError';
     this.code = code;
     this.reason = reason;
+    this.mutationMayHaveOccurred = mutationMayHaveOccurred;
   }
 }
 
-function fail(code, reason, message) {
-  throw new MacosAdapterError(code, reason, message);
+function fail(code, reason, message, context) {
+  throw new MacosAdapterError(code, reason, message, context);
 }
 
 function architecture() {
@@ -188,7 +191,14 @@ function trustedSystemPath(path, expectedKind) {
 
 function parseHelperOutput(result, { mutationMayHaveOccurred = false } = {}) {
   const failAmbiguous = (reason, nonMutationCode = 'blocked') => {
-    if (mutationMayHaveOccurred) fail('recovery_required', 'helper_mutation_result_unknown');
+    if (mutationMayHaveOccurred) {
+      fail(
+        'recovery_required',
+        'helper_mutation_result_unknown',
+        undefined,
+        { mutationMayHaveOccurred: true },
+      );
+    }
     fail(nonMutationCode, reason);
   };
   if (result.error) failAmbiguous('helper_invocation_failed', 'unsupported');
@@ -208,7 +218,12 @@ function parseHelperOutput(result, { mutationMayHaveOccurred = false } = {}) {
   }
   if (response.status === 'blocked') fail('blocked', response.reason ?? 'native_helper_blocked');
   if (response.status === 'recovery_required') {
-    fail('recovery_required', response.reason ?? 'native_helper_recovery_required');
+    fail(
+      'recovery_required',
+      response.reason ?? 'native_helper_recovery_required',
+      undefined,
+      { mutationMayHaveOccurred },
+    );
   }
   if (result.status !== 0) failAmbiguous('helper_exit_mismatch');
   return response;
@@ -230,7 +245,7 @@ function invokeHelper(helper, args, {
   return parseHelperOutput(result, { mutationMayHaveOccurred });
 }
 
-function verifiedCachedHelpers(home, targetArchitecture, expectedSourceHash) {
+function verifiedCachedHelpers(home, targetArchitecture, expectedSourceHash = null) {
   const architectureRoot = join(
     home,
     '.agents',
@@ -245,7 +260,9 @@ function verifiedCachedHelpers(home, targetArchitecture, expectedSourceHash) {
     return [];
   }
   const helpers = [];
-  for (const digest of readdirSync(architectureRoot).sort()) {
+  const cacheLeaves = readdirSync(architectureRoot).sort();
+  if (cacheLeaves.length > 256) return [];
+  for (const digest of cacheLeaves) {
     if (!DIGEST.test(digest)) continue;
     const leafDirectory = join(architectureRoot, digest);
     const executable = join(leafDirectory, 'cleanup-macos-helper');
@@ -266,9 +283,10 @@ function verifiedCachedHelpers(home, targetArchitecture, expectedSourceHash) {
       };
       const identity = invokeHelper(candidate, ['identity']);
       if (identity.operation === 'identity' && identity.architecture === targetArchitecture
-          && identity.source_sha256 === expectedSourceHash
+          && (expectedSourceHash === null || identity.source_sha256 === expectedSourceHash)
           && typeof identity.compiler_path === 'string' && !CONTROL_CHARACTERS.test(identity.compiler_path)
           && typeof identity.compiler_version === 'string' && !CONTROL_CHARACTERS.test(identity.compiler_version)) {
+        candidate.sourceHash = identity.source_sha256;
         candidate.compilerPath = identity.compiler_path;
         candidate.compilerVersion = identity.compiler_version;
         helpers.push(candidate);
@@ -703,9 +721,12 @@ function durableWriteJsonInternal({
   relativeDirectory = '.',
   leaf,
   value,
+  executionIdentity = null,
 } = {}, testEnvironment = {}) {
   const verifiedHome = safePath(home, 'home');
-  const helper = ensureMacosHelper({ home: verifiedHome });
+  const helper = executionIdentity === null
+    ? ensureMacosHelper({ home: verifiedHome })
+    : helperForExecutionIdentity(verifiedHome, executionIdentity);
   const input = `${canonicalJson(value)}\n`;
   return invokeHelper(helper, [
     'publish-state',
@@ -734,7 +755,7 @@ function renameExclusiveInternal({
       || typeof expectedIdentity.manifest_hash !== 'string') {
     fail('blocked', 'missing_expected_identity');
   }
-  const helper = ensureMacosHelper({ home: verifiedHome });
+  const helper = helperForExecutionIdentity(verifiedHome, expectedIdentity);
   return invokeHelper(helper, [
     'rename-exclusive',
     verifiedHome,
@@ -751,6 +772,322 @@ function renameExclusiveInternal({
 
 export function renameExclusive(options = {}) {
   return renameExclusiveInternal(options);
+}
+
+function helperForExecutionIdentity(home, executionIdentity) {
+  if (!executionIdentity || executionIdentity.helper_protocol !== HELPER_PROTOCOL
+      || typeof executionIdentity.binary_hash !== 'string'
+      || typeof executionIdentity.source_hash !== 'string') {
+    fail('blocked', 'invalid_referenced_helper_identity');
+  }
+  return ensureReferencedMacosHelper({
+    home,
+    binaryHash: executionIdentity.binary_hash.replace(/^sha256:/u, ''),
+    sourceHash: executionIdentity.source_hash.replace(/^sha256:/u, ''),
+    expectedArchitecture: executionIdentity.architecture,
+  });
+}
+
+function decodeTransactionRecord(response, field) {
+  const encoded = response[field];
+  if (typeof encoded !== 'string') fail('recovery_required', 'transaction_records_invalid');
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.toString('base64') !== encoded) {
+    fail('recovery_required', 'transaction_records_invalid');
+  }
+  let textValue;
+  let value;
+  try {
+    textValue = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    value = JSON.parse(textValue);
+  } catch {
+    fail('recovery_required', 'transaction_records_invalid');
+  }
+  if (canonicalJson(value) !== textValue) {
+    fail('recovery_required', 'transaction_records_noncanonical');
+  }
+  return value;
+}
+
+function decodeOptionalTransactionRecord(response, field) {
+  if (response[field] === null) return null;
+  return decodeTransactionRecord(response, field);
+}
+
+function initializeTransactionRecordsInternal({
+  home = process.env.HOME,
+  transactionId,
+  plan,
+  manifest,
+  state,
+  executionIdentity,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const input = [plan, manifest, state].map((value) => canonicalJson(value)).join('\n').concat('\n');
+  return invokeHelper(helper, ['transaction-init', verifiedHome, transactionId], {
+    input,
+    mutationMayHaveOccurred: true,
+    testEnvironment,
+  });
+}
+
+export function initializeTransactionRecords(options = {}) {
+  return initializeTransactionRecordsInternal(options);
+}
+
+export function probeTransactionRecords({
+  home = process.env.HOME,
+  transactionId,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  return probeTransactionRecordsWithHelper(helper, transactionId);
+}
+
+function probeTransactionRecordsWithHelper(helper, transactionId) {
+  const response = invokeHelper(helper, ['probe-transaction', helper.home, transactionId]);
+  if (response.operation !== 'probe-transaction') {
+    fail('recovery_required', 'transaction_records_invalid');
+  }
+  return {
+    plan: decodeTransactionRecord(response, 'plan_base64'),
+    manifest: decodeTransactionRecord(response, 'manifest_base64'),
+    state: decodeTransactionRecord(response, 'state_base64'),
+    lock: decodeOptionalTransactionRecord(response, 'lock_base64'),
+  };
+}
+
+export function discoverTransactionRecords({
+  home = process.env.HOME,
+  transactionId,
+} = {}) {
+  if (process.platform !== 'darwin') fail('unsupported', 'unsupported_platform');
+  if (process.versions.node.split('.')[0] !== '24') fail('unsupported', 'unsupported_node_runtime');
+  const verifiedHome = safePath(home, 'home');
+  const candidates = verifiedCachedHelpers(verifiedHome, architecture());
+  let unavailable = 0;
+  const matches = [];
+  for (const candidate of candidates) {
+    try {
+      const records = probeTransactionRecordsWithHelper(candidate, transactionId);
+      const identity = records.manifest?.execution_identity;
+      if (identity?.binary_hash === `sha256:${candidate.binaryHash}`
+          && identity.source_hash === `sha256:${candidate.sourceHash}`
+          && identity.architecture === candidate.architecture
+          && identity.helper_protocol === candidate.helperProtocol
+          && identity.cache_path === candidate.cachePath
+          && records.manifest?.transaction_id === transactionId) {
+        matches.push({ helper: candidate, records });
+      }
+    } catch (error) {
+      if (error instanceof MacosAdapterError && error.reason === 'transaction_unavailable') {
+        unavailable += 1;
+      }
+    }
+  }
+  if (matches.length !== 1) {
+    if (matches.length === 0 && candidates.length > 0 && unavailable === candidates.length) {
+      fail('blocked', 'transaction_unavailable');
+    }
+    fail('recovery_required', 'transaction_helper_identity_ambiguous');
+  }
+  return matches[0].records;
+}
+
+function validateLockOwner(owner, { transactionId, planHash, nonce, pid = null }) {
+  const keys = [
+    'nonce',
+    'pid',
+    'plan_hash',
+    'process_start_sec',
+    'process_start_usec',
+    'transaction_id',
+  ];
+  if (!owner || typeof owner !== 'object' || Array.isArray(owner)
+      || Object.keys(owner).length !== keys.length
+      || keys.some((key) => !Object.hasOwn(owner, key))
+      || owner.transaction_id !== transactionId || owner.plan_hash !== planHash
+      || owner.nonce !== nonce || (pid !== null && owner.pid !== pid)
+      || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+      || !Number.isSafeInteger(owner.process_start_sec) || owner.process_start_sec < 0
+      || !Number.isSafeInteger(owner.process_start_usec) || owner.process_start_usec < 0) {
+    fail('recovery_required', 'lock_identity_invalid');
+  }
+  canonicalJson(owner);
+  return owner;
+}
+
+function acquireTransactionLockInternal({
+  home = process.env.HOME,
+  transactionId,
+  planHash,
+  executionIdentity,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const nonce = randomBytes(32).toString('hex');
+  const response = invokeHelper(helper, [
+    'lock-acquire',
+    verifiedHome,
+    transactionId,
+    planHash,
+    nonce,
+    String(process.pid),
+  ], { mutationMayHaveOccurred: true, testEnvironment });
+  if (response.operation !== 'lock-acquire') fail('recovery_required', 'lock_identity_invalid');
+  return validateLockOwner(response.owner, {
+    transactionId,
+    planHash,
+    nonce,
+    pid: process.pid,
+  });
+}
+
+export function acquireTransactionLock(options = {}) {
+  return acquireTransactionLockInternal(options);
+}
+
+function moveTransactionLock(command, {
+  home = process.env.HOME,
+  transactionId,
+  planHash,
+  owner,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const validatedOwner = validateLockOwner(owner, {
+    transactionId,
+    planHash,
+    nonce: owner?.nonce,
+  });
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  return invokeHelper(helper, [
+    command,
+    verifiedHome,
+    transactionId,
+    planHash,
+    validatedOwner.nonce,
+    String(validatedOwner.pid),
+    String(validatedOwner.process_start_sec),
+    String(validatedOwner.process_start_usec),
+  ], { mutationMayHaveOccurred: true });
+}
+
+export function releaseTransactionLock(options = {}) {
+  return moveTransactionLock('lock-release', options);
+}
+
+export function isolateStaleTransactionLock(options = {}) {
+  return moveTransactionLock('lock-isolate-stale', options);
+}
+
+function advanceTransactionStateRecordInternal({
+  home = process.env.HOME,
+  transactionId,
+  planHash,
+  currentState,
+  nextState,
+  owner,
+  executionIdentity,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const validatedOwner = validateLockOwner(owner, {
+    transactionId,
+    planHash,
+    nonce: owner?.nonce,
+    pid: process.pid,
+  });
+  const currentBytes = canonicalJson(currentState);
+  const nextBytes = canonicalJson(nextState);
+  const expectedStateHash = `sha256:${hashBytes(Buffer.from(currentBytes, 'utf8'))}`;
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const response = invokeHelper(helper, [
+    'transaction-advance',
+    verifiedHome,
+    transactionId,
+    planHash,
+    expectedStateHash,
+    validatedOwner.nonce,
+    String(validatedOwner.pid),
+    String(validatedOwner.process_start_sec),
+    String(validatedOwner.process_start_usec),
+    String(currentState.sequence),
+    String(nextState.sequence),
+  ], {
+    input: nextBytes,
+    mutationMayHaveOccurred: true,
+    testEnvironment,
+  });
+  if (response.operation !== 'transaction-advance') {
+    fail('recovery_required', 'transaction_state_invalid');
+  }
+  const observed = probeTransactionRecords({ home: verifiedHome, transactionId, executionIdentity });
+  if (canonicalJson(observed.state) !== nextBytes) {
+    fail('recovery_required', 'transaction_state_postcondition_failed');
+  }
+  return observed;
+}
+
+export function advanceTransactionStateRecord(options = {}) {
+  return advanceTransactionStateRecordInternal(options);
+}
+
+export function reconcileTransactionLocation({
+  home = process.env.HOME,
+  manifest,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const identity = manifest?.execution_identity;
+  const helper = helperForExecutionIdentity(verifiedHome, identity);
+  const response = invokeHelper(helper, [
+    'reconcile',
+    verifiedHome,
+    authorizedActiveRoot(verifiedHome, manifest.active_root),
+    safePath(manifest.entry_path, 'entryPath'),
+    manifest.transaction_id,
+    manifest.payload_leaf,
+    identity.device,
+    identity.inode,
+    identity.manifest_hash,
+  ]);
+  if (response.operation !== 'reconcile'
+      || ![
+        'original',
+        'original_drift',
+        'quarantine',
+        'rehydrated',
+        'both',
+        'neither',
+      ].includes(response.location)) {
+    fail('recovery_required', 'reconcile_result_invalid');
+  }
+  return response;
+}
+
+function restoreExclusiveInternal({
+  home = process.env.HOME,
+  manifest,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const identity = manifest?.execution_identity;
+  const helper = helperForExecutionIdentity(verifiedHome, identity);
+  return invokeHelper(helper, [
+    'restore-exclusive',
+    verifiedHome,
+    authorizedActiveRoot(verifiedHome, manifest.active_root),
+    safePath(manifest.entry_path, 'entryPath'),
+    manifest.transaction_id,
+    manifest.payload_leaf,
+    identity.device,
+    identity.inode,
+    identity.manifest_hash,
+  ], { mutationMayHaveOccurred: true, testEnvironment });
+}
+
+export function restoreExclusive(options = {}) {
+  return restoreExclusiveInternal(options);
 }
 
 export const __testing = Object.freeze({
@@ -777,5 +1114,23 @@ export const __testing = Object.freeze({
   },
   renameWithFailure(options, point) {
     return renameExclusiveInternal(options, { SKILLS_REFINER_TEST_FAIL: point });
+  },
+  initializeTransactionWithCrash(options, point = 'after_transaction_publish') {
+    return initializeTransactionRecordsInternal(
+      options,
+      { SKILLS_REFINER_TEST_CRASH: point },
+    );
+  },
+  acquireTransactionLockWithCrash(options, point = 'after_lock_publish') {
+    return acquireTransactionLockInternal(options, { SKILLS_REFINER_TEST_CRASH: point });
+  },
+  advanceTransactionStateWithCrash(options, point = 'after_transaction_state_rename') {
+    return advanceTransactionStateRecordInternal(
+      options,
+      { SKILLS_REFINER_TEST_CRASH: point },
+    );
+  },
+  restoreWithCrash(options, point = 'after_restore_rename') {
+    return restoreExclusiveInternal(options, { SKILLS_REFINER_TEST_CRASH: point });
   },
 });

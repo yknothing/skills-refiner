@@ -6,6 +6,8 @@ export const SCHEMAS = Object.freeze({
   decisions: 'skills-refiner.cleanup.decisions.v1',
   plan: 'skills-refiner.cleanup.plan.v1',
   transaction: 'skills-refiner.cleanup.transaction.v1',
+  transactionManifest: 'skills-refiner.cleanup.transaction-manifest.v1',
+  transactionState: 'skills-refiner.cleanup.transaction-state.v1',
   identity: 'skills-refiner.cleanup.identity.v1',
 });
 
@@ -144,6 +146,11 @@ export function deriveTransactionId(planHash, itemId) {
   return sha256Json({ plan_hash: planHash, item_id: itemId });
 }
 
+export function transactionStorageKey(transactionId) {
+  validateSha256(transactionId, 'transaction_id');
+  return transactionId.slice('sha256:'.length);
+}
+
 function requireObject(value, path) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${path} must be an object`);
 }
@@ -169,6 +176,7 @@ const PLAN_KEYS = new Set([
   'schema_version',
   'product_version',
   'platform',
+  'authorization_id',
   'scan_fingerprint',
   'plan_hash',
   'created_at',
@@ -237,6 +245,103 @@ const POSTCONDITION_KEYS = new Set([
   'active_entry_absent',
   'quarantine_entry_present',
 ]);
+const TRANSACTION_RESULT_KEYS = new Set([
+  'schema_version',
+  'command',
+  'status',
+  'overall_status',
+  'transaction_id',
+  'state',
+  'location',
+  'mutation_occurred',
+  'mutation_outcome',
+  'transaction_has_mutated',
+  'committed_transaction_ids',
+  'next_safe_command',
+]);
+const TRANSACTION_RESULT_REQUIRED_KEYS = [...TRANSACTION_RESULT_KEYS]
+  .filter((key) => key !== 'next_safe_command');
+const TRANSACTION_STATES = new Set([
+  'PLANNED',
+  'CONFIRMED',
+  'PREPARED',
+  'APPLYING',
+  'COMMITTED',
+  'BLOCKED',
+  'ABORTED',
+  'RECOVERY_REQUIRED',
+  'RESTORE_PREPARED',
+  'RESTORING',
+  'RESTORED',
+]);
+const TRANSACTION_STATUSES = Object.freeze({
+  apply: new Set(['committed', 'already_committed']),
+  status: new Set([
+    'ready_to_resume_apply',
+    'ready_to_finalize_commit',
+    'committed',
+    'rehydrated',
+    'drifted',
+    'ready_to_resume_undo',
+    'ready_to_finalize_restore',
+    'restore_conflict',
+    'restored',
+  ]),
+  undo: new Set(['restored', 'already_restored']),
+});
+
+export function validateTransactionResult(result) {
+  exactKeys(
+    result,
+    TRANSACTION_RESULT_KEYS,
+    TRANSACTION_RESULT_REQUIRED_KEYS,
+    'transaction_result',
+  );
+  if (result.schema_version !== SCHEMAS.transaction) {
+    fail(`transaction result schema mismatch: expected ${SCHEMAS.transaction}`);
+  }
+  canonicalJson(result);
+  if (!Object.hasOwn(TRANSACTION_STATUSES, result.command)
+      || !TRANSACTION_STATUSES[result.command].has(result.status)
+      || result.overall_status !== result.status) {
+    fail('transaction result command or status is unsupported');
+  }
+  validateSha256(result.transaction_id, 'transaction_result.transaction_id');
+  if (!TRANSACTION_STATES.has(result.state)) fail('transaction result state is unsupported');
+  if (!['original', 'original_drift', 'quarantine', 'rehydrated'].includes(result.location)) {
+    fail('transaction result location is unsupported');
+  }
+  if (typeof result.mutation_occurred !== 'boolean'
+      || typeof result.transaction_has_mutated !== 'boolean'
+      || !['unchanged', 'moved', 'restored'].includes(result.mutation_outcome)
+      || (result.command === 'status' && result.mutation_occurred !== false)
+      || (result.mutation_occurred === false && result.mutation_outcome !== 'unchanged')
+      || (result.mutation_occurred === true
+        && result.mutation_outcome !== (result.command === 'undo' ? 'restored' : 'moved'))) {
+    fail('transaction result mutation truth is invalid');
+  }
+  const historicalMutationRequired = [
+    'COMMITTED',
+    'RESTORE_PREPARED',
+    'RESTORING',
+    'RESTORED',
+  ].includes(result.state) || ['quarantine', 'rehydrated'].includes(result.location);
+  if ((historicalMutationRequired || result.mutation_occurred)
+      && result.transaction_has_mutated !== true) {
+    fail('transaction result historical mutation truth is invalid');
+  }
+  if (!Array.isArray(result.committed_transaction_ids)
+      || result.committed_transaction_ids.length !== (result.state === 'COMMITTED' ? 1 : 0)
+      || (result.state === 'COMMITTED'
+        && result.committed_transaction_ids[0] !== result.transaction_id)) {
+    fail('transaction result committed IDs are invalid');
+  }
+  if (Object.hasOwn(result, 'next_safe_command')
+      && result.next_safe_command !== null) {
+    safeNonEmptyString(result.next_safe_command, 'transaction_result.next_safe_command', 512);
+  }
+  return result;
+}
 
 export function validatePlan(plan) {
   requireObject(plan, 'plan');
@@ -247,6 +352,9 @@ export function validatePlan(plan) {
   exactKeys(plan, PLAN_KEYS, PLAN_REQUIRED_KEYS, 'plan');
   if (plan.product_version !== '2.0') fail('plan product_version is unsupported');
   safeNonEmptyString(plan.platform, 'plan.platform', 32);
+  if (typeof plan.authorization_id !== 'string' || !/^[0-9a-f]{32}$/u.test(plan.authorization_id)) {
+    fail('plan.authorization_id is unsupported');
+  }
   safeNonEmptyString(plan.created_at, 'plan.created_at', 64);
   validateSha256(plan.scan_fingerprint, 'scan_fingerprint');
   validateSha256(plan.plan_hash, 'plan_hash');
