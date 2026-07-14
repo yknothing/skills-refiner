@@ -86,6 +86,180 @@ EOF
     assert_eq "Node $major stdout remains one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
 done
 
+platform_family=unknown
+case "$(uname -s)" in
+    Darwin) platform_family=macos ;;
+    Linux) platform_family=linux ;;
+esac
+if [ -n "${EXPECTED_PLATFORM_FAMILY:-}" ]; then
+    assert_eq "cleanup CLI runs on expected platform family" \
+        "$EXPECTED_PLATFORM_FAMILY" "$platform_family"
+fi
+
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" \
+    HOME="$SANDBOX/portable-home" "$LAUNCHER" --help --json
+assert_eq "portable Node 24 help exits 0" "0" "$RUN_STATUS"
+assert_eq "portable Node 24 help emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+assert_eq "portable Node 24 help schema" "skills-refiner.cleanup.help.v1" \
+    "$(jq -r '.schema_version' "$stdout_file")"
+
+if [ "$platform_family" != "macos" ]; then
+    boundary_home="$SANDBOX/non-macos-home"
+    boundary_target="$SANDBOX/non-macos-bin"
+    boundary_tools="$SANDBOX/non-macos-tools"
+    boundary_review="$SANDBOX/non-macos-review.json"
+    boundary_decisions="$SANDBOX/non-macos-decisions.json"
+    boundary_plan="$SANDBOX/non-macos-plan.json"
+    boundary_source_root="$SANDBOX/non-macos-source"
+    boundary_source="$boundary_source_root/distributed-skill"
+    boundary_entry="$boundary_home/.claude/skills/distributed-skill"
+    mkdir -m 700 "$boundary_home" "$boundary_target" "$boundary_tools"
+    mkdir -m 700 "$boundary_source_root"
+    mkdir -m 700 "$boundary_source"
+    mkdir -p "$boundary_home/.claude/skills"
+    cat > "$boundary_source/SKILL.md" <<'YAML'
+---
+name: distributed-skill
+description: Use when verifying the non-macOS mutation boundary.
+---
+
+# Distributed skill
+YAML
+    chmod 600 "$boundary_source/SKILL.md"
+    boundary_source_hash=$(shasum -a 256 "$boundary_source/SKILL.md" | awk '{print $1}')
+    ln -s "$boundary_source" "$boundary_entry"
+    ln -s /bin/bash "$boundary_tools/bash"
+    ln -s "$(command -v dirname)" "$boundary_tools/dirname"
+
+    run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+        HOME="$boundary_home" PATH="$boundary_target:$boundary_tools" \
+        "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$boundary_target" --json
+    assert_eq "non-macOS valid setup exits unsupported" "3" "$RUN_STATUS"
+    assert_eq "non-macOS setup emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+    assert_eq "non-macOS setup uses exact schema" "skills-refiner.setup-cli.v1" \
+        "$(jq -r '.schema_version' "$stdout_file")"
+    assert_eq "non-macOS setup uses exact keys" \
+        "command,confirmation,destination_launcher,error_code,full_path_launcher,installed,mutation_occurred,mutation_outcome,node_binary,overall_status,result,schema_version,source_launcher,status" \
+        "$(jq -r 'keys | sort | join(",")' "$stdout_file")"
+    assert_eq "non-macOS setup reports unsupported" "unsupported" \
+        "$(jq -r '.status' "$stdout_file")"
+    assert_eq "non-macOS setup reports no result" "none" "$(jq -r '.result' "$stdout_file")"
+    assert_eq "non-macOS setup reports zero mutation" "false:unchanged" \
+        "$(jq -r '[.mutation_occurred,.mutation_outcome] | join(":")' "$stdout_file")"
+    assert_eq "non-macOS setup writes zero launchers" "0" \
+        "$(find "$boundary_target" -mindepth 1 -maxdepth 1 -name skills-refiner -print | wc -l | tr -d ' ')"
+
+    run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" \
+        HOME="$boundary_home" "$LAUNCHER" cleanup review --json
+    assert_eq "non-macOS cleanup review remains read-only and available" "0" "$RUN_STATUS"
+    assert_eq "non-macOS cleanup review emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+    assert_eq "non-macOS cleanup review schema" "skills-refiner.cleanup.review.v1" \
+        "$(jq -r '.schema_version' "$stdout_file")"
+    assert_eq "non-macOS cleanup review preserves live eligibility contract" "true" \
+        "$(jq -r '.execution_eligible' "$stdout_file")"
+    assert_eq "non-macOS review finds exactly the distributed fixture" "true" \
+        "$(jq --arg entry "$boundary_entry" \
+            '(.candidates | length) == 1 and .candidates[0].entry_path == $entry' "$stdout_file")"
+    cp "$stdout_file" "$boundary_review"
+    assert_eq "non-macOS read-only flow creates no transaction" "false" \
+        "$([ -e "$boundary_home/.agents/skills-refiner/cleanup/transactions" ] && echo true || echo false)"
+
+    jq '{schema_version:"skills-refiner.cleanup.decisions.v1",
+         review_fingerprint:.review_fingerprint,
+         decisions:[.candidates[] | {candidate_id,action:"later"}]}' \
+        "$boundary_review" > "$boundary_decisions"
+    assert_eq "non-macOS decisions bind every candidate to Later" "true" \
+        "$(jq --slurpfile review "$boundary_review" \
+            '(.schema_version == "skills-refiner.cleanup.decisions.v1")
+             and (.review_fingerprint == $review[0].review_fingerprint)
+             and ((.decisions | length) == ($review[0].candidates | length))
+             and (.decisions | length) >= 1
+             and all(.decisions[]; .action == "later")' "$boundary_decisions")"
+    run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" \
+        HOME="$boundary_home" "$LAUNCHER" cleanup plan \
+        --review "$boundary_review" --decisions "$boundary_decisions" --json
+    assert_eq "non-macOS valid plan exits unsupported" "3" "$RUN_STATUS"
+    assert_eq "non-macOS plan emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+    assert_eq "non-macOS plan uses cleanup error schema" "skills-refiner.cleanup.error.v1" \
+        "$(jq -r '.schema_version' "$stdout_file")"
+    assert_eq "non-macOS plan uses exact error keys" \
+        "committed_transaction_ids,error_code,mutation_occurred,mutation_outcome,overall_status,schema_version,status,transaction_has_mutated" \
+        "$(jq -r 'keys | sort | join(",")' "$stdout_file")"
+    assert_eq "non-macOS plan reaches platform guard" "platform_adapter_unavailable" \
+        "$(jq -r '.error_code' "$stdout_file")"
+    assert_eq "non-macOS plan reports exact unsupported mutation truth" \
+        "unsupported:unsupported:false:unchanged:false:0" \
+        "$(jq -r '[.status,.overall_status,.mutation_occurred,.mutation_outcome,.transaction_has_mutated,(.committed_transaction_ids | length)] | join(":")' "$stdout_file")"
+    assert_eq "non-macOS plan creates no transaction" "false" \
+        "$([ -e "$boundary_home/.agents/skills-refiner/cleanup/transactions" ] && echo true || echo false)"
+
+    CONTRACT_MODULE="$SCRIPT_DIR/../lib/cleanup-contract.mjs" PLAN_FILE="$boundary_plan" \
+        "$NODE24_BIN" --input-type=module <<'NODE'
+import { writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+
+const { computePlanHash, validatePlan } = await import(pathToFileURL(process.env.CONTRACT_MODULE));
+const plan = {
+  schema_version: 'skills-refiner.cleanup.plan.v1',
+  product_version: '2.0',
+  platform: 'macos',
+  authorization_id: '00000000000000000000000000000000',
+  scan_fingerprint: `sha256:${'0'.repeat(64)}`,
+  created_at: '2026-01-01T00:00:00.000Z',
+  items: [],
+};
+plan.plan_hash = computePlanHash(plan);
+validatePlan(plan);
+writeFileSync(process.env.PLAN_FILE, `${JSON.stringify(plan)}\n`, { flag: 'wx', mode: 0o600 });
+NODE
+    boundary_plan_hash=$(jq -r '.plan_hash' "$boundary_plan")
+    run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" \
+        HOME="$boundary_home" "$LAUNCHER" cleanup apply --plan "$boundary_plan" \
+        --confirm "$boundary_plan_hash" --json
+    assert_eq "non-macOS contract-valid apply exits unsupported" "3" "$RUN_STATUS"
+    assert_eq "non-macOS apply emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+    assert_eq "non-macOS apply uses cleanup error schema" "skills-refiner.cleanup.error.v1" \
+        "$(jq -r '.schema_version' "$stdout_file")"
+    assert_eq "non-macOS apply uses exact error keys" \
+        "committed_transaction_ids,error_code,mutation_occurred,mutation_outcome,overall_status,schema_version,status,transaction_has_mutated" \
+        "$(jq -r 'keys | sort | join(",")' "$stdout_file")"
+    assert_eq "non-macOS apply reaches platform guard" "platform_adapter_unavailable" \
+        "$(jq -r '.error_code' "$stdout_file")"
+    assert_eq "non-macOS apply reports exact unsupported mutation truth" \
+        "unsupported:unsupported:false:unchanged:false:0" \
+        "$(jq -r '[.status,.overall_status,.mutation_occurred,.mutation_outcome,.transaction_has_mutated,(.committed_transaction_ids | length)] | join(":")' "$stdout_file")"
+    assert_eq "non-macOS apply creates no transaction" "false" \
+        "$([ -e "$boundary_home/.agents/skills-refiner/cleanup/transactions" ] && echo true || echo false)"
+
+    boundary_transaction="sha256:$(printf '1%.0s' {1..64})"
+    run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" \
+        HOME="$boundary_home" "$LAUNCHER" cleanup undo "$boundary_transaction" \
+        --confirm "$boundary_transaction" --json
+    assert_eq "non-macOS valid undo exits unsupported" "3" "$RUN_STATUS"
+    assert_eq "non-macOS undo emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+    assert_eq "non-macOS undo uses cleanup error schema" "skills-refiner.cleanup.error.v1" \
+        "$(jq -r '.schema_version' "$stdout_file")"
+    assert_eq "non-macOS undo uses exact error keys" \
+        "committed_transaction_ids,error_code,mutation_occurred,mutation_outcome,overall_status,schema_version,status,transaction_has_mutated" \
+        "$(jq -r 'keys | sort | join(",")' "$stdout_file")"
+    assert_eq "non-macOS undo reaches platform guard" "platform_adapter_unavailable" \
+        "$(jq -r '.error_code' "$stdout_file")"
+    assert_eq "non-macOS undo reports exact unsupported mutation truth" \
+        "unsupported:unsupported:false:unchanged:false:0" \
+        "$(jq -r '[.status,.overall_status,.mutation_occurred,.mutation_outcome,.transaction_has_mutated,(.committed_transaction_ids | length)] | join(":")' "$stdout_file")"
+    assert_eq "non-macOS undo creates no transaction" "false" \
+        "$([ -e "$boundary_home/.agents/skills-refiner/cleanup/transactions" ] && echo true || echo false)"
+    assert_eq "non-macOS boundary preserves distributed source bytes" "$boundary_source_hash" \
+        "$(shasum -a 256 "$boundary_source/SKILL.md" | awk '{print $1}')"
+    assert_eq "non-macOS boundary preserves active distribution link" "$boundary_source" \
+        "$(readlink "$boundary_entry")"
+
+    assert_eq "all portable cleanup CLI assertions" "0" "$FAIL"
+    printf '%s portable tests passed; macOS mutation tests skipped on %s\n' "$PASS" "$platform_family"
+    [ "$FAIL" -eq 0 ] || exit 1
+    exit 0
+fi
+
 setup_home="$SANDBOX/setup-home"
 setup_target="$SANDBOX/setup-bin"
 setup_tools="$SANDBOX/setup-tools"
