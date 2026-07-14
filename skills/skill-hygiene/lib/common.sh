@@ -391,7 +391,9 @@ sr_strip_trace_blocks() {
     local source_final_newline=0 source_eof_state
     source_eof_state=$(sr_file_eof_state "$file") || return 1
     [ "$source_eof_state" = "newline" ] && source_final_newline=1
-    awk -v source_final_newline="$source_final_newline" '
+    # GNU awk on Git Bash otherwise applies text-mode CRLF translation. Other
+    # awk implementations treat BINMODE as an ordinary, harmless variable.
+    LC_ALL=C awk -v BINMODE=3 -v source_final_newline="$source_final_newline" '
         function clean(line) {
             sub(/\r$/, "", line)
             return line
