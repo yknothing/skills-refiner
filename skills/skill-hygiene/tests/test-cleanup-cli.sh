@@ -44,6 +44,8 @@ trap safe_cleanup EXIT
 stdout_file="$SANDBOX/stdout"
 stderr_file="$SANDBOX/stderr"
 scan_file="$SANDBOX/scan.json"
+review_file="$SANDBOX/review.json"
+decisions_file="$SANDBOX/decisions.json"
 
 [ -x "$NODE24_BIN" ] || { echo "Node 24 test runtime missing: $NODE24_BIN" >&2; exit 1; }
 assert_eq "certified Node major" "24" "$($NODE24_BIN -p 'process.versions.node.split(".")[0]')"
@@ -91,6 +93,44 @@ assert_eq "live review exits cleanly" "0" "$RUN_STATUS"
 assert_eq "live review schema" "skills-refiner.cleanup.review.v1" "$(jq -r '.schema_version' "$stdout_file")"
 assert_eq "live review is execution eligible" "true" "$(jq -r '.execution_eligible' "$stdout_file")"
 assert_eq "live review stdout is one object" "1" "$(jq -s 'length' "$stdout_file")"
+
+cp "$stdout_file" "$review_file"
+jq '{schema_version:"skills-refiner.cleanup.decisions.v1",review_fingerprint:.review_fingerprint,decisions:[.candidates[]|{candidate_id,action:"later"}]}' \
+    "$review_file" >"$decisions_file"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
+assert_eq "empty live plan exits cleanly" "0" "$RUN_STATUS"
+assert_eq "empty live plan uses plan schema" "skills-refiner.cleanup.plan.v1" "$(jq -r '.schema_version' "$stdout_file")"
+assert_eq "empty live plan has no mutation items" "0" "$(jq '.items | length' "$stdout_file")"
+
+mkdir -p "$SANDBOX/source-one" "$SANDBOX/source-two" "$SANDBOX/home/.claude/skills"
+cat >"$SANDBOX/source-one/SKILL.md" <<'YAML'
+---
+name: source-skill
+description: Use when testing cleanup plan routing.
+---
+
+# Source skill
+YAML
+cp "$SANDBOX/source-one/SKILL.md" "$SANDBOX/source-two/SKILL.md"
+ln -s "$SANDBOX/source-one" "$SANDBOX/home/.claude/skills/source-skill"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup review --json
+cp "$stdout_file" "$review_file"
+jq '{schema_version:"skills-refiner.cleanup.decisions.v1",review_fingerprint:.review_fingerprint,decisions:[.candidates[]|{candidate_id,action:"retire"}]}' \
+    "$review_file" >"$decisions_file"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
+assert_eq "retirement plan requires certified adapter" "3" "$RUN_STATUS"
+assert_eq "unsupported adapter has fixed error code" "platform_adapter_unavailable" "$(jq -r '.error_code' "$stdout_file")"
+
+rm "$SANDBOX/home/.claude/skills/source-skill"
+ln -s "$SANDBOX/source-two" "$SANDBOX/home/.claude/skills/source-skill"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
+assert_eq "changed live state returns drift exit" "10" "$RUN_STATUS"
+assert_eq "changed live state has fingerprint error" "fingerprint_mismatch" "$(jq -r '.error_code' "$stdout_file")"
+assert_eq "changed live state is classified as drift" "drifted" "$(jq -r '.overall_status' "$stdout_file")"
 
 run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" "$LAUNCHER" cleanup review --scan "$scan_file" --json
 assert_eq "offline review exits cleanly" "0" "$RUN_STATUS"

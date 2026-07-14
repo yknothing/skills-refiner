@@ -403,7 +403,7 @@ and the aligned execution checklist.
 - Modify: `skills/skill-hygiene/lib/cleanup-cli.mjs`
 - Modify: `skills/skill-hygiene/tests/test-cleanup-cli.sh`
 
-- [ ] **Step 1: Write failing candidate tests**
+- [x] **Step 1: Write failing candidate tests**
 
 Build fixtures entirely under `mkdtempSync(join(tmpdir(),
 'skills-refiner-cleanup-'))`; never point a test at the real home directory.
@@ -443,7 +443,7 @@ node --test skills/skill-hygiene/tests/test-cleanup-core.mjs
 
 Expected: failing import for `cleanup-core.mjs`.
 
-- [ ] **Step 2: Implement the candidate compiler**
+- [x] **Step 2: Implement the candidate compiler**
 
 Validate `skill-scan.v5` before reading evidence. Map facts to stable groups:
 
@@ -462,7 +462,7 @@ Candidate IDs derive from canonical, non-secret identity facts; display labels
 are not IDs. Do not turn staleness, absence of canary events, regex findings,
 size, or collisions into an automatic retirement decision.
 
-- [ ] **Step 3: Write failing plan-compiler tests**
+- [x] **Step 3: Write failing plan-compiler tests**
 
 Assert that the compiler:
 
@@ -487,7 +487,7 @@ assert.equal(first.plan_hash, second.plan_hash);
 assert.deepEqual(first.items.map((item) => item.item_hash), second.items.map((item) => item.item_hash));
 ```
 
-- [ ] **Step 4: Implement plan compilation and CLI routing**
+- [x] **Step 4: Implement plan compilation and CLI routing**
 
 `cleanup` and `cleanup review --json` launch the sibling installed
 `skill-scan.sh --json` with argv arrays and no shell, validate `skill-scan.v5`,
@@ -512,7 +512,7 @@ export async function compilePlan(input, platform) {
 The CLI skeleton may use a deliberately unsupported adapter until Task 4. That
 adapter returns exit `3`; it must not fabricate identity facts.
 
-- [ ] **Step 5: Run core and contract tests**
+- [x] **Step 5: Run core and contract tests**
 
 ```bash
 node --test skills/skill-hygiene/tests/test-cleanup-contract.mjs skills/skill-hygiene/tests/test-cleanup-core.mjs
@@ -523,7 +523,7 @@ git diff --check
 Expected: candidate, plan, schema, and CLI tests pass; whitespace check is
 silent.
 
-- [ ] **Step 6: Commit the compiler batch**
+- [x] **Step 6: Commit the compiler batch**
 
 ```bash
 test -z "$(git diff --cached --name-only)"

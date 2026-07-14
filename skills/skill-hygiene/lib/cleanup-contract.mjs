@@ -6,6 +6,7 @@ export const SCHEMAS = Object.freeze({
   decisions: 'skills-refiner.cleanup.decisions.v1',
   plan: 'skills-refiner.cleanup.plan.v1',
   transaction: 'skills-refiner.cleanup.transaction.v1',
+  identity: 'skills-refiner.cleanup.identity.v1',
 });
 
 export const ACTIONS = Object.freeze(['quarantine']);
@@ -117,6 +118,13 @@ export function computePlanHash(plan) {
   return sha256Json(hashInput);
 }
 
+export function computeItemHash(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) fail('item must be JSON-compatible');
+  canonicalJson(item);
+  const { item_hash: _itemHash, transaction_id: _transactionId, ...hashInput } = item;
+  return sha256Json(hashInput);
+}
+
 export function deriveTransactionId(planHash, itemId) {
   validateSha256(planHash, 'plan_hash');
   if (typeof itemId !== 'string' || itemId.length === 0 || CONTROL_CHARACTERS.test(itemId)) {
@@ -164,22 +172,42 @@ const ITEM_KEYS = new Set([
   'entry_path',
   'active_root',
   'entry_kind',
+  'execution_identity',
   'preconditions',
   'expected_postconditions',
   'risk',
 ]);
 const ITEM_REQUIRED_KEYS = [
   'item_id',
+  'item_hash',
   'transaction_id',
   'action',
   'entry_path',
   'active_root',
   'entry_kind',
+  'execution_identity',
   'preconditions',
   'expected_postconditions',
   'risk',
 ];
-const EMPTY_KEYS = new Set();
+const IDENTITY_KEYS = new Set([
+  'schema_version',
+  'adapter',
+  'entry_path',
+  'active_root',
+  'entry_kind',
+  'identity_hash',
+]);
+const PRECONDITION_KEYS = new Set([
+  'review_fingerprint',
+  'candidate_fingerprint',
+  'scan_fingerprint',
+  'execution_identity_hash',
+]);
+const POSTCONDITION_KEYS = new Set([
+  'active_entry_absent',
+  'quarantine_entry_present',
+]);
 
 export function validatePlan(plan) {
   requireObject(plan, 'plan');
@@ -210,10 +238,39 @@ export function validatePlan(plan) {
     if (!['directory', 'symlink', 'broken_symlink'].includes(item.entry_kind)) {
       fail(`${path}.entry_kind is unsupported`);
     }
-    exactKeys(item.preconditions, EMPTY_KEYS, [], `${path}.preconditions`);
-    exactKeys(item.expected_postconditions, EMPTY_KEYS, [], `${path}.expected_postconditions`);
+    exactKeys(item.execution_identity, IDENTITY_KEYS, [...IDENTITY_KEYS], `${path}.execution_identity`);
+    if (item.execution_identity.schema_version !== SCHEMAS.identity) {
+      fail(`${path}.execution_identity schema is unsupported`);
+    }
+    safeNonEmptyString(item.execution_identity.adapter, `${path}.execution_identity.adapter`, 128);
+    if (item.execution_identity.entry_path !== item.entry_path
+        || item.execution_identity.active_root !== item.active_root
+        || item.execution_identity.entry_kind !== item.entry_kind) {
+      fail(`${path}.execution_identity does not match the plan item`);
+    }
+    validateSha256(item.execution_identity.identity_hash, `${path}.execution_identity.identity_hash`);
+    exactKeys(item.preconditions, PRECONDITION_KEYS, [...PRECONDITION_KEYS], `${path}.preconditions`);
+    validateSha256(item.preconditions.review_fingerprint, `${path}.preconditions.review_fingerprint`);
+    validateSha256(item.preconditions.candidate_fingerprint, `${path}.preconditions.candidate_fingerprint`);
+    validateSha256(item.preconditions.scan_fingerprint, `${path}.preconditions.scan_fingerprint`);
+    validateSha256(item.preconditions.execution_identity_hash, `${path}.preconditions.execution_identity_hash`);
+    if (item.preconditions.scan_fingerprint !== plan.scan_fingerprint
+        || item.preconditions.execution_identity_hash !== item.execution_identity.identity_hash) {
+      fail(`${path}.preconditions do not match the plan item`);
+    }
+    exactKeys(
+      item.expected_postconditions,
+      POSTCONDITION_KEYS,
+      [...POSTCONDITION_KEYS],
+      `${path}.expected_postconditions`,
+    );
+    if (item.expected_postconditions.active_entry_absent !== true
+        || item.expected_postconditions.quarantine_entry_present !== true) {
+      fail(`${path}.expected_postconditions are unsupported`);
+    }
     if (item.risk !== 'reviewed') fail(`${path}.risk is unsupported`);
-    if (Object.hasOwn(item, 'item_hash')) validateSha256(item.item_hash, `${path}.item_hash`);
+    validateSha256(item.item_hash, `${path}.item_hash`);
+    if (item.item_hash !== computeItemHash(item)) fail(`${path}.item_hash does not match canonical item content`);
     validateSha256(item.transaction_id, `${path}.transaction_id`);
     if (transactionIds.has(item.transaction_id)) fail('plan contains a duplicate transaction_id');
     transactionIds.add(item.transaction_id);

@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { ContractError, SCHEMAS, validatePlan } from './cleanup-contract.mjs';
+import { CleanupCoreError, compilePlan, compileReview } from './cleanup-core.mjs';
 
-const PRODUCT_VERSION = '2.0';
 const SCANNER_PATH = fileURLToPath(new URL('../bin/skill-scan.sh', import.meta.url));
 const JSON_REQUESTED = process.argv.slice(2).includes('--json');
 
@@ -25,6 +25,10 @@ function invalid(errorCode = 'invalid_invocation', diagnostic = '[ERROR] Invalid
 
 function unsupported(errorCode, diagnostic) {
   throw new CliError(errorCode, 3, 'unsupported', diagnostic);
+}
+
+function blocked(errorCode, overallStatus, diagnostic) {
+  throw new CliError(errorCode, 10, overallStatus, diagnostic);
 }
 
 function parseJson(text) {
@@ -70,20 +74,6 @@ function runInstalledScanner() {
   return validateScan(parseJson(result.stdout));
 }
 
-function reviewResult(scan, executionEligible, source) {
-  return {
-    schema_version: SCHEMAS.review,
-    product_version: PRODUCT_VERSION,
-    overall_status: 'review_ready',
-    execution_eligible: executionEligible,
-    source,
-    scan_schema_version: scan.metadata.schema_version,
-    observed_entry_count: scan.entries.length,
-    candidates: [],
-    executable_plan: null,
-  };
-}
-
 function parseNamedFileOption(args, option) {
   const index = args.indexOf(option);
   if (index === -1) return null;
@@ -107,8 +97,45 @@ function rejectUnknownOptions(args, allowed) {
 function runReview(args) {
   rejectUnknownOptions(args, new Set(['--scan']));
   const scanPath = parseNamedFileOption(args, '--scan');
-  if (scanPath) return reviewResult(validateScan(readJsonFile(scanPath)), false, 'offline_scan');
-  return reviewResult(runInstalledScanner(), true, 'live_scan');
+  if (scanPath) {
+    return compileReview(validateScan(readJsonFile(scanPath)), {
+      executionEligible: false,
+      source: 'offline_scan',
+    });
+  }
+  return compileReview(runInstalledScanner(), { executionEligible: true, source: 'live_scan' });
+}
+
+async function runPlan(args) {
+  rejectUnknownOptions(args, new Set(['--review', '--decisions']));
+  const reviewPath = parseNamedFileOption(args, '--review');
+  const decisionsPath = parseNamedFileOption(args, '--decisions');
+  if (!reviewPath || !decisionsPath) invalid();
+
+  const savedReview = readJsonFile(reviewPath);
+  const decisions = readJsonFile(decisionsPath);
+  const freshReview = compileReview(runInstalledScanner(), {
+    executionEligible: true,
+    source: 'live_scan',
+  });
+  if (savedReview?.schema_version !== SCHEMAS.review
+      || savedReview.review_fingerprint !== freshReview.review_fingerprint) {
+    blocked(
+      'fingerprint_mismatch',
+      'drifted',
+      '[ERROR] The live skill state changed after review.',
+    );
+  }
+
+  return compilePlan({ review: freshReview, decisions }, {
+    name: process.platform === 'darwin' ? 'macos' : process.platform,
+    async inspectForPlan() {
+      unsupported(
+        'platform_adapter_unavailable',
+        '[ERROR] No certified mutation adapter is available yet.',
+      );
+    },
+  });
 }
 
 function runApply(args) {
@@ -133,13 +160,14 @@ function helpText() {
     '',
     'Usage:',
     '  skills-refiner cleanup review [--scan FILE] [--json]',
+    '  skills-refiner cleanup plan --review FILE --decisions FILE [--json]',
     '  skills-refiner cleanup apply --plan FILE --confirm HASH [--json]',
     '  skills-refiner cleanup --help',
     '',
   ].join('\n');
 }
 
-function run(argv) {
+async function run(argv) {
   if (argv.includes('--help') || argv.includes('-h')) return { kind: 'help', text: helpText() };
   if (argv[0] !== 'cleanup') invalid();
   const command = argv[1];
@@ -149,8 +177,9 @@ function run(argv) {
     return { kind: 'result', value: runReview(args) };
   }
   if (command === 'review') return { kind: 'result', value: runReview(args) };
+  if (command === 'plan') return { kind: 'result', value: await runPlan(args) };
   if (command === 'apply') return { kind: 'result', value: runApply(args) };
-  if (['plan', 'status', 'undo'].includes(command)) {
+  if (['status', 'undo'].includes(command)) {
     unsupported('command_not_implemented', '[ERROR] This cleanup command is not implemented yet.');
   }
   invalid();
@@ -168,7 +197,7 @@ function errorResult(error) {
 }
 
 try {
-  const outcome = run(process.argv.slice(2));
+  const outcome = await run(process.argv.slice(2));
   if (outcome.kind === 'help') {
     if (JSON_REQUESTED) {
       process.stdout.write(`${JSON.stringify({ schema_version: 'skills-refiner.cleanup.help.v1', overall_status: 'ok' })}\n`);
@@ -179,9 +208,32 @@ try {
     process.stdout.write(`${JSON.stringify(outcome.value)}\n`);
   }
 } catch (error) {
-  const mapped = error instanceof CliError
-    ? error
-    : new CliError('internal_error', 20, 'recovery_required', '[ERROR] Cleanup encountered an internal error.');
+  let mapped;
+  if (error instanceof CliError) {
+    mapped = error;
+  } else if (error instanceof ContractError) {
+    mapped = new CliError(
+      'invalid_schema',
+      2,
+      'invalid',
+      '[ERROR] Cleanup document validation failed.',
+    );
+  } else if (error instanceof CleanupCoreError) {
+    const isBlocked = ['execution_identity_unavailable', 'review_only'].includes(error.code);
+    mapped = new CliError(
+      error.code,
+      error.code === 'platform_adapter_unavailable' ? 3 : (isBlocked ? 10 : 2),
+      error.code === 'platform_adapter_unavailable' ? 'unsupported' : (isBlocked ? 'blocked' : 'invalid'),
+      '[ERROR] Cleanup review or plan validation failed.',
+    );
+  } else {
+    mapped = new CliError(
+      'internal_error',
+      20,
+      'recovery_required',
+      '[ERROR] Cleanup encountered an internal error.',
+    );
+  }
   if (JSON_REQUESTED) process.stdout.write(`${JSON.stringify(errorResult(mapped))}\n`);
   process.stderr.write(`${mapped.diagnostic}\n`);
   process.exitCode = mapped.exitCode;

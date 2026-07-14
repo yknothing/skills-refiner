@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   SCHEMAS,
   canonicalJson,
+  computeItemHash,
   computePlanHash,
   deriveTransactionId,
   sha256Json,
@@ -24,13 +25,30 @@ function validPlan(overrides = {}) {
         entry_path: '/Users/example/.agents/skills/demo',
         active_root: '/Users/example/.agents/skills',
         entry_kind: 'directory',
-        preconditions: {},
-        expected_postconditions: {},
+        execution_identity: {
+          schema_version: SCHEMAS.identity,
+          adapter: 'macos-test.v1',
+          entry_path: '/Users/example/.agents/skills/demo',
+          active_root: '/Users/example/.agents/skills',
+          entry_kind: 'directory',
+          identity_hash: sha256Json({ identity: 1 }),
+        },
+        preconditions: {
+          review_fingerprint: sha256Json({ review: 1 }),
+          candidate_fingerprint: sha256Json({ candidate: 1 }),
+          scan_fingerprint: sha256Json({ scan: 1 }),
+          execution_identity_hash: sha256Json({ identity: 1 }),
+        },
+        expected_postconditions: {
+          active_entry_absent: true,
+          quarantine_entry_present: true,
+        },
         risk: 'reviewed',
       },
     ],
     ...overrides,
   };
+  plan.items = plan.items.map((item) => ({ ...item, item_hash: computeItemHash(item) }));
   plan.plan_hash = computePlanHash(plan);
   plan.items = plan.items.map((item) => ({
     ...item,
