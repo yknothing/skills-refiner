@@ -239,8 +239,10 @@ NODE
     assert_eq "non-macOS status uses cleanup error schema" "skills-refiner.cleanup.error.v1" \
         "$(jq -r '.schema_version' "$stdout_file")"
     assert_eq "non-macOS status uses exact error keys" \
-        "committed_transaction_ids,error_code,mutation_occurred,mutation_outcome,overall_status,schema_version,status,transaction_has_mutated" \
+        "command,committed_transaction_ids,error_code,mutation_occurred,mutation_outcome,overall_status,schema_version,status,transaction_has_mutated" \
         "$(jq -r 'keys | sort | join(",")' "$stdout_file")"
+    assert_eq "non-macOS status preserves command context" "status" \
+        "$(jq -r '.command' "$stdout_file")"
     assert_eq "non-macOS status reaches platform guard" "unsupported_platform" \
         "$(jq -r '.error_code' "$stdout_file")"
     assert_eq "non-macOS status reports exact unsupported mutation truth" \
