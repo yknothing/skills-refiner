@@ -1151,6 +1151,53 @@ test('quarantine and state ancestors reject symlink substitution', () => {
   }
 });
 
+test('untrusted default toolchain falls back to root-owned Command Line Tools', () => {
+  const sandboxRoot = makeSandbox();
+  const isolatedHome = join(sandboxRoot, 'fallback-home');
+  const fakeXcrun = join(sandboxRoot, 'xcrun');
+  const invocationLog = join(sandboxRoot, 'xcrun.log');
+  const untrustedCompiler = join(sandboxRoot, 'untrusted-clang');
+  const originalDeveloperDirectory = process.env.DEVELOPER_DIR;
+  mkdirSync(isolatedHome, { mode: 0o700 });
+  writeFileSync(untrustedCompiler, '#!/bin/bash\nexit 99\n', { mode: 0o700 });
+  assert.equal(lstatSync(untrustedCompiler).uid, process.getuid());
+  writeFileSync(fakeXcrun, `#!/bin/bash
+printf '%s|%s\\n' "\${DEVELOPER_DIR-unset}" "$*" >> ${JSON.stringify(invocationLog)}
+if [ "\${DEVELOPER_DIR-unset}" = "/Library/Developer/CommandLineTools" ]; then
+    case "$*" in
+        "--find clang") printf '%s\\n' '/Library/Developer/CommandLineTools/usr/bin/clang'; exit 0 ;;
+        "--sdk macosx --show-sdk-path") printf '%s\\n' '/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk'; exit 0 ;;
+    esac
+fi
+printf '%s\\n' ${JSON.stringify(untrustedCompiler)}
+`, { mode: 0o700 });
+  try {
+    process.env.DEVELOPER_DIR = join(sandboxRoot, 'attacker-toolchain');
+    const helper = __testing.ensureWithXcrun({
+      home: isolatedHome,
+      forceCompile: true,
+      xcrunPath: fakeXcrun,
+    });
+    assert.equal(
+      helper.compilerPath,
+      '/Library/Developer/CommandLineTools/usr/bin/clang',
+    );
+    assert.deepEqual(
+      readFileSync(invocationLog, 'utf8').trim().split('\n'),
+      [
+        'unset|--find clang',
+        '/Library/Developer/CommandLineTools|--find clang',
+        '/Library/Developer/CommandLineTools|--sdk macosx --show-sdk-path',
+      ],
+    );
+  } finally {
+    if (originalDeveloperDirectory === undefined) delete process.env.DEVELOPER_DIR;
+    else process.env.DEVELOPER_DIR = originalDeveloperDirectory;
+    __testing.clearHelperCache();
+    removeSandbox(sandboxRoot);
+  }
+});
+
 test('runtime cache is source-bound, survives exact rebuild, and blocks tampering', () => {
   const sandboxRoot = makeSandbox();
   const spacedHome = join(sandboxRoot, 'home with spaces');

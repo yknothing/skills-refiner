@@ -29,6 +29,7 @@ import {
 
 const HELPER_PROTOCOL = 'skills-refiner.macos-helper.v1';
 const HELPER_SOURCE = fileURLToPath(new URL('../native/cleanup-macos-helper.c', import.meta.url));
+const COMMAND_LINE_TOOLS_DEVELOPER_DIR = '/Library/Developer/CommandLineTools';
 const MAX_HELPER_OUTPUT = 2 * 1024 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const TREE_SHA1 = /^[0-9a-f]{40}$/u;
@@ -72,8 +73,8 @@ function architecture() {
   fail('unsupported', 'unsupported_architecture');
 }
 
-function sanitizedEnvironment(home) {
-  return {
+function sanitizedEnvironment(home, developerDirectory = null) {
+  const environment = {
     PATH: '/usr/bin:/bin',
     HOME: home,
     LANG: 'C',
@@ -82,6 +83,8 @@ function sanitizedEnvironment(home) {
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_TERMINAL_PROMPT: '0',
   };
+  if (developerDirectory !== null) environment.DEVELOPER_DIR = developerDirectory;
+  return environment;
 }
 
 function hashBytes(bytes) {
@@ -343,39 +346,51 @@ function cleanupStaleBuildDirectories() {
   }
 }
 
-function compileAndInstallHelper(home, targetArchitecture, sourceSnapshot, xcrunPath) {
-  const sourceHash = sourceSnapshot.hash;
+function discoverTrustedToolchain(home, xcrunPath, developerDirectory = null) {
+  if (developerDirectory !== null
+      && !trustedSystemPath(developerDirectory, 'directory')) return null;
+  const environment = sanitizedEnvironment(home, developerDirectory);
   const xcrun = spawnSync(xcrunPath, ['--find', 'clang'], {
     encoding: 'utf8',
-    env: sanitizedEnvironment(home),
+    env: environment,
     maxBuffer: MAX_HELPER_OUTPUT,
     shell: false,
   });
-  if (xcrun.error || xcrun.status !== 0) fail('unsupported', 'compiler_unavailable');
+  if (xcrun.error || xcrun.status !== 0) return null;
   const compilerPath = xcrun.stdout.trim();
-  if (!trustedSystemPath(compilerPath, 'file')) {
-    fail('unsupported', 'compiler_unavailable');
-  }
+  if (!trustedSystemPath(compilerPath, 'file')) return null;
   const version = spawnSync(compilerPath, ['--version'], {
     encoding: 'utf8',
-    env: sanitizedEnvironment(home),
+    env: environment,
     maxBuffer: MAX_HELPER_OUTPUT,
     shell: false,
   });
-  if (version.error || version.status !== 0) fail('unsupported', 'compiler_unavailable');
+  if (version.error || version.status !== 0) return null;
   const compilerVersion = version.stdout.split(/\r?\n/u)[0].slice(0, 4096);
   if (compilerVersion.length === 0 || CONTROL_CHARACTERS.test(compilerVersion)
-      || /["\\]/u.test(compilerVersion)) fail('unsupported', 'compiler_unavailable');
+      || /["\\]/u.test(compilerVersion)) return null;
   const sdk = spawnSync(xcrunPath, ['--sdk', 'macosx', '--show-sdk-path'], {
     encoding: 'utf8',
-    env: sanitizedEnvironment(home),
+    env: environment,
     maxBuffer: MAX_HELPER_OUTPUT,
     shell: false,
   });
   const sdkPath = sdk.stdout?.trim();
-  if (sdk.error || sdk.status !== 0 || !trustedSystemPath(sdkPath, 'directory')) {
-    fail('unsupported', 'compiler_unavailable');
-  }
+  if (sdk.error || sdk.status !== 0 || !trustedSystemPath(sdkPath, 'directory')) return null;
+  return { compilerPath, compilerVersion, sdkPath, environment };
+}
+
+function compileAndInstallHelper(home, targetArchitecture, sourceSnapshot, xcrunPath) {
+  const sourceHash = sourceSnapshot.hash;
+  const toolchain = discoverTrustedToolchain(home, xcrunPath)
+    ?? discoverTrustedToolchain(home, xcrunPath, COMMAND_LINE_TOOLS_DEVELOPER_DIR);
+  if (toolchain === null) fail('unsupported', 'compiler_unavailable');
+  const {
+    compilerPath,
+    compilerVersion,
+    sdkPath,
+    environment,
+  } = toolchain;
 
   cleanupStaleBuildDirectories();
   const buildDirectory = mkdtempSync(join(tmpdir(), `skills-refiner-build-${process.pid}-`));
@@ -400,7 +415,7 @@ function compileAndInstallHelper(home, targetArchitecture, sourceSnapshot, xcrun
       outputPath,
     ], {
       encoding: 'utf8',
-      env: sanitizedEnvironment(home),
+      env: environment,
       maxBuffer: MAX_HELPER_OUTPUT,
       shell: false,
     });
