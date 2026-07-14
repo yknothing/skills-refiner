@@ -235,7 +235,7 @@ sr_json_escape() {
 sr_normalize_skill_content() {
     local file="$1"
     if ! sr_validate_trace_structure "$file"; then
-        awk '
+        LC_ALL=C awk '
             {
                 line=$0
                 sub(/\r$/, "", line)
@@ -245,7 +245,7 @@ sr_normalize_skill_content() {
         ' "$file" 2>/dev/null
         return
     fi
-    awk '
+    LC_ALL=C awk '
         function clean(line) {
             sub(/\r$/, "", line)
             return line
@@ -301,7 +301,7 @@ sr_hash_skill_file() {
 
 sr_skill_has_trace() {
     local file="$1"
-    awk '
+    LC_ALL=C awk '
         {
             line=$0
             sub(/\r$/, "", line)
@@ -320,7 +320,7 @@ sr_skill_has_trace() {
 
 sr_validate_trace_structure() {
     local file="$1"
-    awk '
+    LC_ALL=C awk '
         {
             line=$0
             sub(/\r$/, "", line)
