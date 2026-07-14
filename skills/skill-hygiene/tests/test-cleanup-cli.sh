@@ -330,6 +330,7 @@ run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
     "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$setup_target" \
     --confirm "$setup_confirmation" --json
 assert_eq "confirmed setup installs launcher" "0" "$RUN_STATUS"
+assert_eq "confirmed setup has no error" "null" "$(jq -r '.error_code' "$stdout_file")"
 assert_eq "setup install result" "installed" "$(jq -r '.result' "$stdout_file")"
 assert_eq "setup install reports mutation" "installed" "$(jq -r '.mutation_outcome' "$stdout_file")"
 assert_eq "installed launcher is owner executable only" "700" "$(stat -f '%Lp' "$setup_target/skills-refiner")"
