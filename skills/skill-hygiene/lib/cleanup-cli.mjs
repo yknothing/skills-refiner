@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,7 @@ import {
   compareAndSwapDurableJson,
   MacosAdapterError,
   createMacosAdapter,
+  installVerifiedLauncher,
   probeDurableJson,
 } from './cleanup-macos.mjs';
 import {
@@ -42,6 +44,7 @@ import {
 } from './cleanup-transaction.mjs';
 
 const SCANNER_PATH = fileURLToPath(new URL('../bin/skill-scan.sh', import.meta.url));
+const SOURCE_LAUNCHER_PATH = fileURLToPath(new URL('../bin/skills-refiner', import.meta.url));
 const JSON_REQUESTED = process.argv.slice(2).includes('--json');
 const TEST_FAULT_PHASES = new Set([...APPLY_FAULT_PHASES, ...RESTORE_FAULT_PHASES]);
 const CONFIRMATION_HEX_LENGTH = 12;
@@ -86,6 +89,155 @@ class CliError extends Error {
     this.transactionLocation = transactionLocation;
     this.keepFailures = keepFailures;
   }
+}
+
+class SetupCliError extends Error {
+  constructor(status, errorCode, exitCode, context = {}) {
+    super(errorCode);
+    this.name = 'SetupCliError';
+    this.status = status;
+    this.errorCode = errorCode;
+    this.exitCode = exitCode;
+    this.context = context;
+  }
+}
+
+function setupResult({
+  status,
+  result,
+  installed = false,
+  mutationOccurred = false,
+  mutationOutcome = 'unchanged',
+  sourceLauncher = null,
+  nodeBinary = null,
+  destinationLauncher = null,
+  fullPathLauncher = null,
+  confirmation = null,
+  errorCode = null,
+}) {
+  const value = {
+    schema_version: 'skills-refiner.setup-cli.v1',
+    command: 'setup-cli',
+    status,
+    overall_status: status,
+    result,
+    installed,
+    mutation_occurred: mutationOccurred,
+    mutation_outcome: mutationOutcome,
+    source_launcher: sourceLauncher,
+    node_binary: nodeBinary,
+    destination_launcher: destinationLauncher,
+    full_path_launcher: fullPathLauncher,
+    confirmation,
+    error_code: errorCode,
+  };
+  validateSetupResult(value);
+  return value;
+}
+
+function validateSetupResult(value) {
+  const keys = [
+    'command',
+    'confirmation',
+    'destination_launcher',
+    'error_code',
+    'full_path_launcher',
+    'installed',
+    'mutation_occurred',
+    'mutation_outcome',
+    'node_binary',
+    'overall_status',
+    'result',
+    'schema_version',
+    'source_launcher',
+    'status',
+  ];
+  const statuses = new Set([
+    'ok',
+    'confirmation_required',
+    'invalid',
+    'unsupported',
+    'blocked',
+    'recovery_required',
+    'cancelled',
+  ]);
+  const results = new Set(['preview', 'installed', 'existing', 'fallback', 'none']);
+  const nullableString = (field) => field === null || typeof field === 'string';
+  if (canonicalJson(Object.keys(value).sort()) !== canonicalJson(keys)
+      || value.schema_version !== 'skills-refiner.setup-cli.v1'
+      || value.command !== 'setup-cli' || !statuses.has(value.status)
+      || value.overall_status !== value.status || !results.has(value.result)
+      || typeof value.installed !== 'boolean' || typeof value.mutation_occurred !== 'boolean'
+      || !['unchanged', 'installed', 'unknown'].includes(value.mutation_outcome)
+      || !nullableString(value.source_launcher) || !nullableString(value.node_binary)
+      || !nullableString(value.destination_launcher) || !nullableString(value.full_path_launcher)
+      || !nullableString(value.error_code)) {
+    throw new Error('invalid setup-cli result contract');
+  }
+  if (value.confirmation !== null) {
+    const confirmationKeys = [
+      'destination_launcher', 'digest', 'node_binary', 'schema_version', 'source_launcher',
+    ];
+    const confirmation = value.confirmation;
+    const payload = {
+      schema_version: 'skills-refiner.setup-confirmation.v1',
+      source_launcher: value.source_launcher,
+      node_binary: value.node_binary,
+      destination_launcher: value.destination_launcher,
+    };
+    const digest = `sha256:${createHash('sha256').update(canonicalJson(payload)).digest('hex')}`;
+    if (!confirmation || typeof confirmation !== 'object' || Array.isArray(confirmation)
+        || canonicalJson(Object.keys(confirmation).sort()) !== canonicalJson(confirmationKeys)
+        || confirmation.schema_version !== payload.schema_version
+        || confirmation.source_launcher !== payload.source_launcher
+        || confirmation.node_binary !== payload.node_binary
+        || confirmation.destination_launcher !== payload.destination_launcher
+        || confirmation.digest !== digest) {
+      throw new Error('invalid setup-cli confirmation contract');
+    }
+  }
+  const unchanged = !value.mutation_occurred && value.mutation_outcome === 'unchanged';
+  const contextBound = typeof value.source_launcher === 'string'
+    && typeof value.node_binary === 'string'
+    && typeof value.destination_launcher === 'string'
+    && value.full_path_launcher === value.source_launcher
+    && value.confirmation !== null;
+  if (value.result === 'preview'
+      && !(value.status === 'confirmation_required' && value.error_code === 'confirmation_required'
+        && !value.installed && unchanged && contextBound)) {
+    throw new Error('invalid setup-cli preview contract');
+  }
+  if (value.result === 'installed'
+      && !(value.status === 'ok' && value.error_code === null && value.installed
+        && value.mutation_occurred && value.mutation_outcome === 'installed' && contextBound)) {
+    throw new Error('invalid setup-cli installed contract');
+  }
+  if (value.result === 'existing'
+      && !(value.status === 'ok' && value.error_code === null && value.installed
+        && unchanged && contextBound)) {
+    throw new Error('invalid setup-cli existing contract');
+  }
+  if (value.result === 'fallback'
+      && !(value.status === 'ok' && value.error_code === null && !value.installed && unchanged
+        && typeof value.source_launcher === 'string' && typeof value.node_binary === 'string'
+        && value.destination_launcher === null && value.confirmation === null
+        && value.full_path_launcher === value.source_launcher)) {
+    throw new Error('invalid setup-cli fallback contract');
+  }
+  if (value.result === 'none') {
+    const recovery = value.status === 'recovery_required';
+    if (value.status === 'ok' || value.status === 'confirmation_required'
+        || typeof value.error_code !== 'string' || value.installed
+        || (recovery
+          ? !((value.mutation_occurred && value.mutation_outcome === 'unknown') || unchanged)
+          : !unchanged)) {
+      throw new Error('invalid setup-cli error contract');
+    }
+  }
+}
+
+function setupFail(status, errorCode, exitCode, context = {}) {
+  throw new SetupCliError(status, errorCode, exitCode, context);
 }
 
 function invalid(errorCode = 'invalid_invocation', diagnostic = '[ERROR] Invalid cleanup invocation.') {
@@ -676,6 +828,224 @@ async function runUndo(args) {
   });
 }
 
+function setupPath(value, errorCode) {
+  if (typeof value !== 'string' || value.length === 0 || !isAbsolute(value)
+      || resolve(value) !== value || /[\u0000-\u001f\u007f]/u.test(value)) {
+    setupFail('invalid', errorCode, 2);
+  }
+  return value;
+}
+
+function setupOption(args, name) {
+  const indexes = args
+    .map((argument, index) => (argument === name ? index : -1))
+    .filter((index) => index >= 0);
+  if (indexes.length === 0) return null;
+  if (indexes.length !== 1 || indexes[0] + 1 >= args.length
+      || args[indexes[0] + 1].startsWith('--')) {
+    setupFail('invalid', 'invalid_invocation', 2);
+  }
+  return args[indexes[0] + 1];
+}
+
+function setupDirectoryIsSafe(path) {
+  let current = path;
+  const chain = [];
+  for (;;) {
+    chain.push(current);
+    if (current === '/') break;
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+  try {
+    for (let index = chain.length - 1; index >= 0; index -= 1) {
+      const candidate = chain[index];
+      const status = lstatSync(candidate);
+      if (!status.isDirectory() || status.isSymbolicLink() || (status.mode & 0o022) !== 0) {
+        return false;
+      }
+      if (candidate === path
+          && (status.uid !== process.getuid() || (status.mode & 0o200) === 0)) return false;
+    }
+    return realpathSync(path) === path;
+  } catch {
+    return false;
+  }
+}
+
+function setupContext(args) {
+  const allowedValues = new Set(['--node', '--target', '--confirm']);
+  const seen = new Set();
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--json') {
+      if (seen.has(argument)) setupFail('invalid', 'invalid_invocation', 2);
+      seen.add(argument);
+      continue;
+    }
+    if (!allowedValues.has(argument) || seen.has(argument) || index + 1 >= args.length
+        || args[index + 1].startsWith('--')) {
+      setupFail('invalid', 'invalid_invocation', 2);
+    }
+    seen.add(argument);
+    index += 1;
+  }
+
+  const sourceLauncher = realpathSync(SOURCE_LAUNCHER_PATH);
+  setupPath(sourceLauncher, 'source_launcher_unsafe');
+  const sourceStatus = lstatSync(sourceLauncher);
+  if (!sourceStatus.isFile() || sourceStatus.isSymbolicLink()) {
+    setupFail('blocked', 'source_launcher_unsafe', 10);
+  }
+  const requestedNode = setupOption(args, '--node') ?? process.execPath;
+  setupPath(requestedNode, 'invalid_node_binary');
+  let nodeBinary;
+  try {
+    nodeBinary = realpathSync(requestedNode);
+    const nodeStatus = lstatSync(nodeBinary);
+    if (!nodeStatus.isFile() || nodeStatus.isSymbolicLink() || (nodeStatus.mode & 0o111) === 0
+        || realpathSync(process.execPath) !== nodeBinary) throw new Error('node mismatch');
+  } catch {
+    setupFail('invalid', 'invalid_node_binary', 2, { sourceLauncher });
+  }
+  const fullPathLauncher = sourceLauncher;
+  let requestedTarget = setupOption(args, '--target');
+  const pathEntries = (process.env.PATH ?? '').split(':').filter((entry) => (
+    entry.length > 0 && isAbsolute(entry) && resolve(entry) === entry
+    && !/[\u0000-\u001f\u007f]/u.test(entry)
+  ));
+  if (requestedTarget === null) {
+    const candidates = [...new Set(pathEntries)].filter(setupDirectoryIsSafe);
+    if (candidates.length === 0) {
+      return {
+        fallback: setupResult({
+          status: 'ok',
+          result: 'fallback',
+          sourceLauncher,
+          nodeBinary,
+          fullPathLauncher,
+        }),
+      };
+    }
+    if (process.stdin.isTTY && process.stdout.isTTY && !JSON_REQUESTED
+        && candidates.length === 1) {
+      [requestedTarget] = candidates;
+    } else {
+      setupFail('invalid', 'target_required', 2, {
+        sourceLauncher,
+        nodeBinary,
+        fullPathLauncher,
+        targetCandidates: candidates,
+      });
+    }
+  }
+  const target = setupPath(requestedTarget, 'invalid_target');
+  if (!pathEntries.includes(target)) {
+    setupFail('invalid', 'target_not_on_path', 2, {
+      sourceLauncher, nodeBinary, fullPathLauncher,
+    });
+  }
+  const destinationLauncher = join(target, 'skills-refiner');
+  const confirmationPayload = {
+    schema_version: 'skills-refiner.setup-confirmation.v1',
+    source_launcher: sourceLauncher,
+    node_binary: nodeBinary,
+    destination_launcher: destinationLauncher,
+  };
+  const confirmation = {
+    ...confirmationPayload,
+    digest: `sha256:${createHash('sha256').update(canonicalJson(confirmationPayload)).digest('hex')}`,
+  };
+  const context = {
+    sourceLauncher,
+    nodeBinary,
+    destinationLauncher,
+    fullPathLauncher,
+    confirmation,
+  };
+  if (!setupDirectoryIsSafe(target)) setupFail('blocked', 'unsafe_target', 10, context);
+  return { context, suppliedConfirmation: setupOption(args, '--confirm') };
+}
+
+async function runSetupCli(args) {
+  if (process.platform !== 'darwin') setupFail('unsupported', 'unsupported_platform', 3);
+  const setup = setupContext(args);
+  if (setup.fallback) return setup.fallback;
+  const { context } = setup;
+  let { suppliedConfirmation } = setup;
+  if (suppliedConfirmation === null && process.stdin.isTTY && process.stdout.isTTY
+      && !JSON_REQUESTED) {
+    process.stdout.write(`Source launcher: ${context.sourceLauncher}\n`);
+    process.stdout.write(`Node binary: ${context.nodeBinary}\n`);
+    process.stdout.write(`Destination launcher: ${context.destinationLauncher}\n`);
+    process.stdout.write(`Confirmation digest: ${context.confirmation.digest}\n`);
+    const prompter = new SafePrompter(process.stdin, process.stdout);
+    try {
+      suppliedConfirmation = await prompter.question(
+        'Type the confirmation digest to install (blank cancels): ',
+      );
+    } catch (error) {
+      if (error instanceof CliError) {
+        setupFail(
+          'cancelled',
+          error.errorCode,
+          error.exitCode === 130 ? 130 : 2,
+          context,
+        );
+      }
+      throw error;
+    } finally {
+      prompter.close();
+    }
+    if (suppliedConfirmation.length === 0) {
+      setupFail('cancelled', 'confirmation_cancelled', 2, context);
+    }
+  } else if (suppliedConfirmation === null) {
+    setupFail('confirmation_required', 'confirmation_required', 2, context);
+  }
+  if (suppliedConfirmation !== context.confirmation.digest) {
+    setupFail('invalid', 'confirmation_mismatch', 2, context);
+  }
+  const shellQuote = (value) => `'${value.replaceAll("'", `'"'"'`)}'`;
+  const launcherBytes = Buffer.from([
+    '#!/bin/bash',
+    'set -o pipefail',
+    `export SKILLS_REFINER_NODE_BIN=${shellQuote(context.nodeBinary)}`,
+    `exec /bin/bash ${shellQuote(context.sourceLauncher)} "$@"`,
+    '',
+  ].join('\n'), 'utf8');
+  const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
+  let installed;
+  try {
+    installed = installVerifiedLauncher({
+      home: process.env.HOME,
+      targetDirectory: dirname(context.destinationLauncher),
+      launcherBytes,
+      expectedHash,
+    });
+  } catch (error) {
+    if (!(error instanceof MacosAdapterError)) throw error;
+    if (error.code === 'unsupported') setupFail('unsupported', error.reason, 3, context);
+    if (error.code === 'recovery_required') {
+      setupFail('recovery_required', error.reason, 20, {
+        ...context,
+        mutationOccurred: error.mutationMayHaveOccurred,
+        mutationOutcome: error.mutationMayHaveOccurred ? 'unknown' : 'unchanged',
+      });
+    }
+    setupFail('blocked', error.reason, 10, context);
+  }
+  return setupResult({
+    status: 'ok',
+    result: installed.result,
+    installed: true,
+    mutationOccurred: installed.result === 'installed',
+    mutationOutcome: installed.result === 'installed' ? 'installed' : 'unchanged',
+    ...context,
+  });
+}
+
 class SafePrompter {
   constructor(input, output) {
     this.input = input;
@@ -1043,9 +1413,10 @@ async function runGuidedCleanup(args) {
 
 function helpText() {
   return [
-    'skills-refiner cleanup — review and safely quarantine local skill entries',
+    'skills-refiner — govern locally installed and distributed skill entries',
     '',
     'Usage:',
+    '  skills-refiner setup-cli [--node ABS] [--target ABS] [--confirm DIGEST] [--json]',
     '  skills-refiner cleanup review [--scan FILE] [--json]',
     '  skills-refiner cleanup plan --review FILE --decisions FILE [--persist-keep] [--json]',
     '  skills-refiner cleanup apply --plan FILE --confirm HASH [--post-scan] [--json]',
@@ -1056,8 +1427,27 @@ function helpText() {
   ].join('\n');
 }
 
+function setupHumanText(result) {
+  if (result.result === 'fallback') {
+    return `No safe writable PATH directory was found. Use the full launcher path:\n  ${result.full_path_launcher}\n`;
+  }
+  if (result.result === 'installed') {
+    return `Installed verified launcher:\n  ${result.destination_launcher}\n`;
+  }
+  if (result.result === 'existing') {
+    return `Verified existing launcher:\n  ${result.destination_launcher}\n`;
+  }
+  return '';
+}
+
 async function run(argv) {
   if (argv.includes('--help') || argv.includes('-h')) return { kind: 'help', text: helpText() };
+  if (argv[0] === 'setup-cli') {
+    const value = await runSetupCli(argv.slice(1));
+    return JSON_REQUESTED
+      ? { kind: 'result', value }
+      : { kind: 'text', text: setupHumanText(value) };
+  }
   if (argv[0] !== 'cleanup') invalid();
   const command = argv[1];
   const args = argv.slice(2);
@@ -1109,7 +1499,30 @@ try {
   }
 } catch (error) {
   let mapped;
-  if (error instanceof CliError) {
+  if (error instanceof SetupCliError) {
+    const context = error.context ?? {};
+    const value = setupResult({
+      status: error.status,
+      result: error.status === 'confirmation_required' ? 'preview' : 'none',
+      mutationOccurred: context.mutationOccurred ?? false,
+      mutationOutcome: context.mutationOutcome ?? 'unchanged',
+      sourceLauncher: context.sourceLauncher ?? null,
+      nodeBinary: context.nodeBinary ?? null,
+      destinationLauncher: context.destinationLauncher ?? null,
+      fullPathLauncher: context.fullPathLauncher ?? context.sourceLauncher ?? null,
+      confirmation: context.confirmation ?? null,
+      errorCode: error.errorCode,
+    });
+    if (JSON_REQUESTED) process.stdout.write(`${JSON.stringify(value)}\n`);
+    if (!JSON_REQUESTED && error.errorCode === 'target_required'
+        && Array.isArray(context.targetCandidates) && context.targetCandidates.length > 0) {
+      process.stderr.write('Safe PATH directories (choose one with --target):\n');
+      for (const candidate of context.targetCandidates) process.stderr.write(`  ${candidate}\n`);
+    }
+    process.stderr.write(`[ERROR] setup-cli stopped: ${error.errorCode}.\n`);
+    process.exitCode = error.exitCode;
+    mapped = null;
+  } else if (error instanceof CliError) {
     mapped = error;
   } else if (error instanceof ContractError) {
     mapped = new CliError(

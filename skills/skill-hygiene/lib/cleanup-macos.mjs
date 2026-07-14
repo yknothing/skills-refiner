@@ -479,6 +479,69 @@ export function ensureMacosHelper(options = {}) {
   return ensureMacosHelperInternal(options);
 }
 
+function installVerifiedLauncherInternal({
+  home = process.env.HOME,
+  targetDirectory,
+  launcherBytes,
+  expectedHash,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const verifiedTarget = safePath(targetDirectory, 'targetDirectory');
+  if (!Buffer.isBuffer(launcherBytes) || launcherBytes.length === 0
+      || launcherBytes.length > 1024 * 1024 || !DIGEST.test(expectedHash ?? '')
+      || hashBytes(launcherBytes) !== expectedHash) {
+    fail('blocked', 'invalid_launcher_identity');
+  }
+  const helper = ensureMacosHelperInternal({ home: verifiedHome });
+  const installed = invokeHelper(helper, [
+    'install-launcher-v1',
+    verifiedTarget,
+    expectedHash,
+  ], { input: launcherBytes, mutationMayHaveOccurred: true, testEnvironment });
+  if (installed.operation !== 'install-launcher-v1'
+      || !['installed', 'existing'].includes(installed.result)
+      || installed.digest !== expectedHash) {
+    fail(
+      'recovery_required',
+      'launcher_install_result_invalid',
+      undefined,
+      { mutationMayHaveOccurred: true },
+    );
+  }
+  let verified;
+  try {
+    verified = invokeHelper(helper, [
+      'verify-launcher-v1',
+      verifiedTarget,
+      expectedHash,
+    ], { mutationMayHaveOccurred: installed.result === 'installed', testEnvironment });
+  } catch (error) {
+    if (installed.result === 'installed') {
+      fail(
+        'recovery_required',
+        'launcher_postcondition_failed',
+        undefined,
+        { mutationMayHaveOccurred: true },
+      );
+    }
+    throw error;
+  }
+  if (verified.operation !== 'verify-launcher-v1' || verified.digest !== expectedHash
+      || verified.mode !== 0o700 || verified.uid !== process.getuid()) {
+    fail(
+      'recovery_required',
+      'launcher_postcondition_failed',
+      undefined,
+      { mutationMayHaveOccurred: installed.result === 'installed' },
+    );
+  }
+  return { result: installed.result, digest: expectedHash };
+}
+
+export function installVerifiedLauncher(options = {}) {
+  return installVerifiedLauncherInternal(options);
+}
+
 export function ensureReferencedMacosHelper({
   home,
   binaryHash,
@@ -1546,6 +1609,21 @@ export const __testing = Object.freeze({
   },
   ensureWithXcrun(options) {
     return ensureMacosHelperInternal(options);
+  },
+  installLauncherWithCrash(options, point = 'after_launcher_rename') {
+    return installVerifiedLauncherInternal(options, { SKILLS_REFINER_TEST_CRASH: point });
+  },
+  installLauncherWithVerificationFailure(options) {
+    return installVerifiedLauncherInternal(
+      options,
+      { SKILLS_REFINER_TEST_FAIL: 'launcher_verify' },
+    );
+  },
+  installLauncherWithCleanupFailure(options, point) {
+    if (!['launcher_temp_unlink', 'launcher_temp_parent_fsync'].includes(point)) {
+      fail('blocked', 'invalid_launcher_test_seam');
+    }
+    return installVerifiedLauncherInternal(options, { SKILLS_REFINER_TEST_FAIL: point });
   },
   publishStateWithCrash(options, point = 'after_state_rename') {
     return durableWriteJsonInternal(options, { SKILLS_REFINER_TEST_CRASH: point });

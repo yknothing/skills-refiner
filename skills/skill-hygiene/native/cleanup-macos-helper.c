@@ -319,6 +319,58 @@ static int open_absolute_directory(const char *path) {
     return current;
 }
 
+static int open_secure_launcher_directory(const char *path) {
+    if (path == NULL || path[0] != '/' || !valid_utf8_without_control(
+            (const unsigned char *)path, strlen(path))) return -1;
+    char *copy = strdup(path);
+    if (copy == NULL) return -1;
+    int current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    struct stat root_status;
+    if (current < 0 || fstat(current, &root_status) != 0
+        || !S_ISDIR(root_status.st_mode) || (root_status.st_mode & 0022) != 0) {
+        if (current >= 0) close(current);
+        free(copy);
+        return -1;
+    }
+    char *cursor = copy + 1;
+    if (*cursor == '\0') {
+        close(current);
+        free(copy);
+        return -1;
+    }
+    while (*cursor != '\0') {
+        char *separator = strchr(cursor, '/');
+        if (separator != NULL) *separator = '\0';
+        if (!valid_component(cursor)) {
+            close(current);
+            free(copy);
+            return -1;
+        }
+        int next = openat(current, cursor, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        struct stat status;
+        int is_final = separator == NULL;
+        if (next < 0 || fstat(next, &status) != 0 || !S_ISDIR(status.st_mode)
+            || (status.st_mode & 0022) != 0
+            || (is_final && (status.st_uid != getuid() || (status.st_mode & S_IWUSR) == 0))) {
+            if (next >= 0) close(next);
+            close(current);
+            free(copy);
+            return -1;
+        }
+        close(current);
+        current = next;
+        if (is_final) break;
+        cursor = separator + 1;
+        if (*cursor == '\0') {
+            close(current);
+            free(copy);
+            return -1;
+        }
+    }
+    free(copy);
+    return current;
+}
+
 static const char *relative_to_home(const char *home, const char *path) {
     size_t home_length = strlen(home);
     if (strncmp(home, path, home_length) != 0 || path[home_length] != '/') return NULL;
@@ -1223,6 +1275,162 @@ static int read_bounded_stdin(unsigned char **output, size_t *output_length) {
     }
     *output = buffer;
     *output_length = length;
+    return 0;
+}
+
+static int valid_lower_hex(const char *value, size_t expected_length);
+
+static int verify_launcher_leaf(int directory_fd, const char *expected_hash) {
+    struct stat path_before;
+    if (fstatat(directory_fd, "skills-refiner", &path_before, AT_SYMLINK_NOFOLLOW) != 0
+        || !S_ISREG(path_before.st_mode) || path_before.st_uid != getuid()
+        || (path_before.st_mode & 0777) != 0700 || path_before.st_nlink != 1) return -1;
+    int launcher_fd = openat(
+        directory_fd,
+        "skills-refiner",
+        O_RDONLY | O_NOFOLLOW | O_NONBLOCK
+    );
+    if (launcher_fd < 0) return -1;
+    struct stat opened;
+    struct stat after;
+    struct stat path_after;
+    char observed_hash[SHA256_HEX_BYTES];
+    int valid = fstat(launcher_fd, &opened) == 0
+        && S_ISREG(opened.st_mode) && opened.st_nlink == 1
+        && same_object_snapshot(&path_before, &opened)
+        && hash_regular_fd(launcher_fd, observed_hash, MAX_INPUT_BYTES) == 0
+        && strcmp(observed_hash, expected_hash) == 0
+        && fstat(launcher_fd, &after) == 0 && after.st_nlink == 1
+        && same_object_snapshot(&opened, &after)
+        && fstatat(directory_fd, "skills-refiner", &path_after, AT_SYMLINK_NOFOLLOW) == 0
+        && path_after.st_nlink == 1 && same_object_snapshot(&opened, &path_after);
+    close(launcher_fd);
+    return valid ? 0 : -1;
+}
+
+static int verify_launcher_v1(const char *target_directory, const char *expected_hash) {
+    if (!valid_lower_hex(expected_hash, 64U)) return emit_error("invalid_launcher_identity");
+    if (fail_at_test_seam("launcher_verify")) return emit_error("launcher_postcondition_failed");
+    int directory_fd = open_secure_launcher_directory(target_directory);
+    if (directory_fd < 0) return emit_error("launcher_target_unsafe");
+    int valid = verify_launcher_leaf(directory_fd, expected_hash) == 0;
+    close(directory_fd);
+    if (!valid) return emit_error("launcher_postcondition_failed");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"verify-launcher-v1\",\"digest\":\"%s\","
+           "\"mode\":448,\"uid\":%u}\n",
+           HELPER_PROTOCOL, expected_hash, (unsigned int)getuid());
+    return 0;
+}
+
+static int install_launcher_v1(const char *target_directory, const char *expected_hash) {
+    if (!valid_lower_hex(expected_hash, 64U)) return emit_error("invalid_launcher_identity");
+    unsigned char *bytes = NULL;
+    size_t length = 0U;
+    if (read_bounded_stdin(&bytes, &length) != 0 || length == 0U) {
+        free(bytes);
+        return emit_error("launcher_input_invalid");
+    }
+    sha256_context hash_context;
+    unsigned char digest[32];
+    char observed_hash[SHA256_HEX_BYTES];
+    sha256_init(&hash_context);
+    sha256_update(&hash_context, bytes, length);
+    sha256_final(&hash_context, digest);
+    digest_hex(digest, observed_hash);
+    if (strcmp(observed_hash, expected_hash) != 0) {
+        free(bytes);
+        return emit_error("launcher_input_mismatch");
+    }
+    int directory_fd = open_secure_launcher_directory(target_directory);
+    if (directory_fd < 0) {
+        free(bytes);
+        return emit_error("launcher_target_unsafe");
+    }
+    struct stat existing_status;
+    if (fstatat(directory_fd, "skills-refiner", &existing_status, AT_SYMLINK_NOFOLLOW) == 0) {
+        int exact = verify_launcher_leaf(directory_fd, expected_hash) == 0;
+        close(directory_fd);
+        free(bytes);
+        if (!exact) return emit_error("launcher_destination_conflict");
+        printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+               "\"operation\":\"install-launcher-v1\",\"result\":\"existing\","
+               "\"digest\":\"%s\"}\n", HELPER_PROTOCOL, expected_hash);
+        return 0;
+    }
+    if (errno != ENOENT) {
+        close(directory_fd);
+        free(bytes);
+        return emit_error("launcher_destination_conflict");
+    }
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(
+        temporary,
+        sizeof(temporary),
+        ".skills-refiner-launcher-%ld-%08x",
+        (long)getpid(),
+        arc4random()
+    );
+    int temporary_fd = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1
+        : openat(directory_fd, temporary, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0700);
+    int temporary_created = temporary_fd >= 0;
+    int result = 0;
+    int published = 0;
+    if (temporary_fd < 0 || fchmod(temporary_fd, 0700) != 0) result = -1;
+    size_t written = 0U;
+    while (result == 0 && written < length) {
+        ssize_t part = write(temporary_fd, bytes + written, length - written);
+        if (part <= 0) result = -1;
+        else written += (size_t)part;
+    }
+    if (result == 0) {
+        int durable = fsync(temporary_fd) == 0;
+        int closed = close(temporary_fd) == 0;
+        temporary_fd = -1;
+        if (!durable || !closed) result = -1;
+    }
+    if (result == 0) {
+        if (fail_at_test_seam("launcher_temp_unlink")
+            || fail_at_test_seam("launcher_temp_parent_fsync")) result = -1;
+    }
+    if (result == 0) {
+        if (renameatx_np(
+                directory_fd, temporary, directory_fd, "skills-refiner", RENAME_EXCL
+            ) == 0) {
+            published = 1;
+            crash_at_test_seam("after_launcher_rename");
+        } else if (errno == EEXIST && verify_launcher_leaf(directory_fd, expected_hash) == 0) {
+            result = 1;
+        } else {
+            result = -2;
+        }
+    }
+    if (result == 0 && fsync(directory_fd) != 0) result = -3;
+    if (result == 0 && verify_launcher_leaf(directory_fd, expected_hash) != 0) result = -3;
+    if (temporary_fd >= 0) close(temporary_fd);
+    int cleanup_failed = 0;
+    if (temporary_created && !published) {
+        if (fail_at_test_seam("launcher_temp_unlink")) cleanup_failed = 1;
+        else if (unlinkat(directory_fd, temporary, 0) != 0 && errno != ENOENT) cleanup_failed = 1;
+        if (fail_at_test_seam("launcher_temp_parent_fsync")
+            || fsync(directory_fd) != 0) cleanup_failed = 1;
+    }
+    close(directory_fd);
+    free(bytes);
+    if (cleanup_failed) return emit_recovery_required("launcher_temp_cleanup_unknown");
+    if (result == 1) {
+        printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+               "\"operation\":\"install-launcher-v1\",\"result\":\"existing\","
+               "\"digest\":\"%s\"}\n", HELPER_PROTOCOL, expected_hash);
+        return 0;
+    }
+    if (result == -2) return emit_error("launcher_destination_conflict");
+    if (result != 0 && published) return emit_recovery_required("launcher_install_outcome_unknown");
+    if (result != 0) return emit_error("launcher_install_failed");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"install-launcher-v1\",\"result\":\"installed\","
+           "\"digest\":\"%s\"}\n", HELPER_PROTOCOL, expected_hash);
     return 0;
 }
 
@@ -3874,6 +4082,12 @@ int main(int argument_count, char **arguments) {
     }
     if (strcmp(command, "install-self") == 0 && argument_count == 5) {
         return install_self(arguments[2], arguments[3], arguments[4], arguments[0]);
+    }
+    if (strcmp(command, "install-launcher-v1") == 0 && argument_count == 4) {
+        return install_launcher_v1(arguments[2], arguments[3]);
+    }
+    if (strcmp(command, "verify-launcher-v1") == 0 && argument_count == 4) {
+        return verify_launcher_v1(arguments[2], arguments[3]);
     }
     if (strcmp(command, "publish-state") == 0 && argument_count == 6) {
         return publish_state(arguments[2], arguments[3], arguments[4], arguments[5]);

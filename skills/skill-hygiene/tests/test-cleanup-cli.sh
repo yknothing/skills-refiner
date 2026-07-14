@@ -86,6 +86,355 @@ EOF
     assert_eq "Node $major stdout remains one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
 done
 
+setup_home="$SANDBOX/setup-home"
+setup_target="$SANDBOX/setup-bin"
+setup_tools="$SANDBOX/setup-tools"
+mkdir -m 700 "$setup_home" "$setup_target" "$setup_tools"
+ln -s /bin/bash "$setup_tools/bash"
+ln -s /usr/bin/dirname "$setup_tools/dirname"
+for profile in .zshrc .bashrc .profile; do
+    printf 'unchanged setup fixture\n' >"$setup_home/$profile"
+done
+profile_hashes_before=$(shasum -a 256 "$setup_home/.zshrc" "$setup_home/.bashrc" "$setup_home/.profile")
+
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$setup_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$setup_target" --json
+assert_eq "non-TTY setup preview exits confirmation-required" "2" "$RUN_STATUS"
+assert_eq "setup preview emits one JSON object" "1" "$(jq -s 'length' "$stdout_file")"
+assert_eq "setup preview uses exact schema" "skills-refiner.setup-cli.v1" "$(jq -r '.schema_version' "$stdout_file")"
+assert_eq "setup preview uses exact keys" \
+    "command,confirmation,destination_launcher,error_code,full_path_launcher,installed,mutation_occurred,mutation_outcome,node_binary,overall_status,result,schema_version,source_launcher,status" \
+    "$(jq -r 'keys | sort | join(",")' "$stdout_file")"
+assert_eq "setup preview command" "setup-cli" "$(jq -r '.command' "$stdout_file")"
+assert_eq "setup preview status" "confirmation_required" "$(jq -r '.status' "$stdout_file")"
+assert_eq "setup preview result" "preview" "$(jq -r '.result' "$stdout_file")"
+assert_eq "setup preview performs zero writes" "false" "$([ -e "$setup_target/skills-refiner" ] && echo true || echo false)"
+assert_eq "setup preview binds canonical Node" "$(cd "$(dirname "$NODE24_BIN")" && pwd -P)/$(basename "$NODE24_BIN")" "$(jq -r '.node_binary' "$stdout_file")"
+assert_eq "setup preview binds destination" "$setup_target/skills-refiner" "$(jq -r '.destination_launcher' "$stdout_file")"
+assert_eq "setup confirmation uses exact versioned keys" \
+    "destination_launcher,digest,node_binary,schema_version,source_launcher" \
+    "$(jq -r '.confirmation | keys | sort | join(",")' "$stdout_file")"
+assert_eq "setup confirmation schema" "skills-refiner.setup-confirmation.v1" \
+    "$(jq -r '.confirmation.schema_version' "$stdout_file")"
+assert_eq "setup confirmation source cross-field" "$(jq -r '.source_launcher' "$stdout_file")" \
+    "$(jq -r '.confirmation.source_launcher' "$stdout_file")"
+assert_eq "setup confirmation Node cross-field" "$(jq -r '.node_binary' "$stdout_file")" \
+    "$(jq -r '.confirmation.node_binary' "$stdout_file")"
+assert_eq "setup confirmation destination cross-field" "$(jq -r '.destination_launcher' "$stdout_file")" \
+    "$(jq -r '.confirmation.destination_launcher' "$stdout_file")"
+setup_confirmation=$(jq -r '.confirmation.digest' "$stdout_file")
+assert_eq "setup confirmation is a sha256 identifier" "true" \
+    "$(printf '%s\n' "$setup_confirmation" | grep -Eq '^sha256:[0-9a-f]{64}$' && echo true || echo false)"
+
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$setup_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$setup_target" \
+    --confirm wrong --json
+assert_eq "wrong setup confirmation exits invalid" "2" "$RUN_STATUS"
+assert_eq "wrong setup confirmation writes no launcher" "false" "$([ -e "$setup_target/skills-refiner" ] && echo true || echo false)"
+
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$setup_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$setup_target" \
+    --confirm "$setup_confirmation" --json
+assert_eq "confirmed setup installs launcher" "0" "$RUN_STATUS"
+assert_eq "setup install result" "installed" "$(jq -r '.result' "$stdout_file")"
+assert_eq "setup install reports mutation" "installed" "$(jq -r '.mutation_outcome' "$stdout_file")"
+assert_eq "installed launcher is owner executable only" "700" "$(stat -f '%Lp' "$setup_target/skills-refiner")"
+assert_eq "installed launcher is a regular file" "Regular File" "$(stat -f '%HT' "$setup_target/skills-refiner")"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$setup_target:$setup_tools" \
+    "$setup_target/skills-refiner" --help --json
+assert_eq "installed launcher delegates through bound Node" "0" "$RUN_STATUS"
+assert_eq "installed launcher reaches actual source" "skills-refiner.cleanup.help.v1" "$(jq -r '.schema_version' "$stdout_file")"
+
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$setup_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$setup_target" \
+    --confirm "$setup_confirmation" --json
+assert_eq "exact setup replay is idempotent" "0" "$RUN_STATUS"
+assert_eq "exact setup replay reports existing" "existing" "$(jq -r '.result' "$stdout_file")"
+assert_eq "exact setup replay reports no mutation" "unchanged" "$(jq -r '.mutation_outcome' "$stdout_file")"
+
+conflict_target="$SANDBOX/conflict-bin"
+mkdir -m 700 "$conflict_target"
+printf '#!/bin/bash\nexit 99\n' >"$conflict_target/skills-refiner"
+chmod 700 "$conflict_target/skills-refiner"
+conflict_hash=$(shasum -a 256 "$conflict_target/skills-refiner" | awk '{print $1}')
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$conflict_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$conflict_target" --json
+conflict_confirmation=$(jq -r '.confirmation.digest' "$stdout_file")
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$conflict_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$conflict_target" \
+    --confirm "$conflict_confirmation" --json
+assert_eq "unrelated existing launcher is blocked" "10" "$RUN_STATUS"
+assert_eq "unrelated existing launcher is unchanged" "$conflict_hash" "$(shasum -a 256 "$conflict_target/skills-refiner" | awk '{print $1}')"
+
+world_target="$SANDBOX/world-bin"
+mkdir -m 777 "$world_target"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$world_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$world_target" --json
+assert_eq "world-writable setup target is blocked" "10" "$RUN_STATUS"
+assert_eq "world-writable target receives no launcher" "false" "$([ -e "$world_target/skills-refiner" ] && echo true || echo false)"
+
+symlink_target_real="$SANDBOX/symlink-bin-real"
+symlink_target="$SANDBOX/symlink-bin"
+mkdir -m 700 "$symlink_target_real"
+ln -s "$symlink_target_real" "$symlink_target"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$symlink_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$symlink_target" --json
+assert_eq "symlinked setup target is blocked" "10" "$RUN_STATUS"
+assert_eq "symlinked target receives no launcher" "false" "$([ -e "$symlink_target_real/skills-refiner" ] && echo true || echo false)"
+
+readonly_tools="$SANDBOX/readonly-tools"
+mkdir -m 700 "$readonly_tools"
+ln -s /bin/bash "$readonly_tools/bash"
+ln -s /usr/bin/dirname "$readonly_tools/dirname"
+chmod 500 "$readonly_tools"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$readonly_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --json
+assert_eq "no safe PATH destination returns fallback" "0" "$RUN_STATUS"
+assert_eq "fallback reports full source path" "fallback" "$(jq -r '.result' "$stdout_file")"
+assert_eq "fallback does not invent destination" "null" "$(jq -r '.destination_launcher' "$stdout_file")"
+assert_eq "fallback reports zero mutation" "unchanged" "$(jq -r '.mutation_outcome' "$stdout_file")"
+
+for bad_setup_args in \
+    '--node' \
+    '--node relative/node --target PLACEHOLDER --json' \
+    '--node NODE --node NODE --target PLACEHOLDER --json' \
+    '--node NODE --runtime NODE --target PLACEHOLDER --json'; do
+    # shellcheck disable=SC2086
+    set -- $bad_setup_args
+    bad_values=()
+    for value in "$@"; do
+        case "$value" in
+            NODE) bad_values+=("$NODE24_BIN") ;;
+            PLACEHOLDER) bad_values+=("$setup_target") ;;
+            *) bad_values+=("$value") ;;
+        esac
+    done
+    run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+        HOME="$setup_home" PATH="$setup_target:$setup_tools" \
+        "$LAUNCHER" setup-cli "${bad_values[@]}"
+    assert_eq "invalid setup bootstrap exits invalid: $bad_setup_args" "2" "$RUN_STATUS"
+done
+
+profile_hashes_after=$(shasum -a 256 "$setup_home/.zshrc" "$setup_home/.bashrc" "$setup_home/.profile")
+assert_eq "setup never edits shell profiles" "$profile_hashes_before" "$profile_hashes_after"
+
+setup_source=$(jq -r '.source_launcher' "$SANDBOX/stdout" 2>/dev/null || true)
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$setup_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$setup_target" --json
+setup_source=$(jq -r '.source_launcher' "$stdout_file")
+setup_node=$(jq -r '.node_binary' "$stdout_file")
+setup_destination=$(jq -r '.destination_launcher' "$stdout_file")
+confirmation_payload=$(jq -cnS \
+    --arg source "$setup_source" --arg node "$setup_node" --arg destination "$setup_destination" \
+    '{schema_version:"skills-refiner.setup-confirmation.v1",source_launcher:$source,node_binary:$node,destination_launcher:$destination}')
+expected_confirmation="sha256:$(printf '%s' "$confirmation_payload" | shasum -a 256 | awk '{print $1}')"
+assert_eq "setup confirmation digest binds exact versioned three-path payload" \
+    "$expected_confirmation" "$(jq -r '.confirmation.digest' "$stdout_file")"
+
+for major in 23 25; do
+    fake_node="$SANDBOX/node-$major"
+    setup_major_target="$SANDBOX/setup-node-$major-target"
+    mkdir -m 700 "$setup_major_target"
+    run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+        HOME="$setup_home" PATH="$setup_major_target:$setup_tools" \
+        "$LAUNCHER" setup-cli --node "$fake_node" --target "$setup_major_target" --json
+    assert_eq "setup explicitly rejects Node $major" "3" "$RUN_STATUS"
+    assert_eq "setup Node $major rejection uses setup schema" \
+        "skills-refiner.setup-cli.v1" "$(jq -r '.schema_version' "$stdout_file")"
+    assert_eq "setup Node $major rejection writes no destination" "false" \
+        "$([ -e "$setup_major_target/skills-refiner" ] && echo true || echo false)"
+done
+
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH= /bin/bash "$LAUNCHER" setup-cli --node "$NODE24_BIN" --json
+assert_eq "empty PATH yields explicit fallback" "0" "$RUN_STATUS"
+assert_eq "empty PATH fallback writes nothing" "fallback" "$(jq -r '.result' "$stdout_file")"
+
+setup_launcher_hash_before=$(shasum -a 256 "$setup_target/skills-refiner" | awk '{print $1}')
+setup_launcher_mode_before=$(stat -f '%Lp' "$setup_target/skills-refiner")
+for path_case in \
+    "relative:$setup_tools" \
+    "$setup_target/../setup-bin:$setup_tools"; do
+    run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+        HOME="$setup_home" PATH="$path_case" /bin/bash "$LAUNCHER" setup-cli \
+        --node "$NODE24_BIN" --target "$setup_target" --json
+    assert_eq "non-exact PATH member cannot authorize target: $path_case" "2" "$RUN_STATUS"
+    assert_eq "non-exact PATH member preserves destination bytes" "$setup_launcher_hash_before" \
+        "$(shasum -a 256 "$setup_target/skills-refiner" | awk '{print $1}')"
+    assert_eq "non-exact PATH member preserves destination mode" "$setup_launcher_mode_before" \
+        "$(stat -f '%Lp' "$setup_target/skills-refiner")"
+done
+
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$setup_target/../setup-bin:$setup_tools" /bin/bash "$LAUNCHER" \
+    setup-cli --node "$NODE24_BIN" --target "$setup_target/../setup-bin" --json
+assert_eq "non-normalized target is invalid" "2" "$RUN_STATUS"
+
+group_parent="$SANDBOX/group-writable-parent"
+group_target="$group_parent/bin"
+mkdir -m 700 "$group_parent" "$group_target"
+chmod 775 "$group_parent"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$group_target:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$group_target" --json
+assert_eq "group-writable setup ancestor is blocked" "10" "$RUN_STATUS"
+assert_eq "group-writable ancestor receives zero wrapper writes" "false" \
+    "$([ -e "$group_target/skills-refiner" ] && echo true || echo false)"
+
+swap_parent="$SANDBOX/swap-parent"
+swap_moved="$SANDBOX/swap-parent-moved"
+swap_attacker="$SANDBOX/swap-attacker"
+mkdir -m 700 "$swap_parent" "$swap_attacker"
+mkdir -m 700 "$swap_parent/bin" "$swap_attacker/bin"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$swap_parent/bin:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$swap_parent/bin" --json
+swap_confirmation=$(jq -r '.confirmation.digest' "$stdout_file")
+mv "$swap_parent" "$swap_moved"
+ln -s "$swap_attacker" "$swap_parent"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$swap_parent/bin:$setup_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN" --target "$swap_parent/bin" \
+    --confirm "$swap_confirmation" --json
+assert_eq "ancestor swap after preview is blocked" "10" "$RUN_STATUS"
+assert_eq "ancestor swap writes nothing to original fd tree" "false" \
+    "$([ -e "$swap_moved/bin/skills-refiner" ] && echo true || echo false)"
+assert_eq "ancestor swap writes nothing to attacker tree" "false" \
+    "$([ -e "$swap_attacker/bin/skills-refiner" ] && echo true || echo false)"
+
+special_root="$SANDBOX/selective skill '源"
+special_skill="$special_root/skill-hygiene"
+special_home="$SANDBOX/special-home"
+special_target="$SANDBOX/special bin '目标"
+special_node_dir="$SANDBOX/Node 24 '运行"
+special_node="$special_node_dir/node 24"
+mkdir -m 700 "$special_root" "$special_home" "$special_target" "$special_node_dir"
+cp -R "$SCRIPT_DIR/.." "$special_skill"
+ln "$NODE24_BIN" "$special_node"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$special_home" PATH="$special_target:$setup_tools" \
+    "$special_skill/bin/skills-refiner" setup-cli --node "$special_node" \
+    --target "$special_target" --json
+special_confirmation=$(jq -r '.confirmation.digest' "$stdout_file")
+assert_eq "selective setup binds actual source outside conventional root" \
+    "$special_skill/bin/skills-refiner" "$(jq -r '.source_launcher' "$stdout_file")"
+assert_eq "special-path setup preview exits confirmation-required" "2" "$RUN_STATUS"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$special_home" PATH="$special_target:$setup_tools" \
+    "$special_skill/bin/skills-refiner" setup-cli --node "$special_node" \
+    --target "$special_target" --confirm "$special_confirmation" --json
+assert_eq "spaces Unicode and single quotes install safely" "0" "$RUN_STATUS"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$special_home" PATH="$special_target" \
+    "$special_target/skills-refiner" --help --json
+assert_eq "special-path wrapper delegates with sanitized PATH" "0" "$RUN_STATUS"
+assert_eq "special-path wrapper reaches selectively installed source" \
+    "skills-refiner.cleanup.help.v1" "$(jq -r '.schema_version' "$stdout_file")"
+assert_eq "special-path wrapper never hard-codes conventional source" "0" \
+    "$(grep -F -c '/.agents/skills/skill-hygiene' "$special_target/skills-refiner" || true)"
+
+for tty_case in blank eof wrong interrupt; do
+    tty_target="$SANDBOX/setup-tty-$tty_case"
+    mkdir -m 700 "$tty_target"
+    setup_expect="$SANDBOX/setup-$tty_case.expect"
+    case "$tty_case" in
+        blank) tty_send='send "\r"'; expected_tty_status=2 ;;
+        eof) tty_send='send "\004"'; expected_tty_status=2 ;;
+        wrong) tty_send='send "wrong\r"'; expected_tty_status=2 ;;
+        interrupt) tty_send='send "\003"'; expected_tty_status=130 ;;
+    esac
+    cat >"$setup_expect" <<EOF
+set timeout 3
+set env(HOME) {$setup_home}
+set env(PATH) {$tty_target:$setup_tools}
+catch {unset env(SKILLS_REFINER_NODE_BIN)}
+spawn -noecho /bin/bash {$LAUNCHER} setup-cli --node {$NODE24_BIN} --target {$tty_target}
+expect -re {Type the confirmation digest to install.*:}
+$tty_send
+expect eof
+set result [wait]
+exit [lindex \$result 3]
+EOF
+    set +e
+    /usr/bin/expect "$setup_expect" >"$stdout_file" 2>"$stderr_file"
+    RUN_STATUS=$?
+    set -e
+    assert_eq "TTY setup $tty_case exits safely" "$expected_tty_status" "$RUN_STATUS"
+    assert_eq "TTY setup $tty_case writes no launcher" "false" \
+        "$([ -e "$tty_target/skills-refiner" ] && echo true || echo false)"
+done
+
+tty_auto_target="$SANDBOX/setup-tty-auto"
+mkdir -m 700 "$tty_auto_target"
+setup_auto_expect="$SANDBOX/setup-auto.expect"
+cat >"$setup_auto_expect" <<EOF
+set timeout 5
+set env(HOME) {$setup_home}
+set env(PATH) {$tty_auto_target:/usr/bin:/bin}
+catch {unset env(SKILLS_REFINER_NODE_BIN)}
+spawn -noecho /bin/bash {$LAUNCHER} setup-cli --node {$NODE24_BIN}
+expect -re {Confirmation digest: (sha256:[0-9a-f]+)}
+set digest \$expect_out(1,string)
+expect -re {Type the confirmation digest to install.*:}
+send "\$digest\r"
+expect eof
+set result [wait]
+exit [lindex \$result 3]
+EOF
+set +e
+/usr/bin/expect "$setup_auto_expect" >"$stdout_file" 2>"$stderr_file"
+RUN_STATUS=$?
+set -e
+assert_eq "TTY setup selects one safe PATH target and installs" "0" "$RUN_STATUS"
+assert_eq "TTY setup unique target receives launcher" "true" \
+    "$([ -f "$tty_auto_target/skills-refiner" ] && echo true || echo false)"
+
+tty_multi_one="$SANDBOX/setup-tty-multi-one"
+tty_multi_two="$SANDBOX/setup-tty-multi-two"
+mkdir -m 700 "$tty_multi_one" "$tty_multi_two"
+setup_multi_expect="$SANDBOX/setup-multi.expect"
+cat >"$setup_multi_expect" <<EOF
+set timeout 3
+set env(HOME) {$setup_home}
+set env(PATH) {$tty_multi_one:$tty_multi_two:/usr/bin:/bin}
+catch {unset env(SKILLS_REFINER_NODE_BIN)}
+spawn -noecho /bin/bash {$LAUNCHER} setup-cli --node {$NODE24_BIN}
+expect eof
+set result [wait]
+exit [lindex \$result 3]
+EOF
+set +e
+/usr/bin/expect "$setup_multi_expect" >"$stdout_file" 2>"$stderr_file"
+RUN_STATUS=$?
+set -e
+assert_eq "TTY setup never silently chooses among multiple safe targets" "2" "$RUN_STATUS"
+assert_eq "TTY multiple-target guidance lists first candidate" "1" \
+    "$(grep -F -c "$tty_multi_one" "$stdout_file")"
+assert_eq "TTY multiple-target guidance lists second candidate" "1" \
+    "$(grep -F -c "$tty_multi_two" "$stdout_file")"
+assert_eq "TTY multiple-target guidance writes no launcher" "0" \
+    "$(find "$tty_multi_one" "$tty_multi_two" -name skills-refiner -type f | wc -l | tr -d ' ')"
+
+non_tty_target="$SANDBOX/setup-nontty-target"
+mkdir -m 700 "$non_tty_target"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$non_tty_target:/usr/bin:/bin" /bin/bash "$LAUNCHER" \
+    setup-cli --node "$NODE24_BIN" --json
+assert_eq "non-TTY setup never silently selects one safe target" "2" "$RUN_STATUS"
+assert_eq "non-TTY setup without target writes nothing" "false" \
+    "$([ -e "$non_tty_target/skills-refiner" ] && echo true || echo false)"
+
 run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" "$LAUNCHER" cleanup apply --plan "$scan_file" --json
 assert_eq "raw scan apply exits invalid schema" "2" "$RUN_STATUS"
 assert_eq "raw scan apply error code" "invalid_schema" "$(jq -r '.error_code' "$stdout_file")"

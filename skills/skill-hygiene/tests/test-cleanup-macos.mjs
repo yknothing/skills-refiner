@@ -4,6 +4,7 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -37,6 +38,7 @@ import {
   initializeBatchRecords,
   initializeBatchTransactionRecords,
   initializeTransactionRecords,
+  installVerifiedLauncher,
   isolateStaleBatchLock,
   probeBatchRecords,
   probeBatchTransactionRecords,
@@ -258,6 +260,217 @@ test('fixture helpers expose guarded roots and single transaction IDs', () => {
   assert.equal(typeof onlyTransactionId, 'function');
   assert.equal(onlyTransactionId({ items: [{ transaction_id: 'tx' }] }), 'tx');
   assert.throws(() => removeSandbox(join(home, 'not-the-root')), /unverified cleanup sandbox/);
+});
+
+test('native launcher install is exclusive, durable, idempotent, and byte exact', () => {
+  const targetDirectory = join(home, 'launcher bin 空 格');
+  mkdirSync(targetDirectory, { mode: 0o700 });
+  const launcherBytes = Buffer.from(
+    "#!/bin/bash\nexport SKILLS_REFINER_NODE_BIN='/private/tmp/Node 24/bin/node'\nexec '/Users/example/skill '\"'\"'source/bin/skills-refiner' \"$@\"\n",
+    'utf8',
+  );
+  const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
+  const first = installVerifiedLauncher({
+    home, targetDirectory, launcherBytes, expectedHash,
+  });
+  assert.equal(first.result, 'installed');
+  const destination = join(targetDirectory, 'skills-refiner');
+  const status = lstatSync(destination);
+  assert.equal(status.isFile(), true);
+  assert.equal(status.isSymbolicLink(), false);
+  assert.equal(status.uid, process.getuid());
+  assert.equal(status.mode & 0o777, 0o700);
+  assert.deepEqual(readFileSync(destination), launcherBytes);
+  assert.deepEqual(
+    readdirSync(targetDirectory).filter((leaf) => leaf.startsWith('.skills-refiner-launcher-')),
+    [],
+  );
+
+  const second = installVerifiedLauncher({
+    home, targetDirectory, launcherBytes, expectedHash,
+  });
+  assert.equal(second.result, 'existing');
+  assert.deepEqual(readFileSync(destination), launcherBytes);
+});
+
+test('native launcher install blocks conflicts, symlinks, unsafe modes, and swapped ancestors', () => {
+  const launcherBytes = Buffer.from('#!/bin/bash\nexit 0\n', 'utf8');
+  const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
+  const conflict = join(home, 'launcher-conflict');
+  mkdirSync(conflict, { mode: 0o700 });
+  writeFileSync(join(conflict, 'skills-refiner'), 'unrelated\n', { mode: 0o700 });
+  assert.throws(
+    () => installVerifiedLauncher({ home, targetDirectory: conflict, launcherBytes, expectedHash }),
+    expectAdapterError('blocked', 'launcher_destination_conflict'),
+  );
+  assert.equal(readFileSync(join(conflict, 'skills-refiner'), 'utf8'), 'unrelated\n');
+
+  const worldWritable = join(home, 'launcher-world');
+  mkdirSync(worldWritable, { mode: 0o700 });
+  chmodSync(worldWritable, 0o777);
+  assert.throws(
+    () => installVerifiedLauncher({ home, targetDirectory: worldWritable, launcherBytes, expectedHash }),
+    expectAdapterError('blocked', 'launcher_target_unsafe'),
+  );
+  assert.equal(existsSync(join(worldWritable, 'skills-refiner')), false);
+
+  const symlinkReal = join(home, 'launcher-symlink-real');
+  const symlinkTarget = join(home, 'launcher-symlink');
+  mkdirSync(symlinkReal, { mode: 0o700 });
+  symlinkSync(symlinkReal, symlinkTarget);
+  assert.throws(
+    () => installVerifiedLauncher({ home, targetDirectory: symlinkTarget, launcherBytes, expectedHash }),
+    expectAdapterError('blocked', 'launcher_target_unsafe'),
+  );
+  assert.equal(existsSync(join(symlinkReal, 'skills-refiner')), false);
+
+  const originalAncestor = join(home, 'launcher-parent');
+  const movedAncestor = join(home, 'launcher-parent-moved');
+  const attackerAncestor = join(home, 'launcher-attacker');
+  mkdirSync(join(originalAncestor, 'bin'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(attackerAncestor, 'bin'), { recursive: true, mode: 0o700 });
+  const requestedTarget = join(originalAncestor, 'bin');
+  renameSync(originalAncestor, movedAncestor);
+  symlinkSync(attackerAncestor, originalAncestor);
+  assert.throws(
+    () => installVerifiedLauncher({ home, targetDirectory: requestedTarget, launcherBytes, expectedHash }),
+    expectAdapterError('blocked', 'launcher_target_unsafe'),
+  );
+  assert.equal(existsSync(join(movedAncestor, 'bin/skills-refiner')), false);
+  assert.equal(existsSync(join(attackerAncestor, 'bin/skills-refiner')), false);
+});
+
+test('native launcher install surfaces post-publish and postverify ambiguity', () => {
+  const launcherBytes = Buffer.from('#!/bin/bash\nexit 0\n', 'utf8');
+  const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
+  const crashTarget = join(home, 'launcher-crash');
+  mkdirSync(crashTarget, { mode: 0o700 });
+  assert.throws(
+    () => __testing.installLauncherWithCrash({
+      home, targetDirectory: crashTarget, launcherBytes, expectedHash,
+    }),
+    (error) => error instanceof MacosAdapterError
+      && error.code === 'recovery_required'
+      && error.reason === 'helper_mutation_result_unknown'
+      && error.mutationMayHaveOccurred === true,
+  );
+  assert.deepEqual(readFileSync(join(crashTarget, 'skills-refiner')), launcherBytes);
+  assert.equal(installVerifiedLauncher({
+    home, targetDirectory: crashTarget, launcherBytes, expectedHash,
+  }).result, 'existing');
+
+  const verifyTarget = join(home, 'launcher-postverify');
+  mkdirSync(verifyTarget, { mode: 0o700 });
+  assert.throws(
+    () => __testing.installLauncherWithVerificationFailure({
+      home, targetDirectory: verifyTarget, launcherBytes, expectedHash,
+    }),
+    (error) => error instanceof MacosAdapterError
+      && error.code === 'recovery_required'
+      && error.reason === 'launcher_postcondition_failed'
+      && error.mutationMayHaveOccurred === true,
+  );
+  assert.deepEqual(readFileSync(join(verifyTarget, 'skills-refiner')), launcherBytes);
+});
+
+test('native launcher exact bytes with unsafe metadata are a conflict', () => {
+  const targetDirectory = join(home, 'launcher-mode-conflict');
+  mkdirSync(targetDirectory, { mode: 0o700 });
+  const launcherBytes = Buffer.from('#!/bin/bash\nexit 0\n', 'utf8');
+  const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
+  writeFileSync(join(targetDirectory, 'skills-refiner'), launcherBytes, { mode: 0o755 });
+  assert.throws(
+    () => installVerifiedLauncher({ home, targetDirectory, launcherBytes, expectedHash }),
+    expectAdapterError('blocked', 'launcher_destination_conflict'),
+  );
+  assert.equal(lstatSync(join(targetDirectory, 'skills-refiner')).mode & 0o777, 0o755);
+});
+
+test('adapter rejects an existing launcher FIFO without blocking', async () => {
+  const targetDirectory = join(home, 'launcher-fifo-conflict');
+  mkdirSync(targetDirectory, { mode: 0o700 });
+  run('/usr/bin/mkfifo', [join(targetDirectory, 'skills-refiner')], { home });
+  const launcherBytes = Buffer.from('#!/bin/bash\nexit 0\n', 'utf8');
+  const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
+  const moduleUrl = new URL('../lib/cleanup-macos.mjs', import.meta.url).href;
+  const workerSource = `
+    import { installVerifiedLauncher } from ${JSON.stringify(moduleUrl)};
+    try {
+      installVerifiedLauncher({
+        home: ${JSON.stringify(home)},
+        targetDirectory: ${JSON.stringify(targetDirectory)},
+        launcherBytes: Buffer.from(${JSON.stringify(launcherBytes.toString('base64'))}, 'base64'),
+        expectedHash: ${JSON.stringify(expectedHash)},
+      });
+      process.exitCode = 9;
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ code: error.code, reason: error.reason }));
+    }
+  `;
+  const outcome = await new Promise((resolveOutcome, rejectOutcome) => {
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', workerSource], {
+      env: gitEnvironment(home),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, 1000);
+    child.once('error', rejectOutcome);
+    child.once('exit', (status, signal) => {
+      clearTimeout(timeout);
+      resolveOutcome({ status, signal, stdout, stderr, timedOut });
+    });
+  });
+  assert.equal(outcome.timedOut, false, `FIFO adapter blocked: ${outcome.stderr}`);
+  assert.equal(outcome.status, 0, outcome.stderr);
+  assert.deepEqual(JSON.parse(outcome.stdout), {
+    code: 'blocked',
+    reason: 'launcher_destination_conflict',
+  });
+});
+
+test('adapter rejects an exact launcher with another hardlink', () => {
+  const targetDirectory = join(home, 'launcher-hardlink-conflict');
+  mkdirSync(targetDirectory, { mode: 0o700 });
+  const launcherBytes = Buffer.from('#!/bin/bash\nexit 0\n', 'utf8');
+  const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
+  const destination = join(targetDirectory, 'skills-refiner');
+  writeFileSync(destination, launcherBytes, { mode: 0o700 });
+  linkSync(destination, join(targetDirectory, 'other-hardlink'));
+  assert.equal(lstatSync(destination).nlink, 2);
+  assert.throws(
+    () => installVerifiedLauncher({ home, targetDirectory, launcherBytes, expectedHash }),
+    expectAdapterError('blocked', 'launcher_destination_conflict'),
+  );
+  assert.equal(lstatSync(destination).nlink, 2);
+});
+
+test('launcher temp cleanup ambiguity is recovery-required with possible mutation', () => {
+  const launcherBytes = Buffer.from('#!/bin/bash\nexit 0\n', 'utf8');
+  const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
+  for (const point of ['launcher_temp_unlink', 'launcher_temp_parent_fsync']) {
+    const targetDirectory = join(home, `launcher-cleanup-${point}`);
+    mkdirSync(targetDirectory, { mode: 0o700 });
+    assert.throws(
+      () => __testing.installLauncherWithCleanupFailure({
+        home, targetDirectory, launcherBytes, expectedHash,
+      }, point),
+      (error) => error instanceof MacosAdapterError
+        && error.code === 'recovery_required'
+        && error.reason === 'launcher_temp_cleanup_unknown'
+        && error.mutationMayHaveOccurred === true,
+      point,
+    );
+    assert.equal(existsSync(join(targetDirectory, 'skills-refiner')), false, point);
+  }
 });
 
 test('helper response parsing rejects malformed, oversized, and unknown responses', () => {
