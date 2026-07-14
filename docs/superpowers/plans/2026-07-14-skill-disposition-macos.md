@@ -544,7 +544,7 @@ Expected: one commit containing read-only candidate and plan compilation.
 - Modify: `skills/skill-hygiene/tests/cleanup-fixtures.mjs`
 - Modify: `skills/skill-hygiene/lib/cleanup-cli.mjs`
 
-- [ ] **Step 1: Add real-filesystem identity fixtures**
+- [x] **Step 1: Add real-filesystem identity fixtures**
 
 Create, inside a sandboxed `HOME`, these immediate children of recognized
 active roots:
@@ -568,7 +568,7 @@ Fixture helpers must export `makeSandbox`, `writeSkill`, `onlyTransactionId`,
 and `removeSandbox`. `removeSandbox` must verify that the target is beneath the
 recorded `mkdtempSync` root before recursive deletion.
 
-- [ ] **Step 2: Write failing path-authorization tests**
+- [x] **Step 2: Write failing path-authorization tests**
 
 Test `inspectForPlan(entryPath, activeRoot)` against actual filesystem objects.
 Require:
@@ -607,7 +607,7 @@ node --test skills/skill-hygiene/tests/test-cleanup-macos.mjs
 
 Expected: failing import for `cleanup-macos.mjs`.
 
-- [ ] **Step 3: Define and compile the native-helper contract**
+- [x] **Step 3: Define and compile the native-helper contract**
 
 `cleanup-macos.mjs` locates Apple Clang only through `/usr/bin/xcrun --find
 clang`, compiles the checked-in C17 source into a fresh mode-`0700` temporary
@@ -677,7 +677,7 @@ mutation; the next launch removes only owner-matching, mode-`0700`,
 skills-refiner-prefixed build directories after verifying they are not
 symlinks. Only Node 24 and a verified persistent helper may reach mutation.
 
-- [ ] **Step 4: Implement fd-bound no-follow manifests**
+- [x] **Step 4: Implement fd-bound no-follow manifests**
 
 In C, open `/` once, walk every absolute home-path component with `openat(...,
 O_RDONLY | O_DIRECTORY | O_NOFOLLOW)`, and verify the resulting home fd's owner
@@ -749,7 +749,7 @@ the link-fd metadata APIs, or the identity recheck is unavailable or
 inconsistent on the target macOS runner, block symlink mutation rather than
 falling back to a path.
 
-- [ ] **Step 5: Collect structured native security metadata fail-closed**
+- [x] **Step 5: Collect structured native security metadata fail-closed**
 
 Do not parse `/bin/ls` or `/usr/bin/xattr` text. For every manifest object, the
 helper emits a normalized metadata record from native APIs: `stat` ownership,
@@ -783,7 +783,7 @@ the object has no extended ACL and normalizes to an empty ACL list. Other ACL
 errors remain blocking. Fixtures must cover both the empty-ACL case and a
 symlink carrying an ACL created with `chmod -h +a`.
 
-- [ ] **Step 6: Implement fd-bound durable publication**
+- [x] **Step 6: Implement fd-bound durable publication**
 
 Send canonical JSON to the helper over bounded stdin. From verified directory
 fds, the helper opens a unique temp leaf with `openat(O_CREAT | O_EXCL |
@@ -805,7 +805,7 @@ handled error, and fail-closed behavior when file or directory `fsync` fails.
 The same helper performs a real capability probe in the actual transaction
 parent before apply. A unit-test double cannot satisfy the release gate.
 
-- [ ] **Step 7: Implement atomic exclusive rename for apply and undo**
+- [x] **Step 7: Implement atomic exclusive rename for apply and undo**
 
 From already verified source/destination parent fds, call
 `renameatx_np(source_fd, source_leaf, destination_fd, destination_leaf,
@@ -823,7 +823,7 @@ native exclusive primitive, fd-bound postconditions, or helper compilation
 cannot pass on the real macOS runner, stop; do not introduce a check-then-rename
 fallback.
 
-- [ ] **Step 8: Run the macOS adapter gate**
+- [x] **Step 8: Run the macOS adapter gate**
 
 Run on native macOS:
 
@@ -840,7 +840,7 @@ occupied destination, atomic no-clobber race, and cross-device blocking. On
 non-macOS, mutation tests must report an explicit skip reason while contract
 tests prove exit `3`; non-macOS skips are not macOS evidence.
 
-- [ ] **Step 9: Commit the platform adapter batch**
+- [x] **Step 9: Commit the platform adapter batch**
 
 ```bash
 test -z "$(git diff --cached --name-only)"

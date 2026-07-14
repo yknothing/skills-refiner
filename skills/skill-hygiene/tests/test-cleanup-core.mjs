@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { sha256Json, validatePlan } from '../lib/cleanup-contract.mjs';
+import { computeIdentityHash, sha256Json, validatePlan } from '../lib/cleanup-contract.mjs';
 import {
   compilePersistedDecisions,
   compilePlan,
@@ -29,14 +29,34 @@ function platformFacts() {
   return {
     name: 'macos',
     async inspectForPlan(entryPath, activeRoot) {
-      return {
+      const entryKind = entryPath.includes('skills/source-skill') ? 'symlink' : 'directory';
+      const identity = {
         schema_version: 'skills-refiner.cleanup.identity.v1',
         adapter: 'macos-test.v1',
         entry_path: entryPath,
         active_root: activeRoot,
-        entry_kind: entryPath.includes('skills/source-skill') ? 'symlink' : 'directory',
-        identity_hash: sha256Json({ entry_path: entryPath, active_root: activeRoot }),
+        entry_kind: entryKind,
+        source_hash: sha256Json({ source: 1 }),
+        binary_hash: sha256Json({ binary: 1 }),
+        architecture: 'arm64',
+        compiler_path: '/usr/bin/clang',
+        compiler_version: 'Apple clang test',
+        helper_protocol: 'skills-refiner.macos-helper.v1',
+        cache_path: '/tmp/skills-refiner/helper',
+        device: '1',
+        inode: entryKind === 'symlink' ? '2' : '3',
+        mode: 0o755,
+        uid: 501,
+        gid: 20,
+        flags: 0,
+        manifest_hash: sha256Json({ manifest: entryPath }),
+        security_metadata_hash: sha256Json({ security: entryPath }),
+        raw_link_target_base64: entryKind === 'symlink' ? Buffer.from('target').toString('base64') : null,
+        receipt_sha256: entryKind === 'directory' ? 'a'.repeat(64) : null,
+        installed_tree_sha1: entryKind === 'directory' ? 'b'.repeat(40) : null,
       };
+      identity.identity_hash = computeIdentityHash(identity);
+      return identity;
     },
   };
 }

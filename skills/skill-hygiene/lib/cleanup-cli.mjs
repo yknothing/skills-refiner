@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ContractError, SCHEMAS, validatePlan } from './cleanup-contract.mjs';
 import { CleanupCoreError, compilePlan, compileReview } from './cleanup-core.mjs';
+import { MacosAdapterError, createMacosAdapter } from './cleanup-macos.mjs';
 
 const SCANNER_PATH = fileURLToPath(new URL('../bin/skill-scan.sh', import.meta.url));
 const JSON_REQUESTED = process.argv.slice(2).includes('--json');
@@ -127,15 +128,16 @@ async function runPlan(args) {
     );
   }
 
-  return compilePlan({ review: freshReview, decisions }, {
-    name: process.platform === 'darwin' ? 'macos' : process.platform,
-    async inspectForPlan() {
-      unsupported(
-        'platform_adapter_unavailable',
-        '[ERROR] No certified mutation adapter is available yet.',
-      );
-    },
-  });
+  if (process.platform !== 'darwin') {
+    unsupported(
+      'platform_adapter_unavailable',
+      '[ERROR] No certified mutation adapter is available on this platform.',
+    );
+  }
+  return compilePlan(
+    { review: freshReview, decisions },
+    createMacosAdapter({ home: process.env.HOME }),
+  );
 }
 
 function runApply(args) {
@@ -225,6 +227,18 @@ try {
       error.code === 'platform_adapter_unavailable' ? 3 : (isBlocked ? 10 : 2),
       error.code === 'platform_adapter_unavailable' ? 'unsupported' : (isBlocked ? 'blocked' : 'invalid'),
       '[ERROR] Cleanup review or plan validation failed.',
+    );
+  } else if (error instanceof MacosAdapterError) {
+    const isUnsupported = error.code === 'unsupported';
+    const requiresRecovery = error.code === 'recovery_required';
+    const isDrift = ['identity_changed', 'receipt_drift', 'installed_tree_drift'].includes(error.reason);
+    mapped = new CliError(
+      error.reason,
+      isUnsupported ? 3 : (requiresRecovery ? 20 : 10),
+      isUnsupported
+        ? 'unsupported'
+        : (requiresRecovery ? 'recovery_required' : (isDrift ? 'drifted' : 'blocked')),
+      '[ERROR] The macOS cleanup safety adapter blocked the operation.',
     );
   } else {
     mapped = new CliError(

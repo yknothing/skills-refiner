@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   SCHEMAS,
   canonicalJson,
+  computeIdentityHash,
   computeItemHash,
   computePlanHash,
   deriveTransactionId,
@@ -12,6 +13,32 @@ import {
 } from '../lib/cleanup-contract.mjs';
 
 function validPlan(overrides = {}) {
+  const executionIdentity = {
+    schema_version: SCHEMAS.identity,
+    adapter: 'macos-test.v1',
+    entry_path: '/Users/example/.agents/skills/demo',
+    active_root: '/Users/example/.agents/skills',
+    entry_kind: 'directory',
+    source_hash: sha256Json({ source: 1 }),
+    binary_hash: sha256Json({ binary: 1 }),
+    architecture: 'arm64',
+    compiler_path: '/usr/bin/clang',
+    compiler_version: 'Apple clang test',
+    helper_protocol: 'skills-refiner.macos-helper.v1',
+    cache_path: '/Users/example/.agents/skills-refiner/runtime/helper',
+    device: '1',
+    inode: '2',
+    mode: 0o755,
+    uid: 501,
+    gid: 20,
+    flags: 0,
+    manifest_hash: sha256Json({ manifest: 1 }),
+    security_metadata_hash: sha256Json({ security: 1 }),
+    raw_link_target_base64: null,
+    receipt_sha256: 'a'.repeat(64),
+    installed_tree_sha1: 'b'.repeat(40),
+  };
+  executionIdentity.identity_hash = computeIdentityHash(executionIdentity);
   const plan = {
     schema_version: SCHEMAS.plan,
     product_version: '2.0',
@@ -25,19 +52,12 @@ function validPlan(overrides = {}) {
         entry_path: '/Users/example/.agents/skills/demo',
         active_root: '/Users/example/.agents/skills',
         entry_kind: 'directory',
-        execution_identity: {
-          schema_version: SCHEMAS.identity,
-          adapter: 'macos-test.v1',
-          entry_path: '/Users/example/.agents/skills/demo',
-          active_root: '/Users/example/.agents/skills',
-          entry_kind: 'directory',
-          identity_hash: sha256Json({ identity: 1 }),
-        },
+        execution_identity: executionIdentity,
         preconditions: {
           review_fingerprint: sha256Json({ review: 1 }),
           candidate_fingerprint: sha256Json({ candidate: 1 }),
           scan_fingerprint: sha256Json({ scan: 1 }),
-          execution_identity_hash: sha256Json({ identity: 1 }),
+          execution_identity_hash: executionIdentity.identity_hash,
         },
         expected_postconditions: {
           active_entry_absent: true,
@@ -168,4 +188,21 @@ test('nested plan objects cannot carry arbitrary content even with valid hashes'
   risk.plan_hash = computePlanHash(risk);
   risk.items[0].transaction_id = deriveTransactionId(risk.plan_hash, risk.items[0].item_id);
   assert.throws(() => validatePlan(risk), /risk is unsupported/);
+
+  const identity = validPlan();
+  identity.items[0].execution_identity.skill_content = 'embedded-content';
+  identity.items[0].execution_identity.identity_hash = computeIdentityHash(identity.items[0].execution_identity);
+  identity.items[0].item_hash = computeItemHash(identity.items[0]);
+  identity.plan_hash = computePlanHash(identity);
+  identity.items[0].transaction_id = deriveTransactionId(identity.plan_hash, identity.items[0].item_id);
+  assert.throws(() => validatePlan(identity), /unknown key/);
+});
+
+test('execution identity drift is rejected before plan hashes can authorize it', () => {
+  const plan = validPlan();
+  plan.items[0].execution_identity.inode = '999';
+  plan.items[0].item_hash = computeItemHash(plan.items[0]);
+  plan.plan_hash = computePlanHash(plan);
+  plan.items[0].transaction_id = deriveTransactionId(plan.plan_hash, plan.items[0].item_id);
+  assert.throws(() => validatePlan(plan), /identity_hash/);
 });

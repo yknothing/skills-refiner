@@ -419,7 +419,7 @@ export async function compilePlan({ review, decisions, created_at: createdAt }, 
   for (const { candidate } of retirements) {
     const identity = validateExecutionIdentity(
       candidate,
-      await platform.inspectForPlan(candidate.entry_path, candidate.active_root),
+      await platform.inspectForPlan(candidate.entry_path, candidate.active_root, candidate),
     );
     const item = {
       item_id: sha256Json({ candidate_id: candidate.candidate_id, identity_hash: identity.identity_hash }),

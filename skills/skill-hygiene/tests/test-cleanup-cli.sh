@@ -31,7 +31,7 @@ run_capture() {
 safe_cleanup() {
     [ -n "${SANDBOX:-}" ] || return 0
     case "$SANDBOX" in
-        /tmp/*|/private/tmp/*|/var/folders/*)
+        /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
             find "$SANDBOX" -depth -mindepth 1 -delete 2>/dev/null || true
             rmdir "$SANDBOX" 2>/dev/null || true
             ;;
@@ -40,6 +40,7 @@ safe_cleanup() {
 
 set -e
 SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/skills-refiner-cleanup-cli.XXXXXX")
+SANDBOX=$(cd "$SANDBOX" && pwd -P)
 trap safe_cleanup EXIT
 stdout_file="$SANDBOX/stdout"
 stderr_file="$SANDBOX/stderr"
@@ -121,8 +122,10 @@ jq '{schema_version:"skills-refiner.cleanup.decisions.v1",review_fingerprint:.re
     "$review_file" >"$decisions_file"
 run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
     "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
-assert_eq "retirement plan requires certified adapter" "3" "$RUN_STATUS"
-assert_eq "unsupported adapter has fixed error code" "platform_adapter_unavailable" "$(jq -r '.error_code' "$stdout_file")"
+assert_eq "macOS retirement plan exits cleanly" "0" "$RUN_STATUS"
+assert_eq "macOS retirement plan has one item" "1" "$(jq '.items | length' "$stdout_file")"
+assert_eq "macOS plan uses native helper identity" "macos-native.v1" "$(jq -r '.items[0].execution_identity.adapter' "$stdout_file")"
+assert_eq "macOS plan binds helper protocol" "skills-refiner.macos-helper.v1" "$(jq -r '.items[0].execution_identity.helper_protocol' "$stdout_file")"
 
 rm "$SANDBOX/home/.claude/skills/source-skill"
 ln -s "$SANDBOX/source-two" "$SANDBOX/home/.claude/skills/source-skill"

@@ -1,18 +1,29 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+const sandboxRoots = new Set();
+
 export function makeSandbox() {
-  return mkdtempSync(join(tmpdir(), 'skills-refiner-cleanup-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'skills-refiner-cleanup-')));
+  sandboxRoots.add(root);
+  return root;
 }
 
 export function removeSandbox(root) {
-  const expectedPrefix = join(tmpdir(), 'skills-refiner-cleanup-');
-  if (typeof root !== 'string' || !root.startsWith(expectedPrefix) || root === expectedPrefix) {
+  if (typeof root !== 'string' || !sandboxRoots.has(root)) {
     throw new Error('refusing to remove an unverified cleanup sandbox');
   }
   rmSync(root, { recursive: true, force: true });
+  sandboxRoots.delete(root);
+}
+
+export function onlyTransactionId(plan) {
+  if (!plan || !Array.isArray(plan.items) || plan.items.length !== 1) {
+    throw new Error('expected exactly one transaction item');
+  }
+  return plan.items[0].transaction_id;
 }
 
 export function writeSkill(directory, name = 'demo-skill') {

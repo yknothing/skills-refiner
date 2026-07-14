@@ -13,6 +13,8 @@ export const ACTIONS = Object.freeze(['quarantine']);
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const SHA256 = /^sha256:[0-9a-f]{64}$/u;
+const SHA1 = /^[0-9a-f]{40}$/u;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
 export class ContractError extends Error {
   constructor(message) {
@@ -125,6 +127,15 @@ export function computeItemHash(item) {
   return sha256Json(hashInput);
 }
 
+export function computeIdentityHash(identity) {
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity)) {
+    fail('identity must be JSON-compatible');
+  }
+  canonicalJson(identity);
+  const { identity_hash: _identityHash, ...hashInput } = identity;
+  return sha256Json(hashInput);
+}
+
 export function deriveTransactionId(planHash, itemId) {
   validateSha256(planHash, 'plan_hash');
   if (typeof itemId !== 'string' || itemId.length === 0 || CONTROL_CHARACTERS.test(itemId)) {
@@ -197,6 +208,24 @@ const IDENTITY_KEYS = new Set([
   'active_root',
   'entry_kind',
   'identity_hash',
+  'source_hash',
+  'binary_hash',
+  'architecture',
+  'compiler_path',
+  'compiler_version',
+  'helper_protocol',
+  'cache_path',
+  'device',
+  'inode',
+  'mode',
+  'uid',
+  'gid',
+  'flags',
+  'manifest_hash',
+  'security_metadata_hash',
+  'raw_link_target_base64',
+  'receipt_sha256',
+  'installed_tree_sha1',
 ]);
 const PRECONDITION_KEYS = new Set([
   'review_fingerprint',
@@ -249,6 +278,45 @@ export function validatePlan(plan) {
       fail(`${path}.execution_identity does not match the plan item`);
     }
     validateSha256(item.execution_identity.identity_hash, `${path}.execution_identity.identity_hash`);
+    if (item.execution_identity.identity_hash !== computeIdentityHash(item.execution_identity)) {
+      fail(`${path}.execution_identity.identity_hash does not match canonical identity content`);
+    }
+    validateSha256(item.execution_identity.source_hash, `${path}.execution_identity.source_hash`);
+    validateSha256(item.execution_identity.binary_hash, `${path}.execution_identity.binary_hash`);
+    safeNonEmptyString(item.execution_identity.architecture, `${path}.execution_identity.architecture`, 32);
+    safeNonEmptyString(item.execution_identity.compiler_path, `${path}.execution_identity.compiler_path`);
+    safeNonEmptyString(item.execution_identity.compiler_version, `${path}.execution_identity.compiler_version`, 4096);
+    safeNonEmptyString(item.execution_identity.helper_protocol, `${path}.execution_identity.helper_protocol`, 128);
+    safeNonEmptyString(item.execution_identity.cache_path, `${path}.execution_identity.cache_path`);
+    if (!/^\d+$/u.test(item.execution_identity.device)
+        || !/^\d+$/u.test(item.execution_identity.inode)) {
+      fail(`${path}.execution_identity object identifiers are unsupported`);
+    }
+    for (const field of ['mode', 'uid', 'gid', 'flags']) {
+      if (!Number.isSafeInteger(item.execution_identity[field]) || item.execution_identity[field] < 0) {
+        fail(`${path}.execution_identity native metadata is unsupported`);
+      }
+    }
+    validateSha256(item.execution_identity.manifest_hash, `${path}.execution_identity.manifest_hash`);
+    validateSha256(
+      item.execution_identity.security_metadata_hash,
+      `${path}.execution_identity.security_metadata_hash`,
+    );
+    const rawTarget = item.execution_identity.raw_link_target_base64;
+    if (rawTarget !== null && (typeof rawTarget !== 'string' || !BASE64.test(rawTarget))) {
+      fail(`${path}.execution_identity raw link target is unsupported`);
+    }
+    const receipt = item.execution_identity.receipt_sha256;
+    const installedTree = item.execution_identity.installed_tree_sha1;
+    if (item.entry_kind === 'directory') {
+      if (typeof receipt !== 'string' || !/^[0-9a-f]{64}$/u.test(receipt)
+          || typeof installedTree !== 'string' || !SHA1.test(installedTree)
+          || rawTarget !== null) {
+        fail(`${path}.execution_identity installed-copy evidence is unsupported`);
+      }
+    } else if (receipt !== null || installedTree !== null || typeof rawTarget !== 'string') {
+      fail(`${path}.execution_identity link evidence is unsupported`);
+    }
     exactKeys(item.preconditions, PRECONDITION_KEYS, [...PRECONDITION_KEYS], `${path}.preconditions`);
     validateSha256(item.preconditions.review_fingerprint, `${path}.preconditions.review_fingerprint`);
     validateSha256(item.preconditions.candidate_fingerprint, `${path}.preconditions.candidate_fingerprint`);
