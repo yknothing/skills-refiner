@@ -707,16 +707,19 @@ evidence is `review_only`/`DRIFTED`; it never degrades to location heuristics.
 For a symlink leaf, use this fixed contract:
 
 ```text
-openat(parent_fd, leaf, O_SYMLINK | O_NOFOLLOW)
+openat(parent_fd, leaf, O_SYMLINK)
 -> fstat(link_fd)
 -> readlinkat(parent_fd, leaf)
 -> fstatat(parent_fd, leaf, AT_SYMLINK_NOFOLLOW)
 -> require both identities to match
 ```
 
-No absolute or reconstructed path is allowed. If `O_SYMLINK`, the link-fd
-metadata APIs, or the identity recheck is unavailable or inconsistent on the
-target macOS runner, block symlink mutation rather than falling back to a path.
+`O_NOFOLLOW` is deliberately omitted with `O_SYMLINK`: the verified target
+macOS returns `ELOOP` for that combination, while `O_SYMLINK` opens the link
+object itself. No absolute or reconstructed path is allowed. If `O_SYMLINK`,
+the link-fd metadata APIs, or the identity recheck is unavailable or
+inconsistent on the target macOS runner, block symlink mutation rather than
+falling back to a path.
 
 - [ ] **Step 5: Collect structured native security metadata fail-closed**
 
@@ -746,6 +749,11 @@ metadata before quarantine and after undo with no ACL/xattr/flag skip. The
 published and remain untouched. If Darwin rejects any required symlink fd API,
 the tested and documented behavior is an explicit symlink-mutation block, not a
 weaker path-based implementation.
+
+For `acl_get_fd_np(fd, ACL_TYPE_EXTENDED)`, `NULL` with `errno == ENOENT` means
+the object has no extended ACL and normalizes to an empty ACL list. Other ACL
+errors remain blocking. Fixtures must cover both the empty-ACL case and a
+symlink carrying an ACL created with `chmod -h +a`.
 
 - [ ] **Step 6: Implement fd-bound durable publication**
 
