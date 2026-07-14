@@ -9,9 +9,29 @@ export const SCHEMAS = Object.freeze({
   transactionManifest: 'skills-refiner.cleanup.transaction-manifest.v1',
   transactionState: 'skills-refiner.cleanup.transaction-state.v1',
   identity: 'skills-refiner.cleanup.identity.v1',
+  observationIdentity: 'skills-refiner.cleanup.observation-identity.v1',
+  batch: 'skills-refiner.cleanup.batch.v1',
+  batchPlan: 'skills-refiner.cleanup.batch-plan.v1',
+  batchState: 'skills-refiner.cleanup.batch-state.v1',
+  batchBinding: 'skills-refiner.cleanup.batch-binding.v1',
+  batchError: 'skills-refiner.cleanup.batch-error.v1',
+  batchSummary: 'skills-refiner.cleanup.batch-summary.v1',
+  transactionBatchStatus: 'skills-refiner.cleanup.transaction-batch-status.v1',
 });
 
 export const ACTIONS = Object.freeze(['quarantine']);
+
+export const BATCH_ERROR_CODES = Object.freeze({
+  preflightDrift: 'batch_preflight_drift',
+  itemBlocked: 'batch_item_blocked',
+  itemRecoveryRequired: 'batch_item_recovery_required',
+  itemOutcomeAmbiguous: 'batch_item_outcome_ambiguous',
+  batchLockUnavailable: 'batch_lock_unavailable',
+  batchStateProjectionFailed: 'batch_state_projection_failed',
+  batchRecoveryRequired: 'batch_recovery_required',
+  batchRecordsInvalid: 'batch_records_invalid',
+  batchMutationOutcomeUnknown: 'batch_mutation_outcome_unknown',
+});
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const SHA256 = /^sha256:[0-9a-f]{64}$/u;
@@ -138,11 +158,18 @@ export function computeIdentityHash(identity) {
   return sha256Json(hashInput);
 }
 
+export function computeObservationIdentityHash(identity) {
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity)) {
+    fail('observation identity must be JSON-compatible');
+  }
+  canonicalJson(identity);
+  const { identity_hash: _identityHash, ...hashInput } = identity;
+  return sha256Json(hashInput);
+}
+
 export function deriveTransactionId(planHash, itemId) {
   validateSha256(planHash, 'plan_hash');
-  if (typeof itemId !== 'string' || itemId.length === 0 || CONTROL_CHARACTERS.test(itemId)) {
-    fail('item_id must be a safe non-empty string');
-  }
+  validateSha256(itemId, 'item_id');
   return sha256Json({ plan_hash: planHash, item_id: itemId });
 }
 
@@ -235,6 +262,30 @@ const IDENTITY_KEYS = new Set([
   'receipt_sha256',
   'installed_tree_sha1',
 ]);
+const OBSERVATION_IDENTITY_KEYS = new Set([
+  'schema_version',
+  'adapter',
+  'entry_path',
+  'active_root',
+  'entry_kind',
+  'identity_hash',
+  'source_hash',
+  'binary_hash',
+  'architecture',
+  'compiler_path',
+  'compiler_version',
+  'helper_protocol',
+  'cache_path',
+  'device',
+  'inode',
+  'mode',
+  'uid',
+  'gid',
+  'flags',
+  'manifest_hash',
+  'security_metadata_hash',
+  'raw_link_target_base64',
+]);
 const PRECONDITION_KEYS = new Set([
   'review_fingerprint',
   'candidate_fingerprint',
@@ -289,6 +340,120 @@ const TRANSACTION_STATUSES = Object.freeze({
   ]),
   undo: new Set(['restored', 'already_restored']),
 });
+
+export function validateExecutionIdentity(identity, {
+  entryPath = undefined,
+  activeRoot = undefined,
+  entryKind = undefined,
+} = {}) {
+  exactKeys(identity, IDENTITY_KEYS, [...IDENTITY_KEYS], 'execution identity');
+  canonicalJson(identity);
+  if (identity.schema_version !== SCHEMAS.identity) {
+    fail(`execution identity schema mismatch: expected ${SCHEMAS.identity}`);
+  }
+  safeNonEmptyString(identity.adapter, 'execution identity.adapter', 128);
+  safeNonEmptyString(identity.entry_path, 'execution identity.entry_path');
+  safeNonEmptyString(identity.active_root, 'execution identity.active_root');
+  if (!['directory', 'symlink', 'broken_symlink'].includes(identity.entry_kind)) {
+    fail('execution identity entry_kind is unsupported');
+  }
+  if ((entryPath !== undefined && identity.entry_path !== entryPath)
+      || (activeRoot !== undefined && identity.active_root !== activeRoot)
+      || (entryKind !== undefined && identity.entry_kind !== entryKind)) {
+    fail('execution identity does not match the expected entry');
+  }
+  validateSha256(identity.identity_hash, 'execution identity.identity_hash');
+  if (identity.identity_hash !== computeIdentityHash(identity)) {
+    fail('execution identity identity_hash does not match canonical identity content');
+  }
+  validateSha256(identity.source_hash, 'execution identity.source_hash');
+  validateSha256(identity.binary_hash, 'execution identity.binary_hash');
+  safeNonEmptyString(identity.architecture, 'execution identity.architecture', 32);
+  safeNonEmptyString(identity.compiler_path, 'execution identity.compiler_path');
+  safeNonEmptyString(identity.compiler_version, 'execution identity.compiler_version', 4096);
+  safeNonEmptyString(identity.helper_protocol, 'execution identity.helper_protocol', 128);
+  safeNonEmptyString(identity.cache_path, 'execution identity.cache_path');
+  if (!/^\d+$/u.test(identity.device) || !/^\d+$/u.test(identity.inode)) {
+    fail('execution identity object identifiers are unsupported');
+  }
+  for (const field of ['mode', 'uid', 'gid', 'flags']) {
+    if (!Number.isSafeInteger(identity[field]) || identity[field] < 0) {
+      fail('execution identity native metadata is unsupported');
+    }
+  }
+  validateSha256(identity.manifest_hash, 'execution identity.manifest_hash');
+  validateSha256(identity.security_metadata_hash, 'execution identity.security_metadata_hash');
+  const rawTarget = identity.raw_link_target_base64;
+  if (rawTarget !== null && (typeof rawTarget !== 'string' || !BASE64.test(rawTarget))) {
+    fail('execution identity raw link target is unsupported');
+  }
+  if (identity.entry_kind === 'directory') {
+    if (typeof identity.receipt_sha256 !== 'string'
+        || !/^[0-9a-f]{64}$/u.test(identity.receipt_sha256)
+        || typeof identity.installed_tree_sha1 !== 'string'
+        || !SHA1.test(identity.installed_tree_sha1)
+        || rawTarget !== null) {
+      fail('execution identity installed-copy evidence is unsupported');
+    }
+  } else if (identity.receipt_sha256 !== null || identity.installed_tree_sha1 !== null
+      || typeof rawTarget !== 'string') {
+    fail('execution identity link evidence is unsupported');
+  }
+  return identity;
+}
+
+export function validateObservationIdentity(identity) {
+  exactKeys(
+    identity,
+    OBSERVATION_IDENTITY_KEYS,
+    [...OBSERVATION_IDENTITY_KEYS],
+    'observation identity',
+  );
+  canonicalJson(identity);
+  if (identity.schema_version !== SCHEMAS.observationIdentity) {
+    fail(`observation identity schema mismatch: expected ${SCHEMAS.observationIdentity}`);
+  }
+  safeNonEmptyString(identity.adapter, 'observation identity.adapter', 128);
+  safeNonEmptyString(identity.entry_path, 'observation identity.entry_path');
+  safeNonEmptyString(identity.active_root, 'observation identity.active_root');
+  if (!['directory', 'symlink', 'broken_symlink'].includes(identity.entry_kind)) {
+    fail('observation identity entry_kind is unsupported');
+  }
+  validateSha256(identity.identity_hash, 'observation identity.identity_hash');
+  if (identity.identity_hash !== computeObservationIdentityHash(identity)) {
+    fail('observation identity identity_hash does not match canonical identity content');
+  }
+  validateSha256(identity.source_hash, 'observation identity.source_hash');
+  validateSha256(identity.binary_hash, 'observation identity.binary_hash');
+  safeNonEmptyString(identity.architecture, 'observation identity.architecture', 32);
+  safeNonEmptyString(identity.compiler_path, 'observation identity.compiler_path');
+  safeNonEmptyString(identity.compiler_version, 'observation identity.compiler_version', 4096);
+  safeNonEmptyString(identity.helper_protocol, 'observation identity.helper_protocol', 128);
+  safeNonEmptyString(identity.cache_path, 'observation identity.cache_path');
+  if (!/^\d+$/u.test(identity.device) || !/^\d+$/u.test(identity.inode)) {
+    fail('observation identity object identifiers are unsupported');
+  }
+  for (const field of ['mode', 'uid', 'gid', 'flags']) {
+    if (!Number.isSafeInteger(identity[field]) || identity[field] < 0) {
+      fail('observation identity native metadata is unsupported');
+    }
+  }
+  validateSha256(identity.manifest_hash, 'observation identity.manifest_hash');
+  validateSha256(
+    identity.security_metadata_hash,
+    'observation identity.security_metadata_hash',
+  );
+  if (identity.entry_kind === 'directory') {
+    if (identity.raw_link_target_base64 !== null) {
+      fail('observation identity directory link target is unsupported');
+    }
+  } else if (typeof identity.raw_link_target_base64 !== 'string'
+      || identity.raw_link_target_base64.length === 0
+      || !BASE64.test(identity.raw_link_target_base64)) {
+    fail('observation identity link target is unsupported');
+  }
+  return identity;
+}
 
 export function validateTransactionResult(result) {
   exactKeys(
@@ -366,7 +531,7 @@ export function validatePlan(plan) {
     const item = plan.items[index];
     const path = `plan.items[${index}]`;
     exactKeys(item, ITEM_KEYS, ITEM_REQUIRED_KEYS, path);
-    safeNonEmptyString(item.item_id, `${path}.item_id`, 256);
+    validateSha256(item.item_id, `${path}.item_id`);
     if (itemIds.has(item.item_id)) fail('plan contains a duplicate item_id');
     itemIds.add(item.item_id);
     if (!ACTIONS.includes(item.action)) fail(`${path}.action is unsupported`);
@@ -375,56 +540,11 @@ export function validatePlan(plan) {
     if (!['directory', 'symlink', 'broken_symlink'].includes(item.entry_kind)) {
       fail(`${path}.entry_kind is unsupported`);
     }
-    exactKeys(item.execution_identity, IDENTITY_KEYS, [...IDENTITY_KEYS], `${path}.execution_identity`);
-    if (item.execution_identity.schema_version !== SCHEMAS.identity) {
-      fail(`${path}.execution_identity schema is unsupported`);
-    }
-    safeNonEmptyString(item.execution_identity.adapter, `${path}.execution_identity.adapter`, 128);
-    if (item.execution_identity.entry_path !== item.entry_path
-        || item.execution_identity.active_root !== item.active_root
-        || item.execution_identity.entry_kind !== item.entry_kind) {
-      fail(`${path}.execution_identity does not match the plan item`);
-    }
-    validateSha256(item.execution_identity.identity_hash, `${path}.execution_identity.identity_hash`);
-    if (item.execution_identity.identity_hash !== computeIdentityHash(item.execution_identity)) {
-      fail(`${path}.execution_identity.identity_hash does not match canonical identity content`);
-    }
-    validateSha256(item.execution_identity.source_hash, `${path}.execution_identity.source_hash`);
-    validateSha256(item.execution_identity.binary_hash, `${path}.execution_identity.binary_hash`);
-    safeNonEmptyString(item.execution_identity.architecture, `${path}.execution_identity.architecture`, 32);
-    safeNonEmptyString(item.execution_identity.compiler_path, `${path}.execution_identity.compiler_path`);
-    safeNonEmptyString(item.execution_identity.compiler_version, `${path}.execution_identity.compiler_version`, 4096);
-    safeNonEmptyString(item.execution_identity.helper_protocol, `${path}.execution_identity.helper_protocol`, 128);
-    safeNonEmptyString(item.execution_identity.cache_path, `${path}.execution_identity.cache_path`);
-    if (!/^\d+$/u.test(item.execution_identity.device)
-        || !/^\d+$/u.test(item.execution_identity.inode)) {
-      fail(`${path}.execution_identity object identifiers are unsupported`);
-    }
-    for (const field of ['mode', 'uid', 'gid', 'flags']) {
-      if (!Number.isSafeInteger(item.execution_identity[field]) || item.execution_identity[field] < 0) {
-        fail(`${path}.execution_identity native metadata is unsupported`);
-      }
-    }
-    validateSha256(item.execution_identity.manifest_hash, `${path}.execution_identity.manifest_hash`);
-    validateSha256(
-      item.execution_identity.security_metadata_hash,
-      `${path}.execution_identity.security_metadata_hash`,
-    );
-    const rawTarget = item.execution_identity.raw_link_target_base64;
-    if (rawTarget !== null && (typeof rawTarget !== 'string' || !BASE64.test(rawTarget))) {
-      fail(`${path}.execution_identity raw link target is unsupported`);
-    }
-    const receipt = item.execution_identity.receipt_sha256;
-    const installedTree = item.execution_identity.installed_tree_sha1;
-    if (item.entry_kind === 'directory') {
-      if (typeof receipt !== 'string' || !/^[0-9a-f]{64}$/u.test(receipt)
-          || typeof installedTree !== 'string' || !SHA1.test(installedTree)
-          || rawTarget !== null) {
-        fail(`${path}.execution_identity installed-copy evidence is unsupported`);
-      }
-    } else if (receipt !== null || installedTree !== null || typeof rawTarget !== 'string') {
-      fail(`${path}.execution_identity link evidence is unsupported`);
-    }
+    validateExecutionIdentity(item.execution_identity, {
+      entryPath: item.entry_path,
+      activeRoot: item.active_root,
+      entryKind: item.entry_kind,
+    });
     exactKeys(item.preconditions, PRECONDITION_KEYS, [...PRECONDITION_KEYS], `${path}.preconditions`);
     validateSha256(item.preconditions.review_fingerprint, `${path}.preconditions.review_fingerprint`);
     validateSha256(item.preconditions.candidate_fingerprint, `${path}.preconditions.candidate_fingerprint`);
@@ -461,4 +581,878 @@ export function validatePlan(plan) {
     }
   }
   return plan;
+}
+
+const BATCH_PLAN_KEYS = new Set([
+  'schema_version',
+  'batch_id',
+  'plan_hash',
+  'platform',
+  'transaction_map',
+]);
+const BATCH_MAPPING_KEYS = new Set([
+  'item_id',
+  'transaction_id',
+  'item_hash',
+  'execution_identity_hash',
+]);
+const BATCH_BINDING_KEYS = new Set([
+  'schema_version',
+  'batch_id',
+  'plan_hash',
+  ...BATCH_MAPPING_KEYS,
+]);
+const BATCH_STATE_KEYS = new Set([
+  'schema_version',
+  'batch_id',
+  'plan_hash',
+  'sequence',
+  'state',
+  'items',
+]);
+const BATCH_STATE_ITEM_KEYS = new Set(['item_id', 'transaction_id', 'status']);
+const BATCH_PUBLIC_ITEM_KEYS = new Set([
+  'item_id',
+  'transaction_id',
+  'status',
+  'location',
+  'transaction_has_mutated',
+]);
+const BATCH_STATES = new Set([
+  'READY',
+  'RUNNING',
+  'COMMITTED',
+  'BLOCKED',
+  'PARTIAL',
+  'RECOVERY_REQUIRED',
+]);
+const BATCH_STATE_ITEM_STATUSES = new Set([
+  'NOT_STARTED',
+  'COMMITTED',
+  'DRIFTED',
+  'BLOCKED',
+  'RECOVERY_REQUIRED',
+]);
+const BATCH_SUMMARY_ITEM_STATUSES = new Set([
+  'NOT_STARTED',
+  'APPLY_PENDING',
+  'APPLY_FINALIZE_PENDING',
+  'COMMITTED',
+  'RESTORE_PENDING',
+  'RESTORE_FINALIZE_PENDING',
+  'RESTORED',
+  'REHYDRATED',
+  'RESTORE_CONFLICT',
+  'DRIFTED',
+  'BLOCKED',
+  'RECOVERY_REQUIRED',
+]);
+const BATCH_SUMMARY_OVERALL_STATUSES = new Set([
+  'READY',
+  'RUNNING',
+  'COMMITTED',
+  'PARTIAL',
+  'BLOCKED',
+  'RECOVERY_REQUIRED',
+  'RESTORE_PENDING',
+  'PARTIALLY_RESTORED',
+  'RESTORED',
+  'REHYDRATED',
+  'RESTORE_CONFLICT',
+]);
+const BATCH_LOCATIONS = new Set([
+  'original',
+  'original_drift',
+  'quarantine',
+  'rehydrated',
+  'unknown',
+]);
+const BATCH_RESULT_KEYS = new Set([
+  'schema_version',
+  'command',
+  'status',
+  'overall_status',
+  'batch_id',
+  'plan_hash',
+  'items',
+  'mutation_occurred',
+  'mutation_outcome',
+  'transaction_has_mutated',
+  'committed_transaction_ids',
+  'undo_commands',
+]);
+const BATCH_SUMMARY_KEYS = new Set([
+  'schema_version',
+  'batch_id',
+  'plan_hash',
+  'overall_status',
+  'items',
+]);
+const BATCH_ERROR_KEYS = new Set([
+  ...BATCH_RESULT_KEYS,
+  'error_code',
+  'failure_scope',
+  'failure_item_id',
+  'failure_item_index',
+]);
+const TRANSACTION_BATCH_STATUS_KEYS = new Set([
+  ...TRANSACTION_RESULT_KEYS,
+  'batch_id',
+  'batch_summary',
+]);
+const TRANSACTION_BATCH_STATUS_REQUIRED_KEYS = [
+  ...TRANSACTION_RESULT_REQUIRED_KEYS,
+  'batch_id',
+  'batch_summary',
+];
+const BATCH_RESULT_STATUS_PAIRS = new Set([
+  'committed\u0000committed',
+  'already_committed\u0000committed',
+  'blocked\u0000blocked',
+  'blocked\u0000drifted',
+  'recovery_required\u0000PARTIAL',
+  'recovery_required\u0000RECOVERY_REQUIRED',
+]);
+const BATCH_ERROR_POLICIES = new Map([
+  [BATCH_ERROR_CODES.preflightDrift, {
+    scope: 'item', itemStatus: 'DRIFTED',
+    pairs: new Set(['blocked\u0000drifted', 'recovery_required\u0000PARTIAL']),
+  }],
+  [BATCH_ERROR_CODES.itemBlocked, {
+    scope: 'item', itemStatus: 'BLOCKED', pairs: new Set(['blocked\u0000blocked']),
+  }],
+  [BATCH_ERROR_CODES.itemRecoveryRequired, {
+    scope: 'item', itemStatus: 'RECOVERY_REQUIRED',
+    pairs: new Set(['recovery_required\u0000PARTIAL', 'recovery_required\u0000RECOVERY_REQUIRED']),
+  }],
+  [BATCH_ERROR_CODES.itemOutcomeAmbiguous, {
+    scope: 'item', itemStatus: 'RECOVERY_REQUIRED',
+    pairs: new Set(['recovery_required\u0000PARTIAL', 'recovery_required\u0000RECOVERY_REQUIRED']),
+    requiresUnknownOutcome: true,
+    failedItemMustHaveHistory: true,
+  }],
+  [BATCH_ERROR_CODES.batchLockUnavailable, {
+    scope: 'batch', pairs: new Set(['blocked\u0000blocked']),
+  }],
+  [BATCH_ERROR_CODES.batchStateProjectionFailed, {
+    scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
+  }],
+  [BATCH_ERROR_CODES.batchRecoveryRequired, {
+    scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
+  }],
+  [BATCH_ERROR_CODES.batchRecordsInvalid, {
+    scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
+  }],
+  [BATCH_ERROR_CODES.batchMutationOutcomeUnknown, {
+    scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
+    unknownWithoutItemHistory: true,
+  }],
+]);
+
+export function deriveBatchId(planHash) {
+  validateSha256(planHash, 'plan_hash');
+  return sha256Json({ kind: 'cleanup_batch', plan_hash: planHash });
+}
+
+function mappingForItem(item) {
+  return {
+    item_id: item.item_id,
+    transaction_id: item.transaction_id,
+    item_hash: item.item_hash,
+    execution_identity_hash: item.execution_identity.identity_hash,
+  };
+}
+
+function validateBatchMapping(mapping, path) {
+  exactKeys(mapping, BATCH_MAPPING_KEYS, [...BATCH_MAPPING_KEYS], path);
+  validateSha256(mapping.item_id, `${path}.item_id`);
+  validateSha256(mapping.transaction_id, `${path}.transaction_id`);
+  validateSha256(mapping.item_hash, `${path}.item_hash`);
+  validateSha256(mapping.execution_identity_hash, `${path}.execution_identity_hash`);
+  return mapping;
+}
+
+export function buildBatchPlan(plan) {
+  validatePlan(plan);
+  const batchPlan = {
+    schema_version: SCHEMAS.batchPlan,
+    batch_id: deriveBatchId(plan.plan_hash),
+    plan_hash: plan.plan_hash,
+    platform: plan.platform,
+    transaction_map: plan.items.map(mappingForItem),
+  };
+  return validateBatchPlan(batchPlan, plan);
+}
+
+export function validateBatchPlan(batchPlan, plan = null) {
+  exactKeys(batchPlan, BATCH_PLAN_KEYS, [...BATCH_PLAN_KEYS], 'batch plan');
+  canonicalJson(batchPlan);
+  if (batchPlan.schema_version !== SCHEMAS.batchPlan) {
+    fail(`batch plan schema mismatch: expected ${SCHEMAS.batchPlan}`);
+  }
+  validateSha256(batchPlan.batch_id, 'batch plan.batch_id');
+  validateSha256(batchPlan.plan_hash, 'batch plan.plan_hash');
+  if (batchPlan.batch_id !== deriveBatchId(batchPlan.plan_hash)) {
+    fail('batch plan batch_id does not match plan_hash');
+  }
+  safeNonEmptyString(batchPlan.platform, 'batch plan.platform', 32);
+  if (!Array.isArray(batchPlan.transaction_map) || batchPlan.transaction_map.length === 0) {
+    fail('batch plan transaction_map must be a non-empty array');
+  }
+
+  const itemIds = new Set();
+  const transactionIds = new Set();
+  for (let index = 0; index < batchPlan.transaction_map.length; index += 1) {
+    const mapping = validateBatchMapping(
+      batchPlan.transaction_map[index],
+      `batch plan.transaction_map[${index}]`,
+    );
+    if (itemIds.has(mapping.item_id)) fail('batch plan contains a duplicate item_id');
+    if (transactionIds.has(mapping.transaction_id)) {
+      fail('batch plan contains a duplicate transaction_id');
+    }
+    itemIds.add(mapping.item_id);
+    transactionIds.add(mapping.transaction_id);
+    if (mapping.transaction_id !== deriveTransactionId(batchPlan.plan_hash, mapping.item_id)) {
+      fail('batch plan transaction_id does not match plan_hash and item_id');
+    }
+  }
+
+  if (plan !== null) {
+    validatePlan(plan);
+    if (plan.plan_hash !== batchPlan.plan_hash
+        || plan.platform !== batchPlan.platform
+        || plan.items.length !== batchPlan.transaction_map.length) {
+      fail('batch plan does not match the cleanup plan');
+    }
+    for (let index = 0; index < plan.items.length; index += 1) {
+      if (canonicalJson(batchPlan.transaction_map[index])
+          !== canonicalJson(mappingForItem(plan.items[index]))) {
+        fail('batch plan mapping does not match the cleanup plan');
+      }
+    }
+  }
+  return batchPlan;
+}
+
+export function buildBatchBinding(batchPlan, itemId) {
+  validateBatchPlan(batchPlan);
+  validateSha256(itemId, 'batch binding.item_id');
+  const matches = batchPlan.transaction_map.filter((mapping) => mapping.item_id === itemId);
+  if (matches.length !== 1) fail('batch binding item is absent from the batch plan');
+  return validateBatchBinding({
+    schema_version: SCHEMAS.batchBinding,
+    batch_id: batchPlan.batch_id,
+    plan_hash: batchPlan.plan_hash,
+    ...matches[0],
+  }, batchPlan);
+}
+
+export function validateBatchBinding(binding, batchPlan = null) {
+  exactKeys(binding, BATCH_BINDING_KEYS, [...BATCH_BINDING_KEYS], 'batch binding');
+  canonicalJson(binding);
+  if (binding.schema_version !== SCHEMAS.batchBinding) {
+    fail(`batch binding schema mismatch: expected ${SCHEMAS.batchBinding}`);
+  }
+  validateSha256(binding.batch_id, 'batch binding.batch_id');
+  validateSha256(binding.plan_hash, 'batch binding.plan_hash');
+  validateBatchMapping({
+    item_id: binding.item_id,
+    transaction_id: binding.transaction_id,
+    item_hash: binding.item_hash,
+    execution_identity_hash: binding.execution_identity_hash,
+  }, 'batch binding.mapping');
+  if (binding.batch_id !== deriveBatchId(binding.plan_hash)
+      || binding.transaction_id !== deriveTransactionId(binding.plan_hash, binding.item_id)) {
+    fail('batch binding identity is invalid');
+  }
+  if (batchPlan !== null) {
+    validateBatchPlan(batchPlan);
+    const matches = batchPlan.transaction_map.filter((mapping) => (
+      mapping.item_id === binding.item_id
+      && canonicalJson(mapping) === canonicalJson({
+        item_id: binding.item_id,
+        transaction_id: binding.transaction_id,
+        item_hash: binding.item_hash,
+        execution_identity_hash: binding.execution_identity_hash,
+      })
+    ));
+    if (binding.batch_id !== batchPlan.batch_id
+        || binding.plan_hash !== batchPlan.plan_hash
+        || matches.length !== 1) {
+      fail('batch binding does not match the batch plan');
+    }
+  }
+  return binding;
+}
+
+function batchItemProjection(batchPlan, status = 'NOT_STARTED') {
+  return batchPlan.transaction_map.map(({ item_id, transaction_id }) => ({
+    item_id,
+    transaction_id,
+    status,
+  }));
+}
+
+export function buildInitialBatchState(batchPlan) {
+  validateBatchPlan(batchPlan);
+  return validateBatchState({
+    schema_version: SCHEMAS.batchState,
+    batch_id: batchPlan.batch_id,
+    plan_hash: batchPlan.plan_hash,
+    sequence: 0,
+    state: 'READY',
+    items: batchItemProjection(batchPlan),
+  }, batchPlan);
+}
+
+function validateMappedItemIdentity(item, keys, batchPlan, path, planHash) {
+  exactKeys(item, keys, [...keys], path);
+  validateSha256(item.item_id, `${path}.item_id`);
+  validateSha256(item.transaction_id, `${path}.transaction_id`);
+  if (planHash !== undefined
+      && item.transaction_id !== deriveTransactionId(planHash, item.item_id)) {
+    fail(`${path} transaction_id is invalid`);
+  }
+  return item;
+}
+
+function validateMappedItems(items, batchPlan, path, planHash, validateItem) {
+  if (!Array.isArray(items) || items.length === 0
+      || (batchPlan !== null && items.length !== batchPlan.transaction_map.length)) {
+    fail(`${path} items do not match the batch mapping`);
+  }
+  const itemIds = new Set();
+  const transactionIds = new Set();
+  for (let index = 0; index < items.length; index += 1) {
+    const item = validateItem(items[index], `${path}.items[${index}]`);
+    if (itemIds.has(item.item_id) || transactionIds.has(item.transaction_id)) {
+      fail(`${path} item mapping contains duplicate identities`);
+    }
+    itemIds.add(item.item_id);
+    transactionIds.add(item.transaction_id);
+    const mapping = batchPlan?.transaction_map[index];
+    if (mapping !== undefined
+        && (item.item_id !== mapping.item_id || item.transaction_id !== mapping.transaction_id)) {
+      fail(`${path} item mapping is invalid`);
+    }
+  }
+  return items;
+}
+
+function validateStopFirst(items, path, failureStatuses) {
+  const failureIndexes = items
+    .map((item, index) => (failureStatuses.has(item.status) ? index : -1))
+    .filter((index) => index >= 0);
+  if (failureIndexes.length > 1) fail(`${path} contains more than one failure`);
+  if (failureIndexes.length === 1) {
+    const failureIndex = failureIndexes[0];
+    const before = items.slice(0, failureIndex);
+    const beforeAllCommitted = before.every(({ status }) => status === 'COMMITTED');
+    const beforeAllUnstarted = before.every(({ status }) => status === 'NOT_STARTED');
+    if ((!beforeAllCommitted && !beforeAllUnstarted)
+        || items.slice(failureIndex + 1).some(({ status }) => status !== 'NOT_STARTED')) {
+      fail(`${path} must stop after the first failure`);
+    }
+    return;
+  }
+  let unstartedSeen = false;
+  for (const item of items) {
+    if (item.status === 'NOT_STARTED') unstartedSeen = true;
+    else if (item.status !== 'COMMITTED' || unstartedSeen) {
+      fail(`${path} committed items must be a prefix before unstarted items`);
+    }
+  }
+}
+
+function validateBatchStateItems(items, batchPlan, path) {
+  validateMappedItems(items, batchPlan, path, batchPlan.plan_hash, (item, itemPath) => {
+    validateMappedItemIdentity(item, BATCH_STATE_ITEM_KEYS, batchPlan, itemPath, batchPlan.plan_hash);
+    if (!BATCH_STATE_ITEM_STATUSES.has(item.status)) fail(`${path} item status is unsupported`);
+    return item;
+  });
+  validateStopFirst(items, path, new Set(['DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED']));
+  return items;
+}
+
+const BATCH_STATE_TRANSITIONS = Object.freeze({
+  READY: new Set(['RUNNING', 'BLOCKED', 'RECOVERY_REQUIRED']),
+  RUNNING: new Set(['RUNNING', 'COMMITTED', 'BLOCKED', 'PARTIAL', 'RECOVERY_REQUIRED']),
+  COMMITTED: new Set(['COMMITTED']),
+  BLOCKED: new Set(['BLOCKED']),
+  PARTIAL: new Set(['PARTIAL', 'RUNNING', 'COMMITTED', 'RECOVERY_REQUIRED']),
+  RECOVERY_REQUIRED: new Set(['RECOVERY_REQUIRED', 'RUNNING', 'COMMITTED', 'PARTIAL']),
+});
+
+function validateConvergence(convergence, batchPlan, previousState, state) {
+  if (!(Array.isArray(convergence) || convergence instanceof Set)) {
+    fail('batch state authoritative convergence must be an array or Set');
+  }
+  const supplied = [...convergence];
+  const unique = new Set(supplied);
+  if (unique.size !== supplied.length) fail('batch state authoritative convergence is duplicated');
+  const mapped = new Set(batchPlan.transaction_map.map(({ transaction_id: id }) => id));
+  for (const transactionId of supplied) {
+    validateSha256(transactionId, 'batch state authoritative convergence transaction_id');
+    if (!mapped.has(transactionId)) fail('batch state authoritative convergence is not mapped');
+  }
+  const required = new Set();
+  if (previousState !== null) {
+    for (let index = 0; index < state.items.length; index += 1) {
+      if (previousState.items[index].status === 'RECOVERY_REQUIRED'
+          && state.items[index].status === 'COMMITTED') {
+        required.add(state.items[index].transaction_id);
+      }
+    }
+  }
+  if (required.size !== unique.size || [...required].some((id) => !unique.has(id))) {
+    fail('batch state authoritative convergence does not exactly match reconciled transitions');
+  }
+  return unique;
+}
+
+// Only a caller that has reconciled the durable item transaction may populate
+// authoritativeConvergence. Stored/public validation must leave it empty.
+export function validateBatchState(state, batchPlan, {
+  previousState = null,
+  authoritativeConvergence = [],
+} = {}) {
+  validateBatchPlan(batchPlan);
+  exactKeys(state, BATCH_STATE_KEYS, [...BATCH_STATE_KEYS], 'batch state');
+  canonicalJson(state);
+  if (state.schema_version !== SCHEMAS.batchState) {
+    fail(`batch state schema mismatch: expected ${SCHEMAS.batchState}`);
+  }
+  if (state.batch_id !== batchPlan.batch_id || state.plan_hash !== batchPlan.plan_hash) {
+    fail('batch state identity does not match the batch plan');
+  }
+  if (!Number.isSafeInteger(state.sequence) || state.sequence < 0) {
+    fail('batch state sequence is invalid');
+  }
+  if (!BATCH_STATES.has(state.state)) fail('batch state is unsupported');
+  validateBatchStateItems(state.items, batchPlan, 'batch state');
+  const committedCount = state.items.filter(({ status }) => status === 'COMMITTED').length;
+  const failureStatuses = state.items.filter(({ status }) => (
+    ['DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED'].includes(status)
+  ));
+  if ((state.state === 'READY'
+      && (state.sequence !== 0 || state.items.some(({ status }) => status !== 'NOT_STARTED')))
+      || (state.state === 'RUNNING' && failureStatuses.length > 0)
+      || (state.state === 'COMMITTED' && committedCount !== state.items.length)
+      || (state.state === 'PARTIAL'
+        && (committedCount === 0 || !failureStatuses.some(({ status }) => (
+          ['DRIFTED', 'BLOCKED'].includes(status)
+        ))))
+      || (state.state === 'BLOCKED'
+        && (committedCount !== 0 || !failureStatuses.some(({ status }) => (
+          ['DRIFTED', 'BLOCKED'].includes(status)
+        ))))
+      || (state.state === 'RECOVERY_REQUIRED'
+        && committedCount !== state.items.length && failureStatuses.length === 0)) {
+    fail('batch state does not match its item projection');
+  }
+
+  if (previousState === null) {
+    validateConvergence(authoritativeConvergence, batchPlan, null, state);
+    return state;
+  }
+  validateBatchState(previousState, batchPlan);
+  const convergence = validateConvergence(
+    authoritativeConvergence,
+    batchPlan,
+    previousState,
+    state,
+  );
+  if (state.sequence !== previousState.sequence + 1
+      || !BATCH_STATE_TRANSITIONS[previousState.state].has(state.state)) {
+    fail('batch state transition or sequence is invalid');
+  }
+  for (let index = 0; index < state.items.length; index += 1) {
+    const before = previousState.items[index].status;
+    const after = state.items[index].status;
+    if (before === 'NOT_STARTED') continue;
+    if (before === 'RECOVERY_REQUIRED' && after === 'COMMITTED'
+        && convergence.has(state.items[index].transaction_id)) continue;
+    if (before !== after) fail(`batch state cannot erase ${before} failure truth`);
+  }
+  return state;
+}
+
+function validatePublicItemTruth(item, path, statuses) {
+  validateMappedItemIdentity(item, BATCH_PUBLIC_ITEM_KEYS, null, path);
+  if (!statuses.has(item.status)) fail(`${path} status is unsupported`);
+  if (!BATCH_LOCATIONS.has(item.location) || typeof item.transaction_has_mutated !== 'boolean') {
+    fail(`${path} location or history is unsupported`);
+  }
+  if (['quarantine', 'rehydrated'].includes(item.location)
+      && item.transaction_has_mutated !== true) {
+    fail(`${path} location requires historical mutation truth`);
+  }
+  const summaryTruth = statuses === BATCH_SUMMARY_ITEM_STATUSES;
+  const exactTruth = {
+    NOT_STARTED: item.location === 'original' && item.transaction_has_mutated === false,
+    APPLY_PENDING: item.location === 'original' && item.transaction_has_mutated === false,
+    APPLY_FINALIZE_PENDING: item.location === 'quarantine'
+      && item.transaction_has_mutated === true,
+    COMMITTED: (summaryTruth ? item.location === 'quarantine'
+      : ['quarantine', 'rehydrated'].includes(item.location))
+      && item.transaction_has_mutated === true,
+    RESTORE_PENDING: item.location === 'quarantine'
+      && item.transaction_has_mutated === true,
+    RESTORE_FINALIZE_PENDING: ['original', 'original_drift'].includes(item.location)
+      && item.transaction_has_mutated === true,
+    RESTORED: ['original', 'original_drift'].includes(item.location)
+      && item.transaction_has_mutated === true,
+    REHYDRATED: item.location === 'rehydrated' && item.transaction_has_mutated === true,
+    RESTORE_CONFLICT: item.location === 'rehydrated' && item.transaction_has_mutated === true,
+    DRIFTED: item.location === 'original_drift',
+    BLOCKED: ['original', 'original_drift'].includes(item.location)
+      && item.transaction_has_mutated === false,
+    RECOVERY_REQUIRED: true,
+  }[item.status];
+  if (!exactTruth) fail(`${path} status, location, and history are contradictory`);
+  return item;
+}
+
+function validatePublicItems(items, batchPlan, path, planHash, statuses, stopFirst = false) {
+  validateMappedItems(items, batchPlan, path, planHash, (item, itemPath) => (
+    validatePublicItemTruth(item, itemPath, statuses)
+  ));
+  if (stopFirst) validateStopFirst(items, path, new Set(['DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED']));
+  return items;
+}
+
+function committedIdsFor(items) {
+  return items.filter(({ status }) => status === 'COMMITTED')
+    .map(({ transaction_id: transactionId }) => transactionId);
+}
+
+export function undoCommandArguments(transactionId) {
+  validateSha256(transactionId, 'transaction_id');
+  return ['skills-refiner', 'cleanup', 'undo', transactionId, '--confirm', transactionId, '--json'];
+}
+
+function undoCommandsFor(transactionIds) {
+  return transactionIds.toReversed().map((transactionId) => (
+    undoCommandArguments(transactionId).join(' ')
+  ));
+}
+
+function validateBatchEnvelopeIdentity(value, batchPlan, path) {
+  validateSha256(value.batch_id, `${path}.batch_id`);
+  validateSha256(value.plan_hash, `${path}.plan_hash`);
+  if (value.batch_id !== deriveBatchId(value.plan_hash)) fail(`${path} identity is invalid`);
+  if (batchPlan !== null) {
+    validateBatchPlan(batchPlan);
+    if (value.batch_id !== batchPlan.batch_id || value.plan_hash !== batchPlan.plan_hash) {
+      fail(`${path} does not match the batch plan`);
+    }
+  }
+}
+
+function validateBatchDurableTruth(value, path) {
+  const committedTransactionIds = committedIdsFor(value.items);
+  const expectedUndoCommands = undoCommandsFor(committedTransactionIds);
+  const historical = value.items.some(({ transaction_has_mutated: mutated }) => mutated);
+  if (value.transaction_has_mutated !== historical
+      || canonicalJson(value.committed_transaction_ids) !== canonicalJson(committedTransactionIds)
+      || canonicalJson(value.undo_commands) !== canonicalJson(expectedUndoCommands)) {
+    fail(`${path} durable mutation truth is invalid`);
+  }
+  return committedTransactionIds;
+}
+
+export function buildBatchResult({
+  batchPlan, status, overallStatus, items, mutationOccurred,
+} = {}) {
+  validateBatchPlan(batchPlan);
+  validatePublicItems(
+    items, batchPlan, 'batch result', batchPlan.plan_hash, BATCH_STATE_ITEM_STATUSES, true,
+  );
+  const committedTransactionIds = committedIdsFor(items);
+  return validateBatchResult({
+    schema_version: SCHEMAS.batch,
+    command: 'apply',
+    status,
+    overall_status: overallStatus,
+    batch_id: batchPlan.batch_id,
+    plan_hash: batchPlan.plan_hash,
+    items: items.map((item) => ({ ...item })),
+    mutation_occurred: mutationOccurred,
+    mutation_outcome: mutationOccurred === true ? 'moved' : 'unchanged',
+    transaction_has_mutated: items.some(({ transaction_has_mutated: mutated }) => mutated),
+    committed_transaction_ids: committedTransactionIds,
+    undo_commands: undoCommandsFor(committedTransactionIds),
+  }, batchPlan);
+}
+
+export function validateBatchResult(result, batchPlan = null) {
+  exactKeys(result, BATCH_RESULT_KEYS, [...BATCH_RESULT_KEYS], 'batch result');
+  canonicalJson(result);
+  if (result.schema_version !== SCHEMAS.batch || result.command !== 'apply'
+      || !BATCH_RESULT_STATUS_PAIRS.has(`${result.status}\u0000${result.overall_status}`)) {
+    fail('batch result schema, command, or status is unsupported');
+  }
+  validateBatchEnvelopeIdentity(result, batchPlan, 'batch result');
+  validatePublicItems(
+    result.items, batchPlan, 'batch result', result.plan_hash, BATCH_STATE_ITEM_STATUSES, true,
+  );
+  if (typeof result.mutation_occurred !== 'boolean'
+      || !['unchanged', 'moved'].includes(result.mutation_outcome)
+      || result.mutation_outcome !== (result.mutation_occurred ? 'moved' : 'unchanged')) {
+    fail('batch result current-command mutation truth is invalid');
+  }
+  const committedTransactionIds = validateBatchDurableTruth(result, 'batch result');
+  const allCommitted = committedTransactionIds.length === result.items.length;
+  const noCommitted = committedTransactionIds.length === 0;
+  if ((result.status === 'committed' && (!allCommitted || !result.mutation_occurred))
+      || (result.status === 'already_committed' && (!allCommitted || result.mutation_occurred))
+      || (result.status === 'blocked'
+        && (!noCommitted || result.mutation_occurred || result.transaction_has_mutated
+          || !result.items.some(({ status }) => ['DRIFTED', 'BLOCKED'].includes(status))))
+      || (result.overall_status === 'PARTIAL' && (noCommitted || allCommitted))
+      || (result.overall_status === 'RECOVERY_REQUIRED'
+        && !allCommitted
+        && !result.items.some(({ status }) => status === 'RECOVERY_REQUIRED'))) {
+    fail('batch result status does not match its item or mutation truth');
+  }
+  return result;
+}
+
+export function deriveBatchSummaryOverallStatus(items) {
+  validatePublicItems(items, null, 'batch summary', undefined, BATCH_SUMMARY_ITEM_STATUSES);
+  const statuses = new Set(items.map(({ status }) => status));
+  if (statuses.has('RECOVERY_REQUIRED')) return 'RECOVERY_REQUIRED';
+  if (statuses.has('RESTORE_CONFLICT')) return 'RESTORE_CONFLICT';
+  if (statuses.has('REHYDRATED')) return 'REHYDRATED';
+  if (statuses.has('RESTORE_PENDING') || statuses.has('RESTORE_FINALIZE_PENDING')) {
+    return 'RESTORE_PENDING';
+  }
+  if (statuses.has('RESTORED')) {
+    return items.every(({ status }) => ['RESTORED', 'NOT_STARTED'].includes(status))
+      ? 'RESTORED'
+      : 'PARTIALLY_RESTORED';
+  }
+  if (statuses.has('DRIFTED') || statuses.has('BLOCKED')) {
+    return items.some(({ transaction_has_mutated: mutated }) => mutated) ? 'PARTIAL' : 'BLOCKED';
+  }
+  if (items.every(({ status }) => status === 'COMMITTED')) return 'COMMITTED';
+  if (statuses.has('COMMITTED') || statuses.has('APPLY_PENDING')
+      || statuses.has('APPLY_FINALIZE_PENDING')) return 'RUNNING';
+  return 'READY';
+}
+
+export function validateBatchSummary(summary, batchPlan = null) {
+  exactKeys(summary, BATCH_SUMMARY_KEYS, [...BATCH_SUMMARY_KEYS], 'batch summary');
+  canonicalJson(summary);
+  if (summary.schema_version !== SCHEMAS.batchSummary
+      || !BATCH_SUMMARY_OVERALL_STATUSES.has(summary.overall_status)) {
+    fail(`batch summary schema mismatch: expected ${SCHEMAS.batchSummary}`);
+  }
+  validateBatchEnvelopeIdentity(summary, batchPlan, 'batch summary');
+  validatePublicItems(
+    summary.items, batchPlan, 'batch summary', summary.plan_hash, BATCH_SUMMARY_ITEM_STATUSES,
+  );
+  if (summary.overall_status !== deriveBatchSummaryOverallStatus(summary.items)) {
+    fail('batch summary overall_status does not match precedence-derived item truth');
+  }
+  return summary;
+}
+
+function expectedBatchStatusForTransaction(result) {
+  const location = result.location;
+  const mutated = result.transaction_has_mutated;
+  if (result.state === 'PLANNED') {
+    if (location === 'original' && !mutated) {
+      return { publicStatus: 'ready_to_resume_apply', summaryStatus: 'NOT_STARTED' };
+    }
+    if (location === 'original_drift' && !mutated) {
+      return { publicStatus: 'drifted', summaryStatus: 'DRIFTED' };
+    }
+    return null;
+  }
+  if (['CONFIRMED', 'PREPARED'].includes(result.state)) {
+    if (location === 'original' && !mutated) {
+      return { publicStatus: 'ready_to_resume_apply', summaryStatus: 'APPLY_PENDING' };
+    }
+    if (location === 'original_drift' && !mutated) {
+      return { publicStatus: 'drifted', summaryStatus: 'DRIFTED' };
+    }
+    return null;
+  }
+  if (result.state === 'APPLYING') {
+    if (location === 'original' && !mutated) {
+      return { publicStatus: 'ready_to_resume_apply', summaryStatus: 'APPLY_PENDING' };
+    }
+    if (location === 'quarantine' && mutated) {
+      return { publicStatus: 'ready_to_finalize_commit', summaryStatus: 'APPLY_FINALIZE_PENDING' };
+    }
+    if (location === 'rehydrated' && mutated) {
+      return { publicStatus: 'ready_to_finalize_commit', summaryStatus: 'REHYDRATED' };
+    }
+    return null;
+  }
+  if (result.state === 'COMMITTED') {
+    if (location === 'quarantine' && mutated) {
+      return { publicStatus: 'committed', summaryStatus: 'COMMITTED' };
+    }
+    if (location === 'rehydrated' && mutated) {
+      return { publicStatus: 'rehydrated', summaryStatus: 'REHYDRATED' };
+    }
+    return null;
+  }
+  if (result.state === 'RESTORE_PREPARED') {
+    if (location === 'quarantine' && mutated) {
+      return { publicStatus: 'ready_to_resume_undo', summaryStatus: 'RESTORE_PENDING' };
+    }
+    if (location === 'rehydrated' && mutated) {
+      return { publicStatus: 'restore_conflict', summaryStatus: 'RESTORE_CONFLICT' };
+    }
+    return null;
+  }
+  if (result.state === 'RESTORING') {
+    if (location === 'quarantine' && mutated) {
+      return { publicStatus: 'ready_to_resume_undo', summaryStatus: 'RESTORE_PENDING' };
+    }
+    if (location === 'original' && mutated) {
+      return { publicStatus: 'ready_to_finalize_restore', summaryStatus: 'RESTORE_FINALIZE_PENDING' };
+    }
+    if (location === 'rehydrated' && mutated) {
+      return { publicStatus: 'restore_conflict', summaryStatus: 'RESTORE_CONFLICT' };
+    }
+    return null;
+  }
+  if (result.state === 'RESTORED' && location === 'original' && mutated) {
+    return { publicStatus: 'restored', summaryStatus: 'RESTORED' };
+  }
+  return null;
+}
+
+export function validateTransactionBatchStatus(result, batchPlan = null) {
+  exactKeys(
+    result, TRANSACTION_BATCH_STATUS_KEYS, TRANSACTION_BATCH_STATUS_REQUIRED_KEYS,
+    'transaction batch status',
+  );
+  canonicalJson(result);
+  if (result.schema_version !== SCHEMAS.transactionBatchStatus || result.command !== 'status') {
+    fail(`transaction batch status schema mismatch: expected ${SCHEMAS.transactionBatchStatus}`);
+  }
+  const { batch_id: batchId, batch_summary: batchSummary, ...transactionFields } = result;
+  try {
+    validateTransactionResult({ ...transactionFields, schema_version: SCHEMAS.transaction });
+    validateBatchSummary(batchSummary, batchPlan);
+  } catch {
+    fail('transaction batch status contains invalid transaction or batch truth');
+  }
+  const matches = batchSummary.items.filter((item) => item.transaction_id === result.transaction_id);
+  const expected = expectedBatchStatusForTransaction(result);
+  if (batchId !== batchSummary.batch_id || matches.length !== 1 || expected === null
+      || result.status !== expected.publicStatus || result.overall_status !== expected.publicStatus
+      || matches[0].status !== expected.summaryStatus || matches[0].location !== result.location
+      || matches[0].transaction_has_mutated !== result.transaction_has_mutated) {
+    fail('transaction batch status is contradictory with its reconciled batch item');
+  }
+  return result;
+}
+
+export function buildBatchError({
+  batchPlan,
+  status,
+  overallStatus,
+  items,
+  mutationOccurred,
+  mutationOutcome,
+  errorCode,
+  failureScope,
+  failureItemIndex = null,
+} = {}) {
+  validateBatchPlan(batchPlan);
+  const committedTransactionIds = committedIdsFor(items);
+  const itemId = failureScope === 'item' && Number.isSafeInteger(failureItemIndex)
+    ? items[failureItemIndex]?.item_id ?? null
+    : null;
+  return validateBatchError({
+    schema_version: SCHEMAS.batchError,
+    command: 'apply',
+    status,
+    overall_status: overallStatus,
+    batch_id: batchPlan.batch_id,
+    plan_hash: batchPlan.plan_hash,
+    items: items.map((item) => ({ ...item })),
+    mutation_occurred: mutationOccurred,
+    mutation_outcome: mutationOutcome,
+    transaction_has_mutated: items.some(({ transaction_has_mutated: mutated }) => mutated),
+    committed_transaction_ids: committedTransactionIds,
+    undo_commands: undoCommandsFor(committedTransactionIds),
+    error_code: errorCode,
+    failure_scope: failureScope,
+    failure_item_id: itemId,
+    failure_item_index: failureScope === 'item' ? failureItemIndex : null,
+  }, batchPlan);
+}
+
+export function validateBatchError(error, batchPlan = null) {
+  exactKeys(error, BATCH_ERROR_KEYS, [...BATCH_ERROR_KEYS], 'batch error');
+  canonicalJson(error);
+  const policy = BATCH_ERROR_POLICIES.get(error.error_code);
+  const statusPair = `${error.status}\u0000${error.overall_status}`;
+  if (error.schema_version !== SCHEMAS.batchError || error.command !== 'apply'
+      || policy === undefined || !policy.pairs.has(statusPair)
+      || error.failure_scope !== policy.scope) {
+    fail('batch error schema, command, or status is unsupported');
+  }
+  validateBatchEnvelopeIdentity(error, batchPlan, 'batch error');
+  validatePublicItems(
+    error.items, batchPlan, 'batch error', error.plan_hash, BATCH_STATE_ITEM_STATUSES, true,
+  );
+  if (typeof error.mutation_occurred !== 'boolean'
+      || !['unchanged', 'moved', 'unknown'].includes(error.mutation_outcome)
+      || (!error.mutation_occurred && error.mutation_outcome !== 'unchanged')
+      || (error.mutation_occurred && error.mutation_outcome === 'unchanged')) {
+    fail('batch error current-command mutation truth is invalid');
+  }
+  if (policy.requiresUnknownOutcome === true
+      && (!error.mutation_occurred || error.mutation_outcome !== 'unknown')) {
+    fail('batch error code requires an unknown current-command mutation outcome');
+  }
+  const committed = validateBatchDurableTruth(error, 'batch error');
+  const failures = error.items
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => ['DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED'].includes(item.status));
+  if (policy.scope === 'batch') {
+    if (error.failure_item_id !== null || error.failure_item_index !== null
+        || failures.length !== 0) {
+      fail('batch error batch-scoped failure must not masquerade a known item failure');
+    }
+  } else {
+    if (failures.length !== 1 || error.failure_item_index !== failures[0].index
+        || error.failure_item_id !== failures[0].item.item_id
+        || failures[0].item.status !== policy.itemStatus) {
+      fail('batch error item-scoped failure does not match the first failure');
+    }
+  }
+  if (policy.failedItemMustHaveHistory === true
+      && failures[0]?.item.transaction_has_mutated !== true) {
+    fail('batch error ambiguous item outcome lacks that item historical mutation truth');
+  }
+  const explicitBatchUnknown = policy.unknownWithoutItemHistory === true
+    && error.failure_scope === 'batch'
+    && error.mutation_occurred === true
+    && error.mutation_outcome === 'unknown';
+  if (error.mutation_occurred && !error.transaction_has_mutated && !explicitBatchUnknown) {
+    fail('batch error current mutation lacks item history or explicit batch-level unknown truth');
+  }
+  if (policy.unknownWithoutItemHistory === true && !explicitBatchUnknown) {
+    fail('batch error explicit batch-level unknown contract is incomplete');
+  }
+  if ((error.status === 'blocked'
+      && (error.mutation_occurred || error.transaction_has_mutated || committed.length > 0))
+      || (error.overall_status === 'PARTIAL'
+        && (committed.length === 0 || committed.length === error.items.length))
+      || (error.overall_status === 'RECOVERY_REQUIRED'
+        && error.failure_scope !== 'batch'
+        && !failures.some(({ item }) => item.status === 'RECOVERY_REQUIRED'))) {
+    fail('batch error status contradicts current or historical mutation truth');
+  }
+  return error;
 }
