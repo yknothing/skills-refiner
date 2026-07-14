@@ -45,6 +45,7 @@ import {
 
 const SCANNER_PATH = fileURLToPath(new URL('../bin/skill-scan.sh', import.meta.url));
 const SOURCE_LAUNCHER_PATH = fileURLToPath(new URL('../bin/skills-refiner', import.meta.url));
+const BASH_BIN = '/bin/bash';
 const JSON_REQUESTED = process.argv.slice(2).includes('--json');
 const TEST_FAULT_PHASES = new Set([...APPLY_FAULT_PHASES, ...RESTORE_FAULT_PHASES]);
 const CONFIRMATION_HEX_LENGTH = 12;
@@ -836,6 +837,10 @@ function setupPath(value, errorCode) {
   return value;
 }
 
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 function setupOption(args, name) {
   const indexes = args
     .map((argument, index) => (argument === name ? index : -1))
@@ -1007,12 +1012,11 @@ async function runSetupCli(args) {
   if (suppliedConfirmation !== context.confirmation.digest) {
     setupFail('invalid', 'confirmation_mismatch', 2, context);
   }
-  const shellQuote = (value) => `'${value.replaceAll("'", `'"'"'`)}'`;
   const launcherBytes = Buffer.from([
     '#!/bin/bash',
     'set -o pipefail',
     `export SKILLS_REFINER_NODE_BIN=${shellQuote(context.nodeBinary)}`,
-    `exec /bin/bash ${shellQuote(context.sourceLauncher)} "$@"`,
+    `exec ${BASH_BIN} ${shellQuote(context.sourceLauncher)} "$@"`,
     '',
   ].join('\n'), 'utf8');
   const expectedHash = createHash('sha256').update(launcherBytes).digest('hex');
@@ -1429,7 +1433,13 @@ function helpText() {
 
 function setupHumanText(result) {
   if (result.result === 'fallback') {
-    return `No safe writable PATH directory was found. Use the full launcher path:\n  ${result.full_path_launcher}\n`;
+    const invocation = [
+      `SKILLS_REFINER_NODE_BIN=${shellQuote(result.node_binary)}`,
+      BASH_BIN,
+      shellQuote(result.full_path_launcher),
+      'cleanup',
+    ].join(' ');
+    return `No safe writable PATH directory was found. Run the full-path fallback:\n  ${invocation}\n`;
   }
   if (result.result === 'installed') {
     return `Installed verified launcher:\n  ${result.destination_launcher}\n`;

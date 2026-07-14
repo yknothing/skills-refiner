@@ -377,6 +377,18 @@ assert_eq "no safe PATH destination returns fallback" "0" "$RUN_STATUS"
 assert_eq "fallback reports full source path" "fallback" "$(jq -r '.result' "$stdout_file")"
 assert_eq "fallback does not invent destination" "null" "$(jq -r '.destination_launcher' "$stdout_file")"
 assert_eq "fallback reports zero mutation" "unchanged" "$(jq -r '.mutation_outcome' "$stdout_file")"
+canonical_node="$(cd "$(dirname "$NODE24_BIN")" && pwd -P)/$(basename "$NODE24_BIN")"
+canonical_launcher="$(cd "$(dirname "$LAUNCHER")" && pwd -P)/$(basename "$LAUNCHER")"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$setup_home" PATH="$readonly_tools" \
+    "$LAUNCHER" setup-cli --node "$NODE24_BIN"
+assert_eq "human fallback exits cleanly" "0" "$RUN_STATUS"
+assert_eq "human fallback binds selected Node 24" "1" \
+    "$(grep -F -c "SKILLS_REFINER_NODE_BIN='$canonical_node'" "$stdout_file" || true)"
+assert_eq "human fallback invokes the full installed launcher" "1" \
+    "$(grep -F -c "/bin/bash '$canonical_launcher' cleanup" "$stdout_file" || true)"
+assert_eq "human fallback writes no launcher" "false" \
+    "$([ -e "$readonly_tools/skills-refiner" ] && echo true || echo false)"
 
 for bad_setup_args in \
     '--node' \
@@ -517,6 +529,17 @@ assert_eq "special-path wrapper reaches selectively installed source" \
     "skills-refiner.cleanup.help.v1" "$(jq -r '.schema_version' "$stdout_file")"
 assert_eq "special-path wrapper never hard-codes conventional source" "0" \
     "$(grep -F -c '/.agents/skills/skill-hygiene' "$special_target/skills-refiner" || true)"
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$special_home" PATH="$readonly_tools" \
+    "$special_skill/bin/skills-refiner" setup-cli --node "$special_node"
+assert_eq "special-path fallback exits cleanly" "0" "$RUN_STATUS"
+special_fallback_command=$(tail -n 1 "$stdout_file" | sed 's/^  //')
+run_capture "$stdout_file" "$stderr_file" env -u SKILLS_REFINER_NODE_BIN \
+    HOME="$special_home" PATH="$readonly_tools" \
+    /bin/bash -c "$special_fallback_command --help --json"
+assert_eq "special-path fallback invocation is directly executable" "0" "$RUN_STATUS"
+assert_eq "special-path fallback reaches the selective installed source" \
+    "skills-refiner.cleanup.help.v1" "$(jq -r '.schema_version' "$stdout_file")"
 
 for tty_case in blank eof wrong interrupt; do
     tty_target="$SANDBOX/setup-tty-$tty_case"
