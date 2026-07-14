@@ -158,7 +158,7 @@ bash bin/skills-refiner-doctor.sh --help
 
 Optional env: `SKILLS_REFINER_TOOLS_ROOT` — directory that contains `skill-debug/` and `skill-hygiene/` (same layout as `~/.agents/skills`).
 
-Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, and `skill-scan.v4` are schema versions, not product release numbers. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v4 replaces optimistic static `loadable: true` claims with `status: "unknown"` and `loadable: null` unless a blocker is proven.
+Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, and `skill-scan.v5` are schema versions, not product release numbers. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v5 preserves the v4 conservative runtime semantics while adding exact active-entry identity, a unified compatibility view, and content-bound GitHub installer-receipt evidence for later disposition planning. Its `entries` order is the documented concatenation `skills + skill_links + broken_symlinks`.
 
 ## Repository layout
 

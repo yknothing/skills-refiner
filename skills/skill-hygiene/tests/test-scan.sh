@@ -64,8 +64,42 @@ $body
 EOF
 }
 
+fixture_git_tree_hash() {
+    local dir="$1" object_dir blob_sha tree_sha
+    object_dir=$(mktemp -d "$SANDBOX/git-objects.XXXXXX") || return 1
+    git init --bare -q "$object_dir" >/dev/null 2>&1 || return 1
+    blob_sha=$(git --git-dir="$object_dir" hash-object -w "$dir/SKILL.md") || return 1
+    tree_sha=$(printf '100644 blob %s\tSKILL.md\n' "$blob_sha" |
+        git --git-dir="$object_dir" mktree) || return 1
+    printf '%s\n' "$tree_sha"
+}
+
 setup_sandbox() {
     write_skill "$SANDBOX/.agents/skills/healthy-skill" "healthy-skill" "Use when testing a well formed skill." "This is a healthy skill with enough content to avoid stub classification in hygiene tests."
+    write_skill "$SANDBOX/.agents/skills/receipt-backed" "receipt-backed" "Use when testing direct installer receipt provenance." "This skill has an exact installer receipt and should be distinguished from unproven real directories."
+    cat > "$SANDBOX/.agents/.skill-lock.json" << 'EOF'
+{
+  "version": 3,
+  "skills": {
+    "receipt-backed": {
+      "source": "example/skills",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/example/skills.git",
+      "skillPath": "skills/receipt-backed/SKILL.md",
+      "skillFolderHash": "0123456789abcdef0123456789abcdef01234567",
+      "installedAt": "2026-07-14T00:00:00.000Z",
+      "updatedAt": "2026-07-14T00:00:00.000Z"
+    }
+  }
+}
+EOF
+    local receipt_tree_sha1 receipt_tmp
+    receipt_tree_sha1=$(fixture_git_tree_hash "$SANDBOX/.agents/skills/receipt-backed") || return 1
+    receipt_tmp=$(mktemp "$SANDBOX/skill-lock.XXXXXX") || return 1
+    jq --arg tree_sha1 "$receipt_tree_sha1" \
+        '.skills["receipt-backed"].skillFolderHash = $tree_sha1' \
+        "$SANDBOX/.agents/.skill-lock.json" > "$receipt_tmp"
+    mv "$receipt_tmp" "$SANDBOX/.agents/.skill-lock.json"
     write_skill "$SANDBOX/.agents/skills/tiny-stub" "tiny-stub" "stub" "TODO"
     write_skill "$SANDBOX/.agents/skills/old-tool.backup.20250101" "old-tool" "Use when testing backup detection." "backup"
     local overlong_desc
@@ -127,6 +161,15 @@ EOF
     mkdir -p "$SANDBOX/.claude/skills"
     ln -s "../../.agents/skills/healthy-skill" "$SANDBOX/.claude/skills/healthy-skill"
     ln -s "../../.agents/skills/deleted-skill" "$SANDBOX/.claude/skills/broken-link"
+    write_skill "$SANDBOX/vendor/pipe|target" "pipe-target" "Use when testing literal pipe characters in raw symlink targets." "The scanner must preserve the raw target byte-for-byte instead of parsing a delimiter-encoded classification record."
+    ln -s "../../vendor/pipe|target" "$SANDBOX/.claude/skills/pipe-link"
+    local newline_target
+    newline_target=$'../../vendor/newline-target\n'
+    write_skill "$SANDBOX/vendor/newline-target"$'\n' "newline-target" "Use when testing trailing newlines in raw symlink targets." "The scanner must preserve a target whose final byte is a newline."
+    ln -s "$newline_target" "$SANDBOX/.claude/skills/newline-link"
+    local invalid_utf8_target
+    invalid_utf8_target=$'../../vendor/invalid-utf8-\xff'
+    ln -s "$invalid_utf8_target" "$SANDBOX/.claude/skills/invalid-utf8-link"
     write_skill "$SANDBOX/.claude/skills/native-geo" "native-geo" "Use when testing native agent skill detection." "A native skill not installed through the canonical path."
 
     local linked_overlong_desc
@@ -210,8 +253,8 @@ run_tests() {
     fi
 
     echo -e "${BOLD}── Topology ──${NC}"
-    assert_eq "Canonical native count" "9" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
-    assert_eq "Claude symlink count" "1" "$(echo "$json_output" | jq '.topology[".claude/skills"].symlinks // 0')"
+    assert_eq "Canonical native count" "10" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
+    assert_eq "Claude symlink count" "3" "$(echo "$json_output" | jq '.topology[".claude/skills"].symlinks // 0')"
     assert_eq "Claude native count" "1" "$(echo "$json_output" | jq '.topology[".claude/skills"].native // 0')"
     assert_eq "Cursor symlink count" "1" "$(echo "$json_output" | jq '.topology[".cursor/skills"].symlinks // 0')"
     assert_eq "Gemini empty dir has zero skills" "0" "$(echo "$json_output" | jq '.topology[".gemini/skills"].total // 0')"
@@ -219,7 +262,7 @@ run_tests() {
 
     echo -e "${BOLD}── Symlink Semantics ──${NC}"
     assert_eq "Symlinks excluded from unique skills array" "0" "$(echo "$json_output" | jq '[.skills[] | select(.type == "symlink")] | length')"
-    assert_eq "Symlink distributions preserved in skill_links" "3" "$(echo "$json_output" | jq '.skill_links | length')"
+    assert_eq "Symlink distributions preserved in skill_links" "5" "$(echo "$json_output" | jq '.skill_links | length')"
     assert_eq "Distribution keeps skill name" "healthy-skill" "$(echo "$json_output" | jq -r '.skill_links[0].name // ""')"
     local healthy_canonical
     healthy_canonical="$(cd -P "$SANDBOX/.agents/skills/healthy-skill" && pwd)/SKILL.md"
@@ -228,8 +271,19 @@ run_tests() {
     absolute_canonical="$(cd -P "$SANDBOX/vendor/absolute-linked-skill" && pwd)/SKILL.md"
     assert_eq "Absolute symlink resolves to target" "$absolute_canonical" "$(echo "$json_output" | jq -r '.skill_links[] | select(.name == "absolute-linked-skill") | .canonical_skill_file')"
     assert_eq "Absolute symlink is not broken" "0" "$(echo "$json_output" | jq '[.broken_symlinks[] | select(.dir_name == "absolute-linked-skill")] | length')"
-    assert_eq "Broken symlink detected" "1" "$(echo "$json_output" | jq '.broken_symlinks | length')"
-    assert_eq "Broken symlink name" "broken-link" "$(echo "$json_output" | jq -r '.broken_symlinks[0].dir_name // ""')"
+    assert_eq "Broken symlink detected" "2" "$(echo "$json_output" | jq '.broken_symlinks | length')"
+    assert_eq "Broken symlink name" "broken-link" "$(echo "$json_output" | jq -r '.broken_symlinks[] | select(.dir_name == "broken-link") | .dir_name')"
+    assert_eq "Pipe link target preserved" "../../vendor/pipe|target" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "pipe-link") | .link_target')"
+    assert_eq "Pipe raw link target preserved" "../../vendor/pipe|target" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "pipe-link") | .raw_link_target')"
+    local newline_target_b64
+    newline_target_b64=$(printf '../../vendor/newline-target\n' | base64 | tr -d '\n')
+    assert_eq "Trailing newline link target preserved" "$newline_target_b64" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "newline-link") | .raw_link_target | @base64')"
+    local invalid_utf8_target_b64
+    invalid_utf8_target_b64=$(printf '../../vendor/invalid-utf8-\xff' | base64 | tr -d '\r\n')
+    assert_eq "Invalid UTF-8 link target bytes preserved" "$invalid_utf8_target_b64" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "invalid-utf8-link") | .raw_link_target_base64')"
+    assert_eq "Directory link_target remains compatible" "" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .link_target')"
+    assert_eq "Directory raw link target is null" "null" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .raw_link_target')"
+    assert_eq "Directory raw link target base64 is null" "null" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .raw_link_target_base64')"
     echo ""
 
     echo -e "${BOLD}── Flags and Scope ──${NC}"
@@ -258,14 +312,95 @@ run_tests() {
     echo -e "${BOLD}── JSON Shape ──${NC}"
     echo "$json_output" | jq . >/dev/null 2>&1
     assert_eq "JSON output is valid" "0" "$?"
-    assert_eq "JSON has schema version" "skill-scan.v4" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
+    assert_eq "Scanner schema" "skill-scan.v5" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
     assert_eq "JSON declares static preflight validation mode" "static-preflight" "$(echo "$json_output" | jq -r '.metadata.runtime_validation_mode')"
     assert_eq "JSON has topology key" "true" "$(echo "$json_output" | jq 'has("topology")')"
     assert_eq "JSON has skills key" "true" "$(echo "$json_output" | jq 'has("skills")')"
     assert_eq "JSON has skill_links key" "true" "$(echo "$json_output" | jq 'has("skill_links")')"
+    assert_eq "JSON has broken_symlinks key" "true" "$(echo "$json_output" | jq 'has("broken_symlinks")')"
+    assert_eq "JSON has entries key" "true" "$(echo "$json_output" | jq 'has("entries")')"
+    assert_eq "Entries preserve compatibility-array order" "true" "$(echo "$json_output" | jq '.entries == (.skills + .skill_links + .broken_symlinks)')"
+    assert_eq "Every entry path is absolute" "true" "$(echo "$json_output" | jq 'all(.entries[]; (.entry_path | (type == "string" and startswith("/"))))')"
+    assert_eq "Every active root is absolute" "true" "$(echo "$json_output" | jq 'all(.entries[]; (.active_root | (type == "string" and startswith("/"))))')"
+    assert_eq "Native entry path" "$SANDBOX/.agents/skills/healthy-skill" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .entry_path')"
+    assert_eq "Broken-link active root" "$SANDBOX/.claude/skills" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "broken-link") | .active_root')"
+    assert_eq "Broken-link entry path" "$SANDBOX/.claude/skills/broken-link" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "broken-link") | .entry_path')"
+    assert_eq "Receipt-backed copy provenance" "installed_copy:direct" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | [.mutation_provenance.kind, .mutation_provenance.confidence] | join(":")')"
+    assert_eq "Receipt evidence has sha256" "true" "$(echo "$json_output" | jq '.entries[] | select(.dir_name == "receipt-backed") | (.mutation_provenance.evidence.receipt_sha256 | test("^[0-9a-f]{64}$"))')"
+    assert_eq "Receipt evidence binds installed tree" "true" "$(echo "$json_output" | jq '.entries[] | select(.dir_name == "receipt-backed") | (.mutation_provenance.evidence.installed_tree_sha1 | test("^[0-9a-f]{40}$"))')"
+    assert_eq "Unproven real directory provenance" "unknown" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .mutation_provenance.kind')"
     assert_eq "JSON has runtime_load_blockers key" "true" "$(echo "$json_output" | jq 'has("runtime_load_blockers")')"
     assert_eq "Runtime load blockers are elevated" "2" "$(echo "$json_output" | jq '.runtime_load_blockers | length')"
     assert_eq "JSON-only mode does not write report files" "0" "$report_count"
+    echo ""
+
+    echo -e "${BOLD}── Installer Receipt Safety ──${NC}"
+    local safety_home receipt_file receipt_backup skill_backup invalid_receipt_json symlink_receipt_json safety_json
+    safety_home="$SANDBOX/receipt-safety-home"
+    mkdir -p "$safety_home/.agents/skills"
+    cp -R "$SANDBOX/.agents/skills/receipt-backed" "$safety_home/.agents/skills/receipt-backed"
+    receipt_file="$safety_home/.agents/.skill-lock.json"
+    receipt_backup="$safety_home/skill-lock-backup.json"
+    skill_backup="$safety_home/receipt-backed-SKILL.md"
+    cp "$SANDBOX/.agents/.skill-lock.json" "$receipt_file"
+    cp "$receipt_file" "$receipt_backup"
+
+    cp "$safety_home/.agents/skills/receipt-backed/SKILL.md" "$skill_backup"
+    printf '\nmanual replacement\n' >> "$safety_home/.agents/skills/receipt-backed/SKILL.md"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Receipt does not authorize replaced content" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    cp "$skill_backup" "$safety_home/.agents/skills/receipt-backed/SKILL.md"
+
+    jq '.version = 2' "$receipt_backup" > "$receipt_file"
+    invalid_receipt_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Wrong receipt schema does not authorize mutation" "unknown" "$(echo "$invalid_receipt_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+
+    printf '{malformed\n' > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Malformed receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+
+    jq 'del(.skills["receipt-backed"].sourceUrl)' "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Incomplete receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+
+    jq '.skills = {"stale-name": .skills["receipt-backed"]}' "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Stale-name receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+
+    cp "$receipt_backup" "$receipt_file"
+    chmod 666 "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "World-writable receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+
+    dd if=/dev/zero of="$receipt_file" bs=1048577 count=1 2>/dev/null
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Oversize receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+
+    rm "$receipt_file"
+    cp "$receipt_backup" "$receipt_file"
+    local fake_bin real_stat
+    fake_bin="$SANDBOX/fake-bin"
+    real_stat=$(command -v stat)
+    mkdir -p "$fake_bin"
+    cat > "$fake_bin/stat" << EOF
+#!/usr/bin/env bash
+if { [ "\${1:-}" = "-f" ] && [ "\${2:-}" = "%u" ]; } ||
+   { [ "\${1:-}" = "-c" ] && [ "\${2:-}" = "%u" ]; }; then
+    printf '99999\\n'
+    exit 0
+fi
+exec "$real_stat" "\$@"
+EOF
+    chmod +x "$fake_bin/stat"
+    safety_json=$(PATH="$fake_bin:$PATH" HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Foreign-owner receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+
+    rm "$receipt_file"
+    ln -s "$receipt_backup" "$receipt_file"
+    symlink_receipt_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Symlink receipt does not authorize mutation" "unknown" "$(echo "$symlink_receipt_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    rm "$receipt_file"
+    cp "$receipt_backup" "$receipt_file"
     echo ""
 
     echo -e "${BOLD}── Provenance and Version Facts ──${NC}"

@@ -80,17 +80,21 @@ payloads and must never become a shortcut for deleting active entries.
 
 ## 5. Current repository boundary
 
-`skill-scan.v4` is a conservative fact collector, not an execution plan. It
-already exposes useful candidate facts such as topology role, source and
-canonical paths, normalized `SKILL.md` content hash, provenance, link target,
-runtime-contract signals, and collisions.
+`skill-scan.v5` is a conservative fact collector, not an execution plan. It
+exposes useful candidate facts such as topology role, exact active-entry path,
+source and canonical paths, normalized `SKILL.md` content hash, provenance,
+human-readable link target plus an authoritative byte-preserving Base64 form,
+runtime-contract signals, and collisions. Its
+additive `entries` view has the stable grouped order
+`skills + skill_links + broken_symlinks`.
 
 It is insufficient for mutation because:
 
-- a symlink's `canonical_dir` is its resolved target, not the entry that may be
-  safely moved;
-- broken-symlink records do not carry an absolute entry path;
+- `canonical_dir` is informational and may identify a different filesystem
+  object than the exact `entry_path` that may be moved;
 - the normalized hash covers `SKILL.md`, not the complete entry tree;
+- content-bound installer receipt evidence is only an eligibility fact and
+  does not pin the complete filesystem identity through apply;
 - the snapshot does not pin filesystem identity across plan and apply;
 - Git Bash symlink, junction, and reparse-point topology is not certified;
 - no transaction, journal, quarantine, status, or restore contract exists.
@@ -279,7 +283,8 @@ Every item plan includes:
 - `active_root` — the recognized root that authorizes the path;
 - `entry_kind` — directory, symlink, broken symlink, or a platform-native
   classified kind;
-- `raw_link_target` when applicable;
+- best-effort UTF-8 `raw_link_target` for display and authoritative
+  `raw_link_target_base64` for identity and restore when applicable;
 - `canonical_target` for explanation only;
 - filesystem identifier and device/volume identifier;
 - object identifier such as inode or native file ID where available;
@@ -301,7 +306,7 @@ without echoing unsafe control bytes to the terminal.
 ### 9.1 Directory manifest
 
 Directory traversal is no-follow and deterministic. The manifest records each
-relative entry's path, kind, content digest or raw link target, and
+relative entry's path, kind, content digest or Base64-encoded raw link target, and
 security-relevant metadata. It rejects:
 
 - nested mounts;

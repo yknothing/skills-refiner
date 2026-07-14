@@ -53,7 +53,7 @@ bash "$SANDBOX/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh" --json
 **步骤**：解析 T2 的 JSON 输出。
 
 **验收**：
-- `scan.metadata.schema_version == "skill-scan.v4"`，`metadata.runtime_validation_mode == "static-preflight"`，且 `metadata.hash_normalization == "strip-canary-crlf-bom.v1"`。
+- `scan.metadata.schema_version == "skill-scan.v5"`，`metadata.runtime_validation_mode == "static-preflight"`，且 `metadata.hash_normalization == "strip-canary-crlf-bom.v1"`。
 - `probe.schema_version == "skill-probe.v3"`。
 - dashboard（有数据时，见 T4）`schema_version == "skill-dashboard.identity.v2"`。
 - 全部输出中字段 `content_sha256` **出现次数为 0**（已更名 `normalized_content_sha256`）；`jq '[..|objects|select(has("content_sha256"))]|length'` 为 0。

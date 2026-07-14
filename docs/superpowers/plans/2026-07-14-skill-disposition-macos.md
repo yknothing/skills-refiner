@@ -118,15 +118,20 @@ skills/skill-hygiene/tests/test-cleanup-cli.sh
 
 - Modify: `skills/skill-hygiene/bin/skill-scan.sh`
 - Modify: `skills/skill-hygiene/tests/test-scan.sh`
+- Modify: `skills/skill-debug/tests/test-install-layout.sh`
+- Modify: `README.md`
+- Modify: `README.zh-CN.md`
+- Modify: `docs/install-smoke-test-plan.md`
+- Modify: `docs/superpowers/specs/2026-07-14-skill-disposition-cli-design.md`
 
-- [ ] **Step 1: Add failing scanner contract assertions**
+- [x] **Step 1: Add failing scanner contract assertions**
 
 Add fixtures for a symlink whose raw target contains a literal `|`, a broken
 symlink, a native directory, and a sandboxed `.agents/.skill-lock.json` with one
 exact installer receipt. Assert that every emitted skill record has an absolute
-`entry_path` and `active_root`, that the raw target is byte-preserved, that only
-the receipt-backed real directory has direct `installed_copy` provenance, and
-that the schema is `skill-scan.v5`.
+`entry_path` and `active_root`, that the raw target's authoritative Base64 form
+is byte-preserved, that only the receipt-backed real directory has direct
+`installed_copy` provenance, and that the schema is `skill-scan.v5`.
 
 `skill-scan.v5` adds one unified `entries[]` execution-input view while
 preserving the existing `skills`, `skill_links`, and `broken_symlinks` arrays
@@ -137,7 +142,9 @@ assert_eq "Scanner schema" "skill-scan.v5" "$(jq -r '.metadata.schema_version' <
 assert_eq "Native entry path" "$SANDBOX/.agents/skills/healthy-skill" "$(jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .entry_path' <<<"$json_output")"
 assert_eq "Broken-link active root" "$SANDBOX/.claude/skills" "$(jq -r '.entries[] | select(.dir_name == "broken-link") | .active_root' <<<"$json_output")"
 assert_eq "Pipe link target preserved" "../../vendor/pipe|target" "$(jq -r '.entries[] | select(.dir_name == "pipe-link") | .link_target' <<<"$json_output")"
+assert_eq "Invalid UTF-8 target bytes preserved" "$invalid_target_b64" "$(jq -r '.entries[] | select(.dir_name == "invalid-utf8-link") | .raw_link_target_base64' <<<"$json_output")"
 assert_eq "Receipt-backed copy provenance" "installed_copy" "$(jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind' <<<"$json_output")"
+assert_eq "Receipt binds installed tree" "true" "$(jq '.entries[] | select(.dir_name == "receipt-backed") | (.mutation_provenance.evidence.installed_tree_sha1 | test("^[0-9a-f]{40}$"))' <<<"$json_output")"
 assert_eq "Unproven real directory provenance" "unknown" "$(jq -r '.entries[] | select(.dir_name == "healthy-skill") | .mutation_provenance.kind' <<<"$json_output")"
 ```
 
@@ -150,7 +157,7 @@ bash skills/skill-hygiene/tests/test-scan.sh
 Expected: non-zero with failures for `skill-scan.v5`, `entry_path`,
 `active_root`, and the literal-pipe target.
 
-- [ ] **Step 2: Remove delimiter-based symlink classification**
+- [x] **Step 2: Remove delimiter-based symlink classification**
 
 Replace any intermediate `type|target` record with direct classification of
 the current directory entry. `entry_path` is the physical immediate child being
@@ -164,21 +171,35 @@ jq -n \
   --arg active_root "$agent_root" \
   --arg entry_kind "$entry_kind" \
   --arg raw_link_target "$raw_link_target" \
+  --arg raw_link_target_base64 "$raw_link_target_base64" \
   '{entry_path: $entry_path, active_root: $active_root,
     entry_kind: $entry_kind,
-    link_target: (if $raw_link_target == "" then null else $raw_link_target end)}'
+    link_target: $raw_link_target,
+    raw_link_target: (if $raw_link_target == "" then null else $raw_link_target end),
+    raw_link_target_base64: (if $entry_kind == "directory" then null else $raw_link_target_base64 end)}'
 ```
 
 Do not infer an entry path by reversing `canonical_dir`. For broken links, use
 the path passed to `lstat`/`readlink` even though the target cannot resolve.
+Keep the legacy `link_target` string unchanged for compatibility; the new
+`raw_link_target` field is nullable for real directories and remains a
+best-effort human-readable UTF-8 view. `raw_link_target_base64` is the
+authoritative byte-preserving identity for symlink entries, including invalid
+UTF-8 and trailing newlines. Planning, apply, and undo must use the Base64 form.
 Read `.agents/.skill-lock.json` only as installer evidence: validate its owner,
-regular-file kind, schema, exact skill key, source fields, and bounded size.
+non-group/world-writable regular-file kind, schema, exact skill key, source
+fields, and bounded size from one stable snapshot. For a GitHub receipt with a
+40-hex `skillFolderHash`, recompute the installed directory's Git tree SHA-1 in
+a private temporary object database with system/global Git config disabled.
+The hash must match exactly. Unsupported receipt hash algorithms, unavailable
+Git, malformed metadata, and changed installed content fail closed to
+`unknown`.
 Emit `mutation_provenance.kind: installed_copy` with `confidence: direct` only
-for an exact receipt-backed real entry. Missing, malformed, stale-name, or
-ambiguous receipts emit `unknown`; they never become negative evidence or an
-automatic action.
+for an exact, content-bound receipt-backed real entry. Missing, malformed,
+stale-name, ambiguous, or content-mismatched receipts emit `unknown`; they
+never become negative evidence or an automatic action.
 
-- [ ] **Step 3: Bump and document scanner compatibility**
+- [x] **Step 3: Bump and document scanner compatibility**
 
 Change only the scan schema version needed for the added identity fields and
 raw-target correctness. Populate `entries` as the deterministic concatenation
@@ -186,7 +207,7 @@ of native directories, valid links, and broken links. Preserve all existing
 arrays, fields, and enums so current readers that tolerate additive fields keep
 working.
 
-- [ ] **Step 4: Run focused and existing scanner tests**
+- [x] **Step 4: Run focused and existing scanner tests**
 
 Run:
 
@@ -200,16 +221,17 @@ git diff --check
 Expected: all scanner assertions pass; Bash and ShellCheck produce no output;
 `git diff --check` produces no output.
 
-- [ ] **Step 5: Commit the scanner contract batch**
+- [x] **Step 5: Commit the scanner contract batch**
 
 ```bash
 test -z "$(git diff --cached --name-only)"
-git add skills/skill-hygiene/bin/skill-scan.sh skills/skill-hygiene/tests/test-scan.sh
+git add README.md README.zh-CN.md docs/install-smoke-test-plan.md docs/superpowers/plans/2026-07-14-skill-disposition-macos.md docs/superpowers/specs/2026-07-14-skill-disposition-cli-design.md skills/skill-debug/tests/test-install-layout.sh skills/skill-hygiene/bin/skill-scan.sh skills/skill-hygiene/tests/test-scan.sh
 git diff --cached --check
 git commit -m "feat(hygiene): expose exact scan entry identities"
 ```
 
-Expected: one focused commit containing only scanner and scanner-test changes.
+Expected: one focused commit containing the scanner, compatibility assertions,
+and aligned implementation-plan contract.
 
 ## Task 2: Establish the launcher and machine contract
 
@@ -557,7 +579,8 @@ Require:
   `O_NOFOLLOW`; a symlink in any component blocks the operation;
 - `entryPath` is an immediate child by structured path comparison;
 - `fstatat(..., AT_SYMLINK_NOFOLLOW)` classifies the leaf without following it;
-- a raw symlink target comes from `readlink`, not `realpath`;
+- raw symlink target bytes come from `readlink`, not `realpath`, and cross the
+  JSON boundary only as Base64;
 - Git-managed directories, including tracked ancestor subtrees, `.git` files,
   worktrees, submodules, and dirty trees, return `review_only`;
 - scanner provenance that proves an authoring source also returns
@@ -679,8 +702,8 @@ JSON. Manifest records use relative paths and include:
 }
 ```
 
-For symlinks, omit content and record only the raw link target plus link-object
-metadata. Detect a nested filesystem by comparing every opened object's device
+For symlinks, omit content and record only the Base64-encoded raw link target
+bytes plus link-object metadata. Detect a nested filesystem by comparing every opened object's device
 to the selected entry's device. Reject unsupported kinds before calculating an
 apply identity. At final apply preflight, repeat the Git/proven-authoring-source
 check and bind its result into the expected identity. The read-only Git probe
@@ -699,10 +722,14 @@ their targets for this check.
 
 A real directory is mutation-eligible only when the fresh scanner supplied
 `mutation_provenance.kind: installed_copy`, `confidence: direct`, and a receipt
-digest. The helper opens `.agents/.skill-lock.json` from the verified home fd,
-hashes its current bounded bytes, and requires that digest plus the entry
-identity to match the plan immediately before move. Unknown or changed receipt
-evidence is `review_only`/`DRIFTED`; it never degrades to location heuristics.
+digest plus the matching installed Git tree SHA-1. The helper opens
+`.agents/.skill-lock.json` from the verified home fd, hashes its current bounded
+bytes, recomputes the current entry's Git tree SHA-1 in its private transaction
+temporary store with system/global Git config disabled, and requires the
+receipt digest, receipt `skillFolderHash`, installed tree hash, and entry
+identity to match the plan immediately before move. Unknown, changed, or
+unsupported receipt evidence is `review_only`/`DRIFTED`; it never degrades to
+location heuristics.
 
 For a symlink leaf, use this fixed contract:
 
@@ -1349,8 +1376,8 @@ frontmatter.
 
 Add a selective-install scenario that installs only `skill-hygiene`, uses its
 full-path launcher, verifies JSON stdout purity, quarantines a sandboxed local
-distribution link, checks status, undoes it, and compares raw link target and
-source-tree digest before/after. It must not inspect or mutate the operator's
+distribution link, checks status, undoes it, and compares the Base64 raw-link
+identity plus source-tree digest before/after. It must not inspect or mutate the operator's
 real installed skills.
 
 - [ ] **Step 8: Run documentation and installed-layout gates**

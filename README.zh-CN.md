@@ -152,7 +152,7 @@ bash bin/skills-refiner-doctor.sh --help
 
 可选环境变量：`SKILLS_REFINER_TOOLS_ROOT` — 包含 `skill-debug/` 与 `skill-hygiene/` 的目录（布局与 `~/.agents/skills` 相同）。
 
-版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v4` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v4 不再用静态预检乐观声称 `loadable: true`，未证明阻断时改为 `status: "unknown"` 与 `loadable: null`。
+版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v5` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v5 保留 v4 的保守运行时语义，并为后续处置计划新增精确 active-entry identity、统一兼容视图与已绑定内容的 GitHub 安装凭证证据。`entries` 的顺序契约是 `skills + skill_links + broken_symlinks`。
 
 ## 仓库布局
 
