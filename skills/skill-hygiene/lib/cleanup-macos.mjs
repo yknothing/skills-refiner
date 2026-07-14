@@ -22,6 +22,9 @@ import {
   SCHEMAS,
   canonicalJson,
   computeIdentityHash,
+  computeObservationIdentityHash,
+  validateExecutionIdentity,
+  validateObservationIdentity,
 } from './cleanup-contract.mjs';
 
 const HELPER_PROTOCOL = 'skills-refiner.macos-helper.v1';
@@ -30,6 +33,7 @@ const MAX_HELPER_OUTPUT = 2 * 1024 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const TREE_SHA1 = /^[0-9a-f]{40}$/u;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
+const SHA256_IDENTIFIER = /^sha256:[0-9a-f]{64}$/u;
 const ACTIVE_ROOTS = new Set([
   '.warp/skills',
   '.agents/skills',
@@ -636,40 +640,74 @@ function helperIdentity(helper) {
 
 export function createMacosAdapter({ home = process.env.HOME, forceCompile = false } = {}) {
   const verifiedHome = safePath(home, 'home');
+  const inspectIdentity = async (entryPath, activeRoot, candidate = null) => {
+    safePath(entryPath, 'entryPath');
+    safePath(activeRoot, 'activeRoot');
+    if (!ACTIVE_ROOTS.has(relative(verifiedHome, activeRoot))
+        || dirname(entryPath) !== activeRoot || basename(entryPath).length === 0) {
+      fail('blocked', 'not_immediate_child');
+    }
+    const helper = ensureMacosHelper({ home: verifiedHome, forceCompile });
+    const response = invokeHelper(helper, [
+      'inspect-observation-v1', verifiedHome, activeRoot, entryPath,
+    ]);
+    if (response.operation !== 'inspect-observation-v1') fail('blocked', 'helper_protocol_mismatch');
+    const expectedKind = candidate?.entry_kind ?? response.entry_kind;
+    if (response.entry_kind === 'symlink') {
+      if (!['symlink', 'broken_symlink'].includes(expectedKind)) fail('blocked', 'entry_kind_changed');
+      if (candidate?.entry_identity?.raw_link_target_base64 != null
+          && candidate.entry_identity.raw_link_target_base64 !== response.raw_link_target_base64) {
+        fail('blocked', 'identity_changed');
+      }
+    } else if (expectedKind !== 'directory') {
+      fail('blocked', 'entry_kind_changed');
+    }
+    const identity = {
+      schema_version: SCHEMAS.observationIdentity,
+      adapter: 'macos-native-observation.v1',
+      entry_path: entryPath,
+      active_root: activeRoot,
+      entry_kind: expectedKind,
+      ...helperIdentity(helper),
+      device: response.device,
+      inode: response.inode,
+      mode: response.mode,
+      uid: response.uid,
+      gid: response.gid,
+      flags: response.flags,
+      manifest_hash: response.manifest_hash,
+      security_metadata_hash: response.security_metadata_hash,
+      raw_link_target_base64: response.raw_link_target_base64,
+    };
+    identity.identity_hash = computeObservationIdentityHash(identity);
+    return identity;
+  };
   return {
     name: 'macos',
+    inspectIdentity,
     async inspectForPlan(entryPath, activeRoot, candidate = null) {
-      safePath(entryPath, 'entryPath');
-      safePath(activeRoot, 'activeRoot');
-      if (!ACTIVE_ROOTS.has(relative(verifiedHome, activeRoot))
-          || dirname(entryPath) !== activeRoot || basename(entryPath).length === 0) {
-        fail('blocked', 'not_immediate_child');
-      }
-      const helper = ensureMacosHelper({ home: verifiedHome, forceCompile });
-      let response;
-      try {
-        response = invokeHelper(helper, ['inspect', verifiedHome, activeRoot, entryPath]);
-      } catch (error) {
-        if (error instanceof MacosAdapterError && error.reason === 'authoring_source') {
-          fail('review_only', 'authoring_source');
-        }
-        throw error;
-      }
-      if (response.operation !== 'inspect') fail('blocked', 'helper_protocol_mismatch');
-      const expectedKind = candidate?.entry_kind ?? response.entry_kind;
-      if (response.entry_kind === 'symlink') {
-        if (!['symlink', 'broken_symlink'].includes(expectedKind)) fail('blocked', 'entry_kind_changed');
-        if (candidate?.entry_identity?.raw_link_target_base64 != null
-            && candidate.entry_identity.raw_link_target_base64 !== response.raw_link_target_base64) {
-          fail('blocked', 'identity_changed');
-        }
-      } else if (expectedKind !== 'directory') {
-        fail('blocked', 'entry_kind_changed');
-      }
+      const observation = await inspectIdentity(entryPath, activeRoot, candidate);
+      const helper = helperForObservationIdentity(verifiedHome, observation);
+      const expectedKind = observation.entry_kind;
 
       let receiptSha256 = null;
       let treeSha1 = null;
-      if (response.entry_kind === 'directory') {
+      if (expectedKind === 'directory') {
+        let mutationObservation;
+        try {
+          mutationObservation = invokeHelper(helper, [
+            'inspect', verifiedHome, activeRoot, entryPath,
+          ]);
+        } catch (error) {
+          if (error instanceof MacosAdapterError && error.reason === 'authoring_source') {
+            fail('review_only', 'authoring_source');
+          }
+          throw error;
+        }
+        if (mutationObservation.operation !== 'inspect'
+            || mutationObservation.manifest_hash !== observation.manifest_hash) {
+          fail('blocked', 'identity_changed');
+        }
         if (candidate?.mutation_eligibility === 'review_only' || candidate?.source?.git_root
             || isGitManagedDirectory(verifiedHome, entryPath)) {
           fail('review_only', 'authoring_source');
@@ -693,19 +731,19 @@ export function createMacosAdapter({ home = process.env.HOME, forceCompile = fal
       const identity = {
         schema_version: SCHEMAS.identity,
         adapter: 'macos-native.v1',
-        entry_path: entryPath,
-        active_root: activeRoot,
+        entry_path: observation.entry_path,
+        active_root: observation.active_root,
         entry_kind: expectedKind,
         ...helperIdentity(helper),
-        device: response.device,
-        inode: response.inode,
-        mode: response.mode,
-        uid: response.uid,
-        gid: response.gid,
-        flags: response.flags,
-        manifest_hash: response.manifest_hash,
-        security_metadata_hash: response.security_metadata_hash,
-        raw_link_target_base64: response.raw_link_target_base64,
+        device: observation.device,
+        inode: observation.inode,
+        mode: observation.mode,
+        uid: observation.uid,
+        gid: observation.gid,
+        flags: observation.flags,
+        manifest_hash: observation.manifest_hash,
+        security_metadata_hash: observation.security_metadata_hash,
+        raw_link_target_base64: observation.raw_link_target_base64,
         receipt_sha256: receiptSha256,
         installed_tree_sha1: treeSha1,
       };
@@ -774,18 +812,53 @@ export function renameExclusive(options = {}) {
   return renameExclusiveInternal(options);
 }
 
+function validateMutationIdentity(executionIdentity) {
+  try {
+    validateExecutionIdentity(executionIdentity);
+    if (executionIdentity.adapter !== 'macos-native.v1'
+        || executionIdentity.helper_protocol !== HELPER_PROTOCOL) {
+      fail('blocked', 'invalid_mutation_identity');
+    }
+    return executionIdentity;
+  } catch (error) {
+    if (error instanceof MacosAdapterError) throw error;
+    fail('blocked', 'invalid_mutation_identity');
+  }
+}
+
 function helperForExecutionIdentity(home, executionIdentity) {
-  if (!executionIdentity || executionIdentity.helper_protocol !== HELPER_PROTOCOL
-      || typeof executionIdentity.binary_hash !== 'string'
-      || typeof executionIdentity.source_hash !== 'string') {
-    fail('blocked', 'invalid_referenced_helper_identity');
+  const identity = validateMutationIdentity(executionIdentity);
+  return ensureReferencedMacosHelper({
+    home,
+    binaryHash: identity.binary_hash.replace(/^sha256:/u, ''),
+    sourceHash: identity.source_hash.replace(/^sha256:/u, ''),
+    expectedArchitecture: identity.architecture,
+  });
+}
+
+function helperForObservationIdentity(home, observationIdentity) {
+  try {
+    validateObservationIdentity(observationIdentity);
+    if (observationIdentity.adapter !== 'macos-native-observation.v1'
+        || observationIdentity.helper_protocol !== HELPER_PROTOCOL) {
+      fail('blocked', 'invalid_observation_identity');
+    }
+  } catch (error) {
+    if (error instanceof MacosAdapterError) throw error;
+    fail('blocked', 'invalid_observation_identity');
   }
   return ensureReferencedMacosHelper({
     home,
-    binaryHash: executionIdentity.binary_hash.replace(/^sha256:/u, ''),
-    sourceHash: executionIdentity.source_hash.replace(/^sha256:/u, ''),
-    expectedArchitecture: executionIdentity.architecture,
+    binaryHash: observationIdentity.binary_hash.replace(/^sha256:/u, ''),
+    sourceHash: observationIdentity.source_hash.replace(/^sha256:/u, ''),
+    expectedArchitecture: observationIdentity.architecture,
   });
+}
+
+function helperForKeepProbeAuthority(home, identity) {
+  return identity?.schema_version === SCHEMAS.observationIdentity
+    ? helperForObservationIdentity(home, identity)
+    : helperForExecutionIdentity(home, identity);
 }
 
 function decodeTransactionRecord(response, field) {
@@ -814,6 +887,10 @@ function decodeOptionalTransactionRecord(response, field) {
   return decodeTransactionRecord(response, field);
 }
 
+function sha256Canonical(value) {
+  return `sha256:${hashBytes(Buffer.from(canonicalJson(value), 'utf8'))}`;
+}
+
 function initializeTransactionRecordsInternal({
   home = process.env.HOME,
   transactionId,
@@ -836,6 +913,29 @@ export function initializeTransactionRecords(options = {}) {
   return initializeTransactionRecordsInternal(options);
 }
 
+export function initializeBatchTransactionRecords({
+  home = process.env.HOME,
+  transactionId,
+  plan,
+  manifest,
+  state,
+  binding,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const input = [plan, manifest, state, binding]
+    .map((value) => canonicalJson(value)).join('\n').concat('\n');
+  const response = invokeHelper(helper, [
+    'transaction-init-batch-v2', verifiedHome, transactionId,
+  ], { input, mutationMayHaveOccurred: true });
+  if (response.operation !== 'transaction-init-batch-v2'
+      || !['created', 'existing'].includes(response.result)) {
+    fail('recovery_required', 'batch_transaction_records_invalid');
+  }
+  return response;
+}
+
 export function probeTransactionRecords({
   home = process.env.HOME,
   transactionId,
@@ -844,6 +944,45 @@ export function probeTransactionRecords({
   const verifiedHome = safePath(home, 'home');
   const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
   return probeTransactionRecordsWithHelper(helper, transactionId);
+}
+
+export function probeBatchTransactionRecords({
+  home = process.env.HOME,
+  transactionId,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const response = invokeHelper(helper, [
+    'probe-transaction-batch-v2', verifiedHome, transactionId,
+  ]);
+  if (response.operation !== 'probe-transaction-batch-v2') {
+    fail('recovery_required', 'batch_transaction_records_invalid');
+  }
+  return {
+    plan: decodeTransactionRecord(response, 'plan_base64'),
+    manifest: decodeTransactionRecord(response, 'manifest_base64'),
+    state: decodeTransactionRecord(response, 'state_base64'),
+    binding: decodeTransactionRecord(response, 'binding_base64'),
+    lock: decodeOptionalTransactionRecord(response, 'lock_base64'),
+  };
+}
+
+export function probeTransactionKind({
+  home = process.env.HOME,
+  transactionId,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const response = invokeHelper(helper, [
+    'probe-transaction-kind-v1', verifiedHome, transactionId,
+  ]);
+  if (response.operation !== 'probe-transaction-kind-v1'
+      || !['standalone_v1', 'batch_v2'].includes(response.kind)) {
+    fail('recovery_required', 'transaction_kind_ambiguous');
+  }
+  return response.kind;
 }
 
 function probeTransactionRecordsWithHelper(helper, transactionId) {
@@ -1023,7 +1162,9 @@ function advanceTransactionStateRecordInternal({
   if (response.operation !== 'transaction-advance') {
     fail('recovery_required', 'transaction_state_invalid');
   }
-  const observed = probeTransactionRecords({ home: verifiedHome, transactionId, executionIdentity });
+  const observed = probeTransactionRecords({
+    home: verifiedHome, transactionId, executionIdentity,
+  });
   if (canonicalJson(observed.state) !== nextBytes) {
     fail('recovery_required', 'transaction_state_postcondition_failed');
   }
@@ -1032,6 +1173,309 @@ function advanceTransactionStateRecordInternal({
 
 export function advanceTransactionStateRecord(options = {}) {
   return advanceTransactionStateRecordInternal(options);
+}
+
+function validateBatchLockOwner(owner, { batchId, planHash, nonce, pid = null }) {
+  const keys = [
+    'batch_id',
+    'nonce',
+    'pid',
+    'plan_hash',
+    'process_start_sec',
+    'process_start_usec',
+    'scope',
+  ];
+  if (!owner || typeof owner !== 'object' || Array.isArray(owner)
+      || Object.keys(owner).length !== keys.length
+      || keys.some((key) => !Object.hasOwn(owner, key))
+      || owner.scope !== 'batch' || owner.batch_id !== batchId
+      || owner.plan_hash !== planHash || owner.nonce !== nonce
+      || (pid !== null && owner.pid !== pid)
+      || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+      || !Number.isSafeInteger(owner.process_start_sec) || owner.process_start_sec < 0
+      || !Number.isSafeInteger(owner.process_start_usec) || owner.process_start_usec < 0) {
+    fail('recovery_required', 'batch_lock_identity_invalid');
+  }
+  canonicalJson(owner);
+  return owner;
+}
+
+function initializeBatchRecordsInternal({
+  home = process.env.HOME,
+  batchId,
+  plan,
+  state,
+  executionIdentity,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const input = [plan, state].map((value) => canonicalJson(value)).join('\n').concat('\n');
+  const response = invokeHelper(helper, ['batch-init-v1', verifiedHome, batchId], {
+    input,
+    mutationMayHaveOccurred: true,
+    testEnvironment,
+  });
+  if (response.operation !== 'batch-init-v1'
+      || !['created', 'existing'].includes(response.result)) {
+    fail('recovery_required', 'batch_records_invalid');
+  }
+  return response;
+}
+
+export function initializeBatchRecords(options = {}) {
+  return initializeBatchRecordsInternal(options);
+}
+
+export function probeBatchRecords({
+  home = process.env.HOME,
+  batchId,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const response = invokeHelper(helper, ['probe-batch-v1', verifiedHome, batchId]);
+  if (response.operation !== 'probe-batch-v1') fail('recovery_required', 'batch_records_invalid');
+  return {
+    plan: decodeTransactionRecord(response, 'plan_base64'),
+    state: decodeTransactionRecord(response, 'state_base64'),
+    lock: decodeOptionalTransactionRecord(response, 'lock_base64'),
+  };
+}
+
+function acquireBatchLockInternal({
+  home = process.env.HOME,
+  batchId,
+  planHash,
+  executionIdentity,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const nonce = randomBytes(32).toString('hex');
+  const response = invokeHelper(helper, [
+    'batch-lock-acquire-v1', verifiedHome, batchId, planHash, nonce, String(process.pid),
+  ], { mutationMayHaveOccurred: true, testEnvironment });
+  if (response.operation !== 'batch-lock-acquire-v1') {
+    fail('recovery_required', 'batch_lock_identity_invalid');
+  }
+  return validateBatchLockOwner(response.owner, {
+    batchId, planHash, nonce, pid: process.pid,
+  });
+}
+
+export function acquireBatchLock(options = {}) {
+  return acquireBatchLockInternal(options);
+}
+
+function moveBatchLock(command, {
+  home = process.env.HOME,
+  batchId,
+  planHash,
+  owner,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const validatedOwner = validateBatchLockOwner(owner, {
+    batchId, planHash, nonce: owner?.nonce,
+  });
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  return invokeHelper(helper, [
+    command,
+    verifiedHome,
+    batchId,
+    planHash,
+    validatedOwner.nonce,
+    String(validatedOwner.pid),
+    String(validatedOwner.process_start_sec),
+    String(validatedOwner.process_start_usec),
+  ], { mutationMayHaveOccurred: true });
+}
+
+export function releaseBatchLock(options = {}) {
+  return moveBatchLock('batch-lock-release-v1', options);
+}
+
+export function isolateStaleBatchLock(options = {}) {
+  return moveBatchLock('batch-lock-isolate-stale-v1', options);
+}
+
+function advanceBatchStateRecordInternal({
+  home = process.env.HOME,
+  batchId,
+  planHash,
+  currentState,
+  nextState,
+  owner,
+  executionIdentity,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const validatedOwner = validateBatchLockOwner(owner, {
+    batchId, planHash, nonce: owner?.nonce, pid: process.pid,
+  });
+  const nextBytes = canonicalJson(nextState);
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const response = invokeHelper(helper, [
+    'batch-state-cas-v1',
+    verifiedHome,
+    batchId,
+    planHash,
+    sha256Canonical(currentState),
+    validatedOwner.nonce,
+    String(validatedOwner.pid),
+    String(validatedOwner.process_start_sec),
+    String(validatedOwner.process_start_usec),
+    String(currentState.sequence),
+    String(nextState.sequence),
+  ], { input: nextBytes, mutationMayHaveOccurred: true, testEnvironment });
+  if (response.operation !== 'batch-state-cas-v1') {
+    fail('recovery_required', 'batch_state_invalid');
+  }
+  const observed = probeBatchRecords({ home: verifiedHome, batchId, executionIdentity });
+  if (canonicalJson(observed.state) !== nextBytes) {
+    fail('recovery_required', 'batch_state_postcondition_failed');
+  }
+  return observed;
+}
+
+export function advanceBatchStateRecord(options = {}) {
+  return advanceBatchStateRecordInternal(options);
+}
+
+function mappedTransaction(batchPlan, itemId, itemHash, executionIdentityHash, transactionId) {
+  return SHA256_IDENTIFIER.test(itemId ?? '') && batchPlan?.transaction_map?.some((mapping) => mapping
+    && typeof mapping === 'object' && !Array.isArray(mapping)
+    && Object.keys(mapping).length === 4
+    && mapping.item_id === itemId && mapping.item_hash === itemHash
+    && mapping.execution_identity_hash === executionIdentityHash
+    && mapping.transaction_id === transactionId) === true;
+}
+
+export function advanceTransactionStateUnderBatchLease({
+  home = process.env.HOME,
+  batchId,
+  itemId,
+  itemHash,
+  executionIdentityHash,
+  transactionId,
+  planHash,
+  batchPlan,
+  currentState,
+  nextState,
+  owner,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  if (batchPlan?.batch_id !== batchId || batchPlan?.plan_hash !== planHash
+      || !mappedTransaction(
+        batchPlan, itemId, itemHash, executionIdentityHash, transactionId,
+      )) {
+    fail('recovery_required', 'batch_mapping_invalid');
+  }
+  const validatedOwner = validateBatchLockOwner(owner, {
+    batchId, planHash, nonce: owner?.nonce, pid: process.pid,
+  });
+  const nextBytes = canonicalJson(nextState);
+  const helper = helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const response = invokeHelper(helper, [
+    'transaction-advance-batch-v2',
+    verifiedHome,
+    batchId,
+    transactionId,
+    planHash,
+    sha256Canonical(batchPlan),
+    itemId,
+    itemHash,
+    executionIdentityHash,
+    sha256Canonical(currentState),
+    validatedOwner.nonce,
+    String(validatedOwner.pid),
+    String(validatedOwner.process_start_sec),
+    String(validatedOwner.process_start_usec),
+    String(currentState.sequence),
+    String(nextState.sequence),
+  ], { input: nextBytes, mutationMayHaveOccurred: true });
+  if (response.operation !== 'transaction-advance-batch-v2') {
+    fail('recovery_required', 'transaction_state_invalid');
+  }
+  const observed = probeBatchTransactionRecords({
+    home: verifiedHome, transactionId, executionIdentity,
+  });
+  if (canonicalJson(observed.state) !== nextBytes) {
+    fail('recovery_required', 'transaction_state_postcondition_failed');
+  }
+  return observed;
+}
+
+export function probeDurableJson({
+  home = process.env.HOME,
+  role,
+  relativeDirectory = '.',
+  leaf,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  if (role !== 'cleanup' || relativeDirectory !== '.' || leaf !== 'keep-decisions.json') {
+    fail('blocked', 'invalid_keep_surface');
+  }
+  const helper = executionIdentity == null
+    ? ensureMacosHelper({ home: verifiedHome })
+    : helperForKeepProbeAuthority(verifiedHome, executionIdentity);
+  const response = invokeHelper(helper, [
+    'probe-state-v1', verifiedHome, role, relativeDirectory, leaf,
+  ]);
+  if (response.operation !== 'probe-state-v1' || typeof response.exists !== 'boolean') {
+    fail('recovery_required', 'state_probe_invalid');
+  }
+  if (!response.exists) return { exists: false, digest: null, value: null };
+  let value;
+  try {
+    value = decodeTransactionRecord(response, 'state_base64');
+  } catch (error) {
+    if (error instanceof MacosAdapterError) fail('blocked', 'state_invalid');
+    throw error;
+  }
+  const digest = sha256Canonical(value);
+  if (response.digest !== digest) fail('recovery_required', 'state_digest_invalid');
+  return { exists: true, digest, value };
+}
+
+export function compareAndSwapDurableJson({
+  home = process.env.HOME,
+  role,
+  relativeDirectory = '.',
+  leaf,
+  expectedDigest,
+  value,
+  executionIdentity,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  if (role !== 'cleanup' || relativeDirectory !== '.' || leaf !== 'keep-decisions.json') {
+    fail('blocked', 'invalid_keep_surface');
+  }
+  const current = probeDurableJson({
+    home: verifiedHome, role, relativeDirectory, leaf, executionIdentity,
+  });
+  if (current.digest !== expectedDigest) fail('blocked', 'state_cas_mismatch');
+  const helper = executionIdentity == null
+    ? ensureMacosHelper({ home: verifiedHome })
+    : helperForExecutionIdentity(verifiedHome, executionIdentity);
+  const input = canonicalJson(value);
+  const response = invokeHelper(helper, [
+    'state-cas-v1',
+    verifiedHome,
+    role,
+    relativeDirectory,
+    leaf,
+    expectedDigest ?? 'absent',
+  ], { input, mutationMayHaveOccurred: true });
+  const digest = sha256Canonical(value);
+  if (response.operation !== 'state-cas-v1' || response.digest !== digest) {
+    fail('recovery_required', 'state_cas_postcondition_failed');
+  }
+  const observed = probeDurableJson({
+    home: verifiedHome, role, relativeDirectory, leaf, executionIdentity,
+  });
+  if (observed.digest !== digest) fail('recovery_required', 'state_cas_postcondition_failed');
+  return observed;
 }
 
 export function reconcileTransactionLocation({

@@ -670,11 +670,11 @@ static int hash_file_content(int fd, sha256_context *manifest, manifest_budget *
 
 static int hash_tree(int directory_fd, const char *relative_prefix, dev_t expected_device,
                      sha256_context *manifest, sha256_context *security,
-                     manifest_budget *budget, unsigned int depth);
+                     manifest_budget *budget, unsigned int depth, int reject_git_marker);
 
 static int hash_child(int parent_fd, const char *name, const char *relative_path,
                       dev_t expected_device, sha256_context *manifest, sha256_context *security,
-                      manifest_budget *budget, unsigned int depth) {
+                      manifest_budget *budget, unsigned int depth, int reject_git_marker) {
     budget->objects += 1U;
     if (budget->objects > MAX_MANIFEST_OBJECTS || depth > MAX_MANIFEST_DEPTH) return -1;
     struct stat before;
@@ -708,7 +708,10 @@ static int hash_child(int parent_fd, const char *name, const char *relative_path
     }
     int result = 0;
     if (S_ISDIR(opened.st_mode)) {
-        result = hash_tree(child_fd, relative_path, expected_device, manifest, security, budget, depth);
+        result = hash_tree(
+            child_fd, relative_path, expected_device, manifest, security,
+            budget, depth, reject_git_marker
+        );
     } else if (S_ISREG(opened.st_mode)) {
         hash_u64(manifest, (uint64_t)opened.st_size);
         result = hash_file_content(child_fd, manifest, budget, opened.st_size);
@@ -730,7 +733,7 @@ static int hash_child(int parent_fd, const char *name, const char *relative_path
 
 static int hash_tree(int directory_fd, const char *relative_prefix, dev_t expected_device,
                      sha256_context *manifest, sha256_context *security,
-                     manifest_budget *budget, unsigned int depth) {
+                     manifest_budget *budget, unsigned int depth, int reject_git_marker) {
     if (depth >= MAX_MANIFEST_DEPTH) return -1;
     struct stat directory_before;
     if (fstat(directory_fd, &directory_before) != 0) return -1;
@@ -749,6 +752,7 @@ static int hash_tree(int directory_fd, const char *relative_prefix, dev_t expect
     while ((item = readdir(directory)) != NULL) {
         if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) continue;
         if (strcmp(item->d_name, ".git") == 0) {
+            if (!reject_git_marker) continue;
             closedir(directory);
             for (size_t index = 0; index < count; index += 1U) free(names[index]);
             free(names);
@@ -805,7 +809,7 @@ static int hash_tree(int directory_fd, const char *relative_prefix, dev_t expect
         int child_result = length < 0 || (size_t)length >= sizeof(relative_path)
             ? -1
             : hash_child(directory_fd, names[index], relative_path, expected_device, manifest, security,
-                         budget, depth + 1U);
+                         budget, depth + 1U, reject_git_marker);
         if (child_result != 0) {
             result = child_result;
             break;
@@ -860,7 +864,8 @@ enum identity_result {
 
 static enum identity_result calculate_entry_identity(int root_fd, const char *leaf,
                                                      const struct stat *leaf_status,
-                                                     entry_identity *identity) {
+                                                     entry_identity *identity,
+                                                     int reject_git_marker) {
     memset(identity, 0, sizeof(*identity));
     int entry_fd;
     if (S_ISDIR(leaf_status->st_mode)) {
@@ -900,7 +905,8 @@ static enum identity_result calculate_entry_identity(int root_fd, const char *le
             &manifest,
             &security,
             &budget,
-            0U
+            0U,
+            reject_git_marker
         );
     } else if (result == 0) {
         unsigned char target[PATH_MAX + 1U];
@@ -934,7 +940,8 @@ static enum identity_result calculate_entry_identity(int root_fd, const char *le
     return IDENTITY_OK;
 }
 
-static int inspect_entry(const char *home_path, const char *active_root, const char *entry_path) {
+static int inspect_entry(const char *home_path, const char *active_root, const char *entry_path,
+                         int observation) {
     char leaf[NAME_MAX + 1U];
     if (!allowed_active_root(home_path, active_root)
         || split_immediate_child(entry_path, active_root, leaf) != 0) {
@@ -966,7 +973,9 @@ static int inspect_entry(const char *home_path, const char *active_root, const c
         return emit_error("entry_unavailable");
     }
     entry_identity identity;
-    enum identity_result result = calculate_entry_identity(root_fd, leaf, &leaf_status, &identity);
+    enum identity_result result = calculate_entry_identity(
+        root_fd, leaf, &leaf_status, &identity, !observation
+    );
     close(root_fd);
     close(home_fd);
     if (result == IDENTITY_UNSUPPORTED) return emit_error("unsupported_entry_kind");
@@ -974,12 +983,13 @@ static int inspect_entry(const char *home_path, const char *active_root, const c
     if (result == IDENTITY_CHANGED) return emit_error("identity_changed");
     if (result == IDENTITY_AUTHORING_SOURCE) return emit_error("authoring_source");
     if (result != IDENTITY_OK) return emit_error("metadata_or_tree_blocked");
-    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"inspect\","
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"%s\","
            "\"entry_kind\":\"%s\",\"device\":\"%llu\",\"inode\":\"%llu\","
            "\"mode\":%u,\"uid\":%u,\"gid\":%u,\"flags\":%u,"
            "\"manifest_hash\":\"sha256:%s\",\"security_metadata_hash\":\"sha256:%s\","
            "\"raw_link_target_base64\":",
-           HELPER_PROTOCOL, identity.kind, (unsigned long long)identity.snapshot.st_dev,
+           HELPER_PROTOCOL, observation ? "inspect-observation-v1" : "inspect",
+           identity.kind, (unsigned long long)identity.snapshot.st_dev,
            (unsigned long long)identity.snapshot.st_ino,
            (unsigned int)(identity.snapshot.st_mode & 07777),
            (unsigned int)identity.snapshot.st_uid, (unsigned int)identity.snapshot.st_gid,
@@ -1335,10 +1345,26 @@ static void remove_transaction_temporary(int transactions_fd, const char *tempor
     unlinkat(temporary_fd, "plan.json", 0);
     unlinkat(temporary_fd, "manifest.json", 0);
     unlinkat(temporary_fd, "state.json", 0);
+    unlinkat(temporary_fd, "binding.json", 0);
     unlinkat(temporary_fd, "events.jsonl", 0);
     unlinkat(temporary_fd, "payload", AT_REMOVEDIR);
     close(temporary_fd);
     unlinkat(transactions_fd, temporary, AT_REMOVEDIR);
+}
+
+static int split_four_records(unsigned char *bytes, size_t length,
+                              unsigned char *records[4], size_t lengths[4]) {
+    size_t start = 0U;
+    size_t record = 0U;
+    for (size_t index = 0U; index < length; index += 1U) {
+        if (bytes[index] != '\n') continue;
+        if (record >= 4U || index == start) return -1;
+        records[record] = bytes + start;
+        lengths[record] = index - start;
+        record += 1U;
+        start = index + 1U;
+    }
+    return record == 4U && start == length ? 0 : -1;
 }
 
 static int split_transaction_records(unsigned char *bytes, size_t length,
@@ -1443,12 +1469,95 @@ static int transaction_init(const char *home_path, const char *transaction_id) {
     return 0;
 }
 
+static int transaction_init_batch_v2(const char *home_path, const char *transaction_id) {
+    if (!valid_sha256_identifier(transaction_id)) return emit_error("invalid_transaction_id");
+    unsigned char *bytes = NULL;
+    size_t length = 0U;
+    if (read_bounded_stdin(&bytes, &length) != 0) return emit_error("transaction_input_invalid");
+    unsigned char *records[4];
+    size_t lengths[4];
+    if (split_four_records(bytes, length, records, lengths) != 0) {
+        free(bytes);
+        return emit_error("transaction_input_invalid");
+    }
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        free(bytes);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 1);
+    int transactions_fd = quarantine_fd < 0
+        ? -1 : open_relative_directory(quarantine_fd, "transactions", 1, 1);
+    if (quarantine_fd >= 0) close(quarantine_fd);
+    close(home_fd);
+    if (transactions_fd < 0) {
+        free(bytes);
+        return emit_error("unsafe_transaction_root");
+    }
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(
+        temporary, sizeof(temporary), ".skills-refiner-tx-batch-%ld-%08x",
+        (long)getpid(), arc4random()
+    );
+    int result = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1 : mkdirat(transactions_fd, temporary, 0700);
+    int temporary_fd = result == 0
+        ? openat(transactions_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) : -1;
+    if (temporary_fd < 0 || fchmod(temporary_fd, 0700) != 0) result = -1;
+    int payload_fd = result == 0 && mkdirat(temporary_fd, "payload", 0700) == 0
+        ? openat(temporary_fd, "payload", O_RDONLY | O_DIRECTORY | O_NOFOLLOW) : -1;
+    if (payload_fd < 0 || fchmod(payload_fd, 0700) != 0 || fsync(payload_fd) != 0) result = -1;
+    if (payload_fd >= 0) close(payload_fd);
+    const char *leaves[4] = {"plan.json", "manifest.json", "state.json", "binding.json"};
+    for (size_t index = 0U; result == 0 && index < 4U; index += 1U) {
+        if (write_new_record(temporary_fd, leaves[index], records[index], lengths[index]) != 0) {
+            result = -1;
+        }
+    }
+    if (result == 0
+        && write_new_record(temporary_fd, "events.jsonl", (const unsigned char *)"", 0U) != 0) {
+        result = -1;
+    }
+    if (result == 0 && fsync(temporary_fd) != 0) result = -1;
+    if (temporary_fd >= 0) close(temporary_fd);
+    free(bytes);
+    if (result != 0) {
+        remove_transaction_temporary(transactions_fd, temporary);
+        close(transactions_fd);
+        return emit_error("transaction_init_failed");
+    }
+    int renamed = renameatx_np(
+        transactions_fd, temporary, transactions_fd, transaction_id + 7U, RENAME_EXCL
+    );
+    int rename_errno = errno;
+    if (renamed != 0) {
+        remove_transaction_temporary(transactions_fd, temporary);
+        close(transactions_fd);
+        if (rename_errno == EEXIST) {
+            printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+                   "\"operation\":\"transaction-init-batch-v2\",\"result\":\"existing\"}\n",
+                   HELPER_PROTOCOL);
+            return 0;
+        }
+        return emit_error("transaction_publish_failed");
+    }
+    int durable = fsync(transactions_fd) == 0;
+    close(transactions_fd);
+    if (!durable) return emit_recovery_required("transaction_durability_unknown");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"transaction-init-batch-v2\",\"result\":\"created\"}\n",
+           HELPER_PROTOCOL);
+    return 0;
+}
+
 static int read_transaction_record(int transaction_fd, const char *leaf,
                                    unsigned char **bytes, size_t *length) {
     int fd = openat(transaction_fd, leaf, O_RDONLY | O_NOFOLLOW);
     struct stat status;
     char digest[SHA256_HEX_BYTES];
-    if (fd < 0 || fstat(fd, &status) != 0 || (status.st_mode & 0777) != 0600
+    if (fd < 0 || fstat(fd, &status) != 0 || !S_ISREG(status.st_mode)
+        || status.st_uid != getuid() || (status.st_mode & 0777) != 0600
         || read_regular_fd_bounded(fd, bytes, length, digest, MAX_INPUT_BYTES) != 0) {
         if (fd >= 0) close(fd);
         return -1;
@@ -1458,6 +1567,177 @@ static int read_transaction_record(int transaction_fd, const char *leaf,
 }
 
 static int read_lock_owner(int quarantine_fd, unsigned char **bytes, size_t *length);
+
+static void remove_batch_temporary(int batches_fd, const char *temporary) {
+    int temporary_fd = openat(batches_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (temporary_fd < 0) return;
+    unlinkat(temporary_fd, "plan.json", 0);
+    unlinkat(temporary_fd, "state.json", 0);
+    close(temporary_fd);
+    unlinkat(batches_fd, temporary, AT_REMOVEDIR);
+}
+
+static int split_batch_records(unsigned char *bytes, size_t length,
+                               unsigned char *records[2], size_t lengths[2]) {
+    size_t start = 0U;
+    size_t record = 0U;
+    for (size_t index = 0U; index < length; index += 1U) {
+        if (bytes[index] != '\n') continue;
+        if (record >= 2U || index == start) return -1;
+        records[record] = bytes + start;
+        lengths[record] = index - start;
+        record += 1U;
+        start = index + 1U;
+    }
+    return record == 2U && start == length ? 0 : -1;
+}
+
+static int batch_init_v1(const char *home_path, const char *batch_id) {
+    if (!valid_sha256_identifier(batch_id)) return emit_error("invalid_batch_id");
+    unsigned char *bytes = NULL;
+    size_t length = 0U;
+    if (read_bounded_stdin(&bytes, &length) != 0) return emit_error("batch_input_invalid");
+    unsigned char *records[2];
+    size_t lengths[2];
+    if (split_batch_records(bytes, length, records, lengths) != 0) {
+        free(bytes);
+        return emit_error("batch_input_invalid");
+    }
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        free(bytes);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 1);
+    int batches_fd = quarantine_fd < 0
+        ? -1 : open_relative_directory(quarantine_fd, "batches", 1, 1);
+    if (quarantine_fd >= 0) close(quarantine_fd);
+    close(home_fd);
+    if (batches_fd < 0) {
+        free(bytes);
+        return emit_error("unsafe_batch_root");
+    }
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(temporary, sizeof(temporary), ".skills-refiner-batch-%ld-%08x",
+        (long)getpid(), arc4random());
+    int result = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1 : mkdirat(batches_fd, temporary, 0700);
+    int temporary_fd = result == 0
+        ? openat(batches_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) : -1;
+    if (temporary_fd < 0 || fchmod(temporary_fd, 0700) != 0) result = -1;
+    if (result == 0 && write_new_record(temporary_fd, "plan.json", records[0], lengths[0]) != 0) {
+        result = -1;
+    }
+    if (result == 0 && write_new_record(temporary_fd, "state.json", records[1], lengths[1]) != 0) {
+        result = -1;
+    }
+    if (result == 0 && fsync(temporary_fd) != 0) result = -1;
+    if (temporary_fd >= 0) close(temporary_fd);
+    free(bytes);
+    if (result != 0) {
+        remove_batch_temporary(batches_fd, temporary);
+        close(batches_fd);
+        return emit_error("batch_init_failed");
+    }
+    int renamed = renameatx_np(
+        batches_fd, temporary, batches_fd, batch_id + 7U, RENAME_EXCL
+    );
+    int rename_errno = errno;
+    if (renamed != 0) {
+        remove_batch_temporary(batches_fd, temporary);
+        close(batches_fd);
+        if (rename_errno == EEXIST) {
+            printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+                   "\"operation\":\"batch-init-v1\",\"result\":\"existing\"}\n",
+                   HELPER_PROTOCOL);
+            return 0;
+        }
+        return emit_error("batch_publish_failed");
+    }
+    int durable = fsync(batches_fd) == 0;
+    close(batches_fd);
+    if (!durable) return emit_recovery_required("batch_durability_unknown");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"batch-init-v1\",\"result\":\"created\"}\n",
+           HELPER_PROTOCOL);
+    return 0;
+}
+
+static int probe_batch_v1(const char *home_path, const char *batch_id) {
+    if (!valid_sha256_identifier(batch_id)) return emit_error("invalid_batch_id");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int batches_fd = quarantine_fd < 0
+        ? -1 : open_relative_directory(quarantine_fd, "batches", 0, 1);
+    int batch_fd = batches_fd < 0 ? -1
+        : openat(batches_fd, batch_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (batches_fd >= 0) close(batches_fd);
+    close(home_fd);
+    if (batch_fd < 0 || verify_directory_fd(batch_fd, 1) != 0) {
+        if (batch_fd >= 0) close(batch_fd);
+        if (quarantine_fd >= 0) close(quarantine_fd);
+        return emit_error("batch_unavailable");
+    }
+    const char *leaves[2] = {"plan.json", "state.json"};
+    unsigned char *records[2] = {NULL, NULL};
+    size_t lengths[2] = {0U, 0U};
+    int result = 0;
+    size_t total = 0U;
+    for (size_t index = 0U; index < 2U; index += 1U) {
+        if (read_transaction_record(batch_fd, leaves[index], &records[index], &lengths[index]) != 0
+            || lengths[index] > MAX_INPUT_BYTES - total) {
+            result = -1;
+            break;
+        }
+        total += lengths[index];
+    }
+    unsigned char *lock_owner = NULL;
+    size_t lock_owner_length = 0U;
+    int have_lock = 0;
+    struct stat lock_status;
+    if (result == 0 && fstatat(quarantine_fd, "lock", &lock_status, AT_SYMLINK_NOFOLLOW) == 0) {
+        have_lock = 1;
+        if (read_lock_owner(quarantine_fd, &lock_owner, &lock_owner_length) != 0
+            || lock_owner_length > MAX_INPUT_BYTES - total) result = -1;
+    } else if (result == 0 && errno != ENOENT) {
+        result = -1;
+    }
+    close(batch_fd);
+    close(quarantine_fd);
+    if (result != 0) {
+        free(records[0]);
+        free(records[1]);
+        free(lock_owner);
+        return emit_recovery_required("batch_records_unavailable");
+    }
+    char *encoded_plan = base64_encode(records[0], lengths[0]);
+    char *encoded_state = base64_encode(records[1], lengths[1]);
+    char *encoded_lock = have_lock ? base64_encode(lock_owner, lock_owner_length) : NULL;
+    free(records[0]);
+    free(records[1]);
+    free(lock_owner);
+    if (encoded_plan == NULL || encoded_state == NULL || (have_lock && encoded_lock == NULL)) {
+        free(encoded_plan);
+        free(encoded_state);
+        free(encoded_lock);
+        return emit_recovery_required("batch_records_unavailable");
+    }
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"probe-batch-v1\","
+           "\"plan_base64\":\"%s\",\"state_base64\":\"%s\",\"lock_base64\":",
+           HELPER_PROTOCOL, encoded_plan, encoded_state);
+    if (encoded_lock == NULL) printf("null");
+    else printf("\"%s\"", encoded_lock);
+    printf("}\n");
+    free(encoded_plan);
+    free(encoded_state);
+    free(encoded_lock);
+    return 0;
+}
 
 static int probe_transaction(const char *home_path, const char *transaction_id) {
     if (!valid_sha256_identifier(transaction_id)) return emit_error("invalid_transaction_id");
@@ -1549,6 +1829,135 @@ static int probe_transaction(const char *home_path, const char *transaction_id) 
     return 0;
 }
 
+static int probe_transaction_batch_v2(const char *home_path, const char *transaction_id) {
+    if (!valid_sha256_identifier(transaction_id)) return emit_error("invalid_transaction_id");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int transactions_fd = quarantine_fd < 0
+        ? -1 : open_relative_directory(quarantine_fd, "transactions", 0, 1);
+    int transaction_fd = transactions_fd < 0 ? -1
+        : openat(transactions_fd, transaction_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (transactions_fd >= 0) close(transactions_fd);
+    close(home_fd);
+    if (transaction_fd < 0 || verify_directory_fd(transaction_fd, 1) != 0) {
+        if (transaction_fd >= 0) close(transaction_fd);
+        if (quarantine_fd >= 0) close(quarantine_fd);
+        return emit_error("transaction_unavailable");
+    }
+    int payload_fd = openat(transaction_fd, "payload", O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (payload_fd < 0 || verify_directory_fd(payload_fd, 1) != 0) {
+        if (payload_fd >= 0) close(payload_fd);
+        close(transaction_fd);
+        close(quarantine_fd);
+        return emit_recovery_required("transaction_records_unavailable");
+    }
+    close(payload_fd);
+    const char *leaves[4] = {"plan.json", "manifest.json", "state.json", "binding.json"};
+    unsigned char *records[4] = {NULL, NULL, NULL, NULL};
+    size_t lengths[4] = {0U, 0U, 0U, 0U};
+    int result = 0;
+    size_t total = 0U;
+    for (size_t index = 0U; index < 4U; index += 1U) {
+        if (read_transaction_record(transaction_fd, leaves[index], &records[index], &lengths[index]) != 0
+            || lengths[index] > MAX_INPUT_BYTES - total) {
+            result = -1;
+            break;
+        }
+        total += lengths[index];
+    }
+    unsigned char *lock_owner = NULL;
+    size_t lock_owner_length = 0U;
+    int have_lock = 0;
+    struct stat lock_status;
+    if (result == 0 && fstatat(quarantine_fd, "lock", &lock_status, AT_SYMLINK_NOFOLLOW) == 0) {
+        have_lock = 1;
+        if (read_lock_owner(quarantine_fd, &lock_owner, &lock_owner_length) != 0
+            || lock_owner_length > MAX_INPUT_BYTES - total) result = -1;
+    } else if (result == 0 && errno != ENOENT) {
+        result = -1;
+    }
+    close(transaction_fd);
+    close(quarantine_fd);
+    if (result != 0) {
+        for (size_t index = 0U; index < 4U; index += 1U) free(records[index]);
+        free(lock_owner);
+        return emit_error("batch_binding_unavailable");
+    }
+    char *encoded[4] = {NULL, NULL, NULL, NULL};
+    for (size_t index = 0U; index < 4U; index += 1U) {
+        encoded[index] = base64_encode(records[index], lengths[index]);
+        free(records[index]);
+        if (encoded[index] == NULL) result = -1;
+    }
+    char *encoded_lock = have_lock ? base64_encode(lock_owner, lock_owner_length) : NULL;
+    free(lock_owner);
+    if (result != 0 || (have_lock && encoded_lock == NULL)) {
+        for (size_t index = 0U; index < 4U; index += 1U) free(encoded[index]);
+        free(encoded_lock);
+        return emit_recovery_required("transaction_records_unavailable");
+    }
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"probe-transaction-batch-v2\","
+           "\"plan_base64\":\"%s\",\"manifest_base64\":\"%s\","
+           "\"state_base64\":\"%s\",\"binding_base64\":\"%s\",\"lock_base64\":",
+           HELPER_PROTOCOL, encoded[0], encoded[1], encoded[2], encoded[3]);
+    if (encoded_lock == NULL) printf("null");
+    else printf("\"%s\"", encoded_lock);
+    printf("}\n");
+    for (size_t index = 0U; index < 4U; index += 1U) free(encoded[index]);
+    free(encoded_lock);
+    return 0;
+}
+
+static int probe_transaction_kind_v1(const char *home_path, const char *transaction_id) {
+    if (!valid_sha256_identifier(transaction_id)) return emit_error("invalid_transaction_id");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int transactions_fd = quarantine_fd < 0
+        ? -1 : open_relative_directory(quarantine_fd, "transactions", 0, 1);
+    int transaction_fd = transactions_fd < 0 ? -1
+        : openat(transactions_fd, transaction_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (transactions_fd >= 0) close(transactions_fd);
+    if (quarantine_fd >= 0) close(quarantine_fd);
+    close(home_fd);
+    if (transaction_fd < 0 || verify_directory_fd(transaction_fd, 1) != 0) {
+        if (transaction_fd >= 0) close(transaction_fd);
+        return emit_error("transaction_unavailable");
+    }
+    struct stat binding_status;
+    if (fstatat(transaction_fd, "binding.json", &binding_status, AT_SYMLINK_NOFOLLOW) != 0) {
+        int absent = errno == ENOENT;
+        close(transaction_fd);
+        if (!absent) return emit_recovery_required("transaction_kind_ambiguous");
+        printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+               "\"operation\":\"probe-transaction-kind-v1\","
+               "\"kind\":\"standalone_v1\"}\n", HELPER_PROTOCOL);
+        return 0;
+    }
+    unsigned char *binding = NULL;
+    size_t binding_length = 0U;
+    int safe = S_ISREG(binding_status.st_mode) && binding_status.st_uid == getuid()
+        && (binding_status.st_mode & 0777) == 0600
+        && read_transaction_record(
+            transaction_fd, "binding.json", &binding, &binding_length
+        ) == 0 && binding_length > 0U;
+    free(binding);
+    close(transaction_fd);
+    if (!safe) return emit_recovery_required("transaction_kind_ambiguous");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"probe-transaction-kind-v1\",\"kind\":\"batch_v2\"}\n",
+           HELPER_PROTOCOL);
+    return 0;
+}
+
 static int process_start_identity(pid_t pid, uint64_t *seconds, uint64_t *microseconds) {
     struct proc_bsdinfo information;
     int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &information, sizeof(information));
@@ -1584,6 +1993,26 @@ static int format_lock_owner(char *output, size_t output_size,
         (unsigned long long)start_seconds,
         (unsigned long long)start_microseconds,
         transaction_id
+    );
+    return length < 0 || (size_t)length >= output_size ? -1 : length;
+}
+
+static int format_batch_lock_owner(char *output, size_t output_size,
+                                   const char *batch_id, const char *plan_hash,
+                                   const char *nonce, pid_t pid,
+                                   uint64_t start_seconds, uint64_t start_microseconds) {
+    int length = snprintf(
+        output,
+        output_size,
+        "{\"batch_id\":\"%s\",\"nonce\":\"%s\",\"pid\":%d,"
+        "\"plan_hash\":\"%s\",\"process_start_sec\":%llu,"
+        "\"process_start_usec\":%llu,\"scope\":\"batch\"}",
+        batch_id,
+        nonce,
+        pid,
+        plan_hash,
+        (unsigned long long)start_seconds,
+        (unsigned long long)start_microseconds
     );
     return length < 0 || (size_t)length >= output_size ? -1 : length;
 }
@@ -1663,6 +2092,88 @@ static int lock_acquire(const char *home_path, const char *transaction_id,
     if (!durable) return emit_recovery_required("lock_durability_unknown");
     printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"lock-acquire\","
            "\"owner\":%s}\n", HELPER_PROTOCOL, owner);
+    return 0;
+}
+
+static int batch_lock_acquire_v1(const char *home_path, const char *batch_id,
+                                 const char *plan_hash, const char *nonce,
+                                 const char *pid_value) {
+    pid_t pid;
+    uint64_t start_seconds;
+    uint64_t start_microseconds;
+    if (!valid_sha256_identifier(batch_id) || !valid_sha256_identifier(plan_hash)
+        || !valid_lower_hex(nonce, 64U) || parse_pid(pid_value, &pid) != 0
+        || pid != getppid()
+        || process_start_identity(pid, &start_seconds, &start_microseconds) != 0) {
+        return emit_error("invalid_batch_lock_identity");
+    }
+    char owner[1024];
+    int owner_length = format_batch_lock_owner(
+        owner, sizeof(owner), batch_id, plan_hash, nonce, pid,
+        start_seconds, start_microseconds
+    );
+    if (owner_length < 0) return emit_error("invalid_batch_lock_identity");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int batches_fd = quarantine_fd < 0
+        ? -1 : open_relative_directory(quarantine_fd, "batches", 0, 1);
+    int batch_fd = batches_fd < 0 ? -1
+        : openat(batches_fd, batch_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (batches_fd >= 0) close(batches_fd);
+    close(home_fd);
+    if (quarantine_fd < 0 || batch_fd < 0 || verify_directory_fd(batch_fd, 1) != 0) {
+        if (quarantine_fd >= 0) close(quarantine_fd);
+        if (batch_fd >= 0) close(batch_fd);
+        return emit_error("unsafe_batch_lock_root");
+    }
+    close(batch_fd);
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(
+        temporary, sizeof(temporary), ".skills-refiner-batch-lock-%ld-%08x",
+        (long)getpid(), arc4random()
+    );
+    int result = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1 : mkdirat(quarantine_fd, temporary, 0700);
+    int temporary_fd = result == 0
+        ? openat(quarantine_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) : -1;
+    if (temporary_fd < 0 || fchmod(temporary_fd, 0700) != 0
+        || write_new_record(temporary_fd, "owner.json", (const unsigned char *)owner,
+                            (size_t)owner_length) != 0
+        || fsync(temporary_fd) != 0) result = -1;
+    if (temporary_fd >= 0) close(temporary_fd);
+    if (result != 0) {
+        int cleanup_fd = openat(quarantine_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (cleanup_fd >= 0) {
+            unlinkat(cleanup_fd, "owner.json", 0);
+            close(cleanup_fd);
+        }
+        unlinkat(quarantine_fd, temporary, AT_REMOVEDIR);
+        close(quarantine_fd);
+        return emit_error("batch_lock_acquire_failed");
+    }
+    int renamed = renameatx_np(quarantine_fd, temporary, quarantine_fd, "lock", RENAME_EXCL);
+    int rename_errno = errno;
+    if (renamed != 0) {
+        int cleanup_fd = openat(quarantine_fd, temporary, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (cleanup_fd >= 0) {
+            unlinkat(cleanup_fd, "owner.json", 0);
+            close(cleanup_fd);
+        }
+        unlinkat(quarantine_fd, temporary, AT_REMOVEDIR);
+        close(quarantine_fd);
+        if (rename_errno == EEXIST) return emit_error("lock_held");
+        return emit_error("batch_lock_acquire_failed");
+    }
+    int durable = fsync(quarantine_fd) == 0;
+    close(quarantine_fd);
+    if (!durable) return emit_recovery_required("batch_lock_durability_unknown");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"batch-lock-acquire-v1\",\"owner\":%s}\n",
+           HELPER_PROTOCOL, owner);
     return 0;
 }
 
@@ -1800,6 +2311,125 @@ static int move_lock_to_transaction(const char *home_path, const char *transacti
     if (!durable) return emit_recovery_required("lock_durability_unknown");
     printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"%s\"}\n",
            HELPER_PROTOCOL, require_stale ? "lock-isolate-stale" : "lock-release");
+    return 0;
+}
+
+static int batch_lock_owner_is_stale(pid_t pid, uint64_t start_seconds,
+                                     uint64_t start_microseconds) {
+    uint64_t live_seconds;
+    uint64_t live_microseconds;
+    if (process_start_identity(pid, &live_seconds, &live_microseconds) == 0
+        && live_seconds == start_seconds && live_microseconds == start_microseconds) return 0;
+    int kill_result = kill(pid, 0);
+    int kill_errno = errno;
+    if (kill_result == 0 || kill_errno == EPERM) {
+        uint64_t retry_seconds;
+        uint64_t retry_microseconds;
+        if (process_start_identity(pid, &retry_seconds, &retry_microseconds) != 0) return -1;
+        return retry_seconds == start_seconds && retry_microseconds == start_microseconds ? 0 : 1;
+    }
+    return kill_errno == ESRCH ? 1 : -1;
+}
+
+static int move_batch_lock_v1(const char *home_path, const char *batch_id,
+                              const char *plan_hash, const char *nonce,
+                              const char *pid_value, const char *start_seconds_value,
+                              const char *start_microseconds_value, int require_stale) {
+    pid_t pid;
+    if (!valid_sha256_identifier(batch_id) || !valid_sha256_identifier(plan_hash)
+        || !valid_lower_hex(nonce, 64U) || parse_pid(pid_value, &pid) != 0) {
+        return emit_error("invalid_batch_lock_identity");
+    }
+    errno = 0;
+    char *seconds_end = NULL;
+    unsigned long long start_seconds = strtoull(start_seconds_value, &seconds_end, 10);
+    if (errno != 0 || seconds_end == start_seconds_value || *seconds_end != '\0') {
+        return emit_error("invalid_batch_lock_identity");
+    }
+    errno = 0;
+    char *microseconds_end = NULL;
+    unsigned long long start_microseconds = strtoull(
+        start_microseconds_value, &microseconds_end, 10
+    );
+    if (errno != 0 || microseconds_end == start_microseconds_value
+        || *microseconds_end != '\0') return emit_error("invalid_batch_lock_identity");
+    char expected[1024];
+    int expected_length = format_batch_lock_owner(
+        expected, sizeof(expected), batch_id, plan_hash, nonce, pid,
+        (uint64_t)start_seconds, (uint64_t)start_microseconds
+    );
+    if (expected_length < 0) return emit_error("invalid_batch_lock_identity");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int batches_fd = quarantine_fd < 0
+        ? -1 : open_relative_directory(quarantine_fd, "batches", 0, 1);
+    int batch_fd = batches_fd < 0 ? -1
+        : openat(batches_fd, batch_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (batches_fd >= 0) close(batches_fd);
+    close(home_fd);
+    if (quarantine_fd < 0 || batch_fd < 0 || verify_directory_fd(batch_fd, 1) != 0) {
+        if (quarantine_fd >= 0) close(quarantine_fd);
+        if (batch_fd >= 0) close(batch_fd);
+        return emit_recovery_required("batch_lock_identity_unavailable");
+    }
+    unsigned char *observed = NULL;
+    size_t observed_length = 0U;
+    if (read_lock_owner(quarantine_fd, &observed, &observed_length) != 0
+        || observed_length != (size_t)expected_length
+        || memcmp(observed, expected, observed_length) != 0) {
+        free(observed);
+        close(quarantine_fd);
+        close(batch_fd);
+        return emit_recovery_required("batch_lock_identity_mismatch");
+    }
+    free(observed);
+    if (require_stale) {
+        int stale = batch_lock_owner_is_stale(
+            pid, (uint64_t)start_seconds, (uint64_t)start_microseconds
+        );
+        if (stale <= 0) {
+            close(quarantine_fd);
+            close(batch_fd);
+            return stale == 0 ? emit_error("lock_live")
+                : emit_recovery_required("lock_liveness_ambiguous");
+        }
+    } else {
+        uint64_t live_seconds;
+        uint64_t live_microseconds;
+        if (pid != getppid()
+            || process_start_identity(pid, &live_seconds, &live_microseconds) != 0
+            || live_seconds != (uint64_t)start_seconds
+            || live_microseconds != (uint64_t)start_microseconds) {
+            close(quarantine_fd);
+            close(batch_fd);
+            return emit_error("lock_release_not_owner");
+        }
+    }
+    char destination[NAME_MAX + 1U];
+    int destination_length = snprintf(
+        destination, sizeof(destination), "%s-lock-%s",
+        require_stale ? "stale" : "released", nonce
+    );
+    int renamed = destination_length < 0 || (size_t)destination_length >= sizeof(destination)
+        ? -1 : renameatx_np(quarantine_fd, "lock", batch_fd, destination, RENAME_EXCL);
+    int rename_errno = errno;
+    if (renamed != 0) {
+        close(quarantine_fd);
+        close(batch_fd);
+        if (rename_errno == EEXIST) return emit_recovery_required("lock_archive_conflict");
+        return emit_recovery_required("lock_move_ambiguous");
+    }
+    int durable = fsync(quarantine_fd) == 0 && fsync(batch_fd) == 0;
+    close(quarantine_fd);
+    close(batch_fd);
+    if (!durable) return emit_recovery_required("lock_durability_unknown");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"%s\"}\n",
+           HELPER_PROTOCOL,
+           require_stale ? "batch-lock-isolate-stale-v1" : "batch-lock-release-v1");
     return 0;
 }
 
@@ -2029,6 +2659,598 @@ static int transaction_advance(const char *home_path, const char *transaction_id
     return 0;
 }
 
+enum state_cas_result {
+    STATE_CAS_OK = 0,
+    STATE_CAS_MISMATCH = 1,
+    STATE_CAS_UNAVAILABLE = 2,
+    STATE_CAS_SEQUENCE = 3,
+    STATE_CAS_PUBLISH_FAILED = 4,
+    STATE_CAS_DURABILITY_UNKNOWN = 5
+};
+
+static int parse_safe_sequence(const char *value, unsigned long long *sequence) {
+    errno = 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed > MAX_SAFE_JSON_INTEGER) return -1;
+    *sequence = parsed;
+    return 0;
+}
+
+static int sequence_token_once(const unsigned char *bytes, size_t length,
+                               unsigned long long sequence) {
+    char token[64];
+    int token_length = snprintf(
+        token, sizeof(token), ",\"sequence\":%llu,\"state\":", sequence
+    );
+    if (token_length < 0 || (size_t)token_length >= sizeof(token)) return 0;
+    unsigned char *position = memmem(bytes, length, token, (size_t)token_length);
+    if (position == NULL) return 0;
+    size_t remaining = length - (size_t)(position + 1U - bytes);
+    return memmem(position + 1U, remaining, token, (size_t)token_length) == NULL;
+}
+
+static enum state_cas_result replace_state_record_cas(
+    int directory_fd,
+    const char *expected_state_hash,
+    unsigned long long expected_sequence,
+    unsigned long long next_sequence,
+    const unsigned char *next_state,
+    size_t next_state_length
+) {
+    int state_fd = openat(directory_fd, "state.json", O_RDONLY | O_NOFOLLOW);
+    struct stat state_status;
+    unsigned char *current_state = NULL;
+    size_t current_state_length = 0U;
+    char current_digest[SHA256_HEX_BYTES];
+    int state_valid = state_fd >= 0 && fstat(state_fd, &state_status) == 0
+        && S_ISREG(state_status.st_mode) && state_status.st_uid == getuid()
+        && (state_status.st_mode & 0777) == 0600
+        && read_regular_fd_bounded(
+            state_fd, &current_state, &current_state_length,
+            current_digest, MAX_INPUT_BYTES
+        ) == 0;
+    if (state_fd >= 0) close(state_fd);
+    if (!state_valid) {
+        free(current_state);
+        return STATE_CAS_UNAVAILABLE;
+    }
+    if (strcmp(expected_state_hash + 7U, current_digest) != 0) {
+        free(current_state);
+        return STATE_CAS_MISMATCH;
+    }
+    if (next_sequence != expected_sequence + 1U
+        || !sequence_token_once(current_state, current_state_length, expected_sequence)
+        || !sequence_token_once(next_state, next_state_length, next_sequence)) {
+        free(current_state);
+        return STATE_CAS_SEQUENCE;
+    }
+    free(current_state);
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(
+        temporary, sizeof(temporary), ".skills-refiner-state-%ld-%08x",
+        (long)getpid(), arc4random()
+    );
+    int temporary_fd = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1 : openat(directory_fd, temporary, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+    int result = 0;
+    int published = 0;
+    if (temporary_fd < 0 || fchmod(temporary_fd, 0600) != 0) result = -1;
+    size_t written = 0U;
+    while (result == 0 && written < next_state_length) {
+        ssize_t part = write(temporary_fd, next_state + written, next_state_length - written);
+        if (part <= 0) result = -1;
+        else written += (size_t)part;
+    }
+    if (temporary_fd >= 0) {
+        int durable = result == 0 && fsync(temporary_fd) == 0;
+        int closed = close(temporary_fd) == 0;
+        if (!durable || !closed) result = -1;
+    }
+    if (result == 0 && renameat(directory_fd, temporary, directory_fd, "state.json") == 0) {
+        published = 1;
+    } else if (result == 0) {
+        result = -1;
+    }
+    if (result == 0 && fsync(directory_fd) != 0) result = -1;
+    if (!published) unlinkat(directory_fd, temporary, 0);
+    if (result == 0) return STATE_CAS_OK;
+    return published ? STATE_CAS_DURABILITY_UNKNOWN : STATE_CAS_PUBLISH_FAILED;
+}
+
+static int emit_scoped_state_cas_result(enum state_cas_result result, const char *operation) {
+    if (result == STATE_CAS_MISMATCH) return emit_error("state_cas_mismatch");
+    if (result == STATE_CAS_UNAVAILABLE) return emit_recovery_required("state_records_unavailable");
+    if (result == STATE_CAS_SEQUENCE) return emit_error("invalid_state_sequence");
+    if (result == STATE_CAS_DURABILITY_UNKNOWN) {
+        return emit_recovery_required("state_durability_unknown");
+    }
+    if (result != STATE_CAS_OK) return emit_error("state_publish_failed");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"%s\"}\n",
+           HELPER_PROTOCOL, operation);
+    return 0;
+}
+
+static int parse_process_start(const char *seconds_value, const char *microseconds_value,
+                               uint64_t *seconds, uint64_t *microseconds) {
+    errno = 0;
+    char *seconds_end = NULL;
+    unsigned long long parsed_seconds = strtoull(seconds_value, &seconds_end, 10);
+    if (errno != 0 || seconds_end == seconds_value || *seconds_end != '\0') return -1;
+    errno = 0;
+    char *microseconds_end = NULL;
+    unsigned long long parsed_microseconds = strtoull(
+        microseconds_value, &microseconds_end, 10
+    );
+    if (errno != 0 || microseconds_end == microseconds_value || *microseconds_end != '\0') {
+        return -1;
+    }
+    *seconds = (uint64_t)parsed_seconds;
+    *microseconds = (uint64_t)parsed_microseconds;
+    return 0;
+}
+
+static int open_verified_batch_lease(
+    const char *home_path,
+    const char *batch_id,
+    const char *plan_hash,
+    const char *nonce,
+    pid_t pid,
+    uint64_t start_seconds,
+    uint64_t start_microseconds,
+    int *quarantine_fd_out,
+    int *batch_fd_out
+) {
+    uint64_t live_seconds;
+    uint64_t live_microseconds;
+    if (pid != getppid()
+        || process_start_identity(pid, &live_seconds, &live_microseconds) != 0
+        || live_seconds != start_seconds || live_microseconds != start_microseconds) return -1;
+    char expected_owner[1024];
+    int expected_owner_length = format_batch_lock_owner(
+        expected_owner, sizeof(expected_owner), batch_id, plan_hash, nonce,
+        pid, start_seconds, start_microseconds
+    );
+    if (expected_owner_length < 0) return -1;
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return -1;
+    }
+    int quarantine_fd = open_private_agents_directory(home_fd, "skills-quarantine", 0);
+    int batches_fd = quarantine_fd < 0
+        ? -1 : open_relative_directory(quarantine_fd, "batches", 0, 1);
+    int batch_fd = batches_fd < 0 ? -1
+        : openat(batches_fd, batch_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (batches_fd >= 0) close(batches_fd);
+    close(home_fd);
+    if (quarantine_fd < 0 || batch_fd < 0 || verify_directory_fd(batch_fd, 1) != 0
+        || flock(batch_fd, LOCK_EX | LOCK_NB) != 0) {
+        if (quarantine_fd >= 0) close(quarantine_fd);
+        if (batch_fd >= 0) close(batch_fd);
+        return -1;
+    }
+    unsigned char *observed_owner = NULL;
+    size_t observed_owner_length = 0U;
+    int owner_valid = read_lock_owner(quarantine_fd, &observed_owner, &observed_owner_length) == 0
+        && observed_owner_length == (size_t)expected_owner_length
+        && memcmp(observed_owner, expected_owner, observed_owner_length) == 0;
+    free(observed_owner);
+    if (!owner_valid) {
+        close(quarantine_fd);
+        close(batch_fd);
+        return -1;
+    }
+    *quarantine_fd_out = quarantine_fd;
+    *batch_fd_out = batch_fd;
+    return 0;
+}
+
+static int batch_state_cas_v1(const char *home_path, const char *batch_id,
+                              const char *plan_hash, const char *expected_state_hash,
+                              const char *nonce, const char *pid_value,
+                              const char *start_seconds_value,
+                              const char *start_microseconds_value,
+                              const char *expected_sequence_value,
+                              const char *next_sequence_value) {
+    pid_t pid;
+    uint64_t start_seconds;
+    uint64_t start_microseconds;
+    unsigned long long expected_sequence;
+    unsigned long long next_sequence;
+    if (!valid_sha256_identifier(batch_id) || !valid_sha256_identifier(plan_hash)
+        || !valid_sha256_identifier(expected_state_hash) || !valid_lower_hex(nonce, 64U)
+        || parse_pid(pid_value, &pid) != 0
+        || parse_process_start(start_seconds_value, start_microseconds_value,
+                               &start_seconds, &start_microseconds) != 0
+        || parse_safe_sequence(expected_sequence_value, &expected_sequence) != 0
+        || parse_safe_sequence(next_sequence_value, &next_sequence) != 0) {
+        return emit_error("invalid_batch_state_lease");
+    }
+    unsigned char *next_state = NULL;
+    size_t next_state_length = 0U;
+    if (read_bounded_stdin(&next_state, &next_state_length) != 0 || next_state_length == 0U) {
+        free(next_state);
+        return emit_error("state_input_invalid");
+    }
+    int quarantine_fd = -1;
+    int batch_fd = -1;
+    if (open_verified_batch_lease(
+            home_path, batch_id, plan_hash, nonce, pid, start_seconds, start_microseconds,
+            &quarantine_fd, &batch_fd
+        ) != 0) {
+        free(next_state);
+        return emit_error("batch_state_lease_mismatch");
+    }
+    close(quarantine_fd);
+    enum state_cas_result result = replace_state_record_cas(
+        batch_fd, expected_state_hash, expected_sequence, next_sequence,
+        next_state, next_state_length
+    );
+    free(next_state);
+    close(batch_fd);
+    return emit_scoped_state_cas_result(result, "batch-state-cas-v1");
+}
+
+static int valid_mapping_item_id(const char *item_id) {
+    return valid_sha256_identifier(item_id);
+}
+
+static int transaction_advance_batch_v2(
+    const char *home_path,
+    const char *batch_id,
+    const char *transaction_id,
+    const char *plan_hash,
+    const char *batch_plan_hash,
+    const char *item_id,
+    const char *item_hash,
+    const char *execution_identity_hash,
+    const char *expected_state_hash,
+    const char *nonce,
+    const char *pid_value,
+    const char *start_seconds_value,
+    const char *start_microseconds_value,
+    const char *expected_sequence_value,
+    const char *next_sequence_value
+) {
+    pid_t pid;
+    uint64_t start_seconds;
+    uint64_t start_microseconds;
+    unsigned long long expected_sequence;
+    unsigned long long next_sequence;
+    if (!valid_sha256_identifier(batch_id) || !valid_sha256_identifier(transaction_id)
+        || strcmp(batch_id, transaction_id) == 0 || !valid_sha256_identifier(plan_hash)
+        || !valid_sha256_identifier(batch_plan_hash) || !valid_sha256_identifier(item_hash)
+        || !valid_sha256_identifier(execution_identity_hash)
+        || !valid_sha256_identifier(expected_state_hash) || !valid_mapping_item_id(item_id)
+        || !valid_lower_hex(nonce, 64U) || parse_pid(pid_value, &pid) != 0
+        || parse_process_start(start_seconds_value, start_microseconds_value,
+                               &start_seconds, &start_microseconds) != 0
+        || parse_safe_sequence(expected_sequence_value, &expected_sequence) != 0
+        || parse_safe_sequence(next_sequence_value, &next_sequence) != 0) {
+        return emit_error("invalid_batch_transaction_lease");
+    }
+    unsigned char *next_state = NULL;
+    size_t next_state_length = 0U;
+    if (read_bounded_stdin(&next_state, &next_state_length) != 0 || next_state_length == 0U) {
+        free(next_state);
+        return emit_error("state_input_invalid");
+    }
+    int quarantine_fd = -1;
+    int batch_fd = -1;
+    if (open_verified_batch_lease(
+            home_path, batch_id, plan_hash, nonce, pid, start_seconds, start_microseconds,
+            &quarantine_fd, &batch_fd
+        ) != 0) {
+        free(next_state);
+        return emit_error("batch_state_lease_mismatch");
+    }
+    unsigned char *batch_plan = NULL;
+    size_t batch_plan_length = 0U;
+    int batch_plan_fd = openat(batch_fd, "plan.json", O_RDONLY | O_NOFOLLOW);
+    struct stat batch_plan_status;
+    char observed_batch_plan_hash[SHA256_HEX_BYTES];
+    int batch_plan_valid = batch_plan_fd >= 0 && fstat(batch_plan_fd, &batch_plan_status) == 0
+        && S_ISREG(batch_plan_status.st_mode) && batch_plan_status.st_uid == getuid()
+        && (batch_plan_status.st_mode & 0777) == 0600
+        && read_regular_fd_bounded(
+            batch_plan_fd, &batch_plan, &batch_plan_length,
+            observed_batch_plan_hash, MAX_INPUT_BYTES
+        ) == 0
+        && strcmp(batch_plan_hash + 7U, observed_batch_plan_hash) == 0;
+    if (batch_plan_fd >= 0) close(batch_plan_fd);
+    char mapping[1024];
+    int mapping_length = snprintf(
+        mapping, sizeof(mapping),
+        "{\"execution_identity_hash\":\"%s\",\"item_hash\":\"%s\","
+        "\"item_id\":\"%s\",\"transaction_id\":\"%s\"}",
+        execution_identity_hash, item_hash, item_id, transaction_id
+    );
+    unsigned char *mapping_position = batch_plan_valid && mapping_length > 0
+        && (size_t)mapping_length < sizeof(mapping)
+        ? memmem(batch_plan, batch_plan_length, mapping, (size_t)mapping_length) : NULL;
+    int mapping_unique = mapping_position != NULL
+        && memmem(
+            mapping_position + 1U,
+            batch_plan_length - (size_t)(mapping_position + 1U - batch_plan),
+            mapping,
+            (size_t)mapping_length
+        ) == NULL;
+    free(batch_plan);
+    if (!batch_plan_valid || !mapping_unique) {
+        close(quarantine_fd);
+        close(batch_fd);
+        free(next_state);
+        return emit_recovery_required("batch_mapping_invalid");
+    }
+    int transactions_fd = open_relative_directory(quarantine_fd, "transactions", 0, 1);
+    int transaction_fd = transactions_fd < 0 ? -1
+        : openat(transactions_fd, transaction_id + 7U, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (transactions_fd >= 0) close(transactions_fd);
+    close(quarantine_fd);
+    if (transaction_fd < 0 || verify_directory_fd(transaction_fd, 1) != 0
+        || flock(transaction_fd, LOCK_EX | LOCK_NB) != 0) {
+        if (transaction_fd >= 0) close(transaction_fd);
+        close(batch_fd);
+        free(next_state);
+        return emit_recovery_required("transaction_records_unavailable");
+    }
+    char expected_binding[2048];
+    int expected_binding_length = snprintf(
+        expected_binding, sizeof(expected_binding),
+        "{\"batch_id\":\"%s\",\"execution_identity_hash\":\"%s\","
+        "\"item_hash\":\"%s\",\"item_id\":\"%s\",\"plan_hash\":\"%s\","
+        "\"schema_version\":\"skills-refiner.cleanup.batch-binding.v1\","
+        "\"transaction_id\":\"%s\"}",
+        batch_id, execution_identity_hash, item_hash, item_id, plan_hash, transaction_id
+    );
+    unsigned char *observed_binding = NULL;
+    size_t observed_binding_length = 0U;
+    int binding_valid = expected_binding_length > 0
+        && (size_t)expected_binding_length < sizeof(expected_binding)
+        && read_transaction_record(
+            transaction_fd, "binding.json", &observed_binding, &observed_binding_length
+        ) == 0
+        && observed_binding_length == (size_t)expected_binding_length
+        && memcmp(observed_binding, expected_binding, observed_binding_length) == 0;
+    free(observed_binding);
+    if (!binding_valid) {
+        close(transaction_fd);
+        close(batch_fd);
+        free(next_state);
+        return emit_recovery_required("batch_binding_invalid");
+    }
+    enum state_cas_result result = replace_state_record_cas(
+        transaction_fd, expected_state_hash, expected_sequence, next_sequence,
+        next_state, next_state_length
+    );
+    free(next_state);
+    close(transaction_fd);
+    close(batch_fd);
+    return emit_scoped_state_cas_result(result, "transaction-advance-batch-v2");
+}
+
+static int open_state_directory(const char *home_path, const char *role,
+                                const char *relative_directory, int create,
+                                int *directory_fd_out) {
+    const char *root_relative = role_root(role);
+    if (root_relative == NULL) return -1;
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return -1;
+    }
+    int root_fd = open_private_agents_directory(home_fd, root_relative, create);
+    int directory_fd = root_fd;
+    if (root_fd >= 0 && strcmp(relative_directory, ".") != 0) {
+        directory_fd = open_relative_directory(root_fd, relative_directory, create, 1);
+        close(root_fd);
+    }
+    close(home_fd);
+    if (directory_fd < 0) return -1;
+    *directory_fd_out = directory_fd;
+    return 0;
+}
+
+static int relative_directory_is_missing(int base_fd, const char *relative) {
+    char *copy = strdup(relative);
+    if (copy == NULL) return -1;
+    int current = dup(base_fd);
+    if (current < 0) {
+        free(copy);
+        return -1;
+    }
+    int result = 0;
+    char *cursor = copy;
+    while (*cursor != '\0') {
+        char *separator = strchr(cursor, '/');
+        if (separator != NULL) *separator = '\0';
+        if (!valid_component(cursor)) {
+            result = -1;
+            break;
+        }
+        int next = openat(current, cursor, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (next < 0) {
+            result = errno == ENOENT ? 1 : -1;
+            break;
+        }
+        close(current);
+        current = next;
+        if (separator == NULL) break;
+        cursor = separator + 1U;
+    }
+    close(current);
+    free(copy);
+    return result;
+}
+
+static int probe_state_v1(const char *home_path, const char *role,
+                          const char *relative_directory, const char *leaf) {
+    if (strcmp(role, "cleanup") != 0 || strcmp(relative_directory, ".") != 0
+        || strcmp(leaf, "keep-decisions.json") != 0) {
+        return emit_error("invalid_keep_surface");
+    }
+    int directory_fd = -1;
+    if (open_state_directory(home_path, role, relative_directory, 0, &directory_fd) != 0) {
+        const char *root_relative = role_root(role);
+        int home_fd = open_absolute_directory(home_path);
+        char combined[PATH_MAX + 1U];
+        int combined_length = root_relative == NULL ? -1 : snprintf(
+            combined, sizeof(combined), ".agents/%s%s%s",
+            root_relative,
+            strcmp(relative_directory, ".") == 0 ? "" : "/",
+            strcmp(relative_directory, ".") == 0 ? "" : relative_directory
+        );
+        int missing = home_fd >= 0 && combined_length > 0
+            && (size_t)combined_length < sizeof(combined)
+            ? relative_directory_is_missing(home_fd, combined) : -1;
+        if (home_fd >= 0) close(home_fd);
+        if (missing == 1) {
+            printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"probe-state-v1\","
+                   "\"exists\":false,\"digest\":null,\"state_base64\":null}\n",
+                   HELPER_PROTOCOL);
+            return 0;
+        }
+        return emit_error("unsafe_state_source");
+    }
+    struct stat status;
+    if (fstatat(directory_fd, leaf, &status, AT_SYMLINK_NOFOLLOW) != 0) {
+        int missing = errno == ENOENT;
+        close(directory_fd);
+        if (!missing) return emit_error("unsafe_state_source");
+        printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"probe-state-v1\","
+               "\"exists\":false,\"digest\":null,\"state_base64\":null}\n",
+               HELPER_PROTOCOL);
+        return 0;
+    }
+    int fd = openat(directory_fd, leaf, O_RDONLY | O_NOFOLLOW);
+    close(directory_fd);
+    unsigned char *bytes = NULL;
+    size_t length = 0U;
+    char digest[SHA256_HEX_BYTES];
+    int safe = S_ISREG(status.st_mode) && status.st_uid == getuid()
+        && (status.st_mode & 0777) == 0600 && fd >= 0
+        && read_regular_fd_bounded(fd, &bytes, &length, digest, MAX_INPUT_BYTES) == 0;
+    if (fd >= 0) close(fd);
+    if (!safe) {
+        free(bytes);
+        return emit_error("unsafe_state_source");
+    }
+    char *encoded = base64_encode(bytes, length);
+    free(bytes);
+    if (encoded == NULL) return emit_recovery_required("state_probe_unavailable");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"probe-state-v1\","
+           "\"exists\":true,\"digest\":\"sha256:%s\",\"state_base64\":\"%s\"}\n",
+           HELPER_PROTOCOL, digest, encoded);
+    free(encoded);
+    return 0;
+}
+
+static int state_cas_v1(const char *home_path, const char *role,
+                        const char *relative_directory, const char *leaf,
+                        const char *expected_digest) {
+    if (strcmp(role, "cleanup") != 0 || strcmp(relative_directory, ".") != 0
+        || strcmp(leaf, "keep-decisions.json") != 0) {
+        return emit_error("invalid_keep_surface");
+    }
+    if ((strcmp(expected_digest, "absent") != 0
+            && !valid_sha256_identifier(expected_digest))) {
+        return emit_error("invalid_state_cas");
+    }
+    unsigned char *next = NULL;
+    size_t next_length = 0U;
+    if (read_bounded_stdin(&next, &next_length) != 0 || next_length == 0U) {
+        free(next);
+        return emit_error("state_input_invalid");
+    }
+    int directory_fd = -1;
+    if (open_state_directory(home_path, role, relative_directory, 1, &directory_fd) != 0) {
+        free(next);
+        return emit_error("unsafe_state_destination");
+    }
+    if (flock(directory_fd, LOCK_EX | LOCK_NB) != 0) {
+        int lock_errno = errno;
+        close(directory_fd);
+        free(next);
+        if (lock_errno == EWOULDBLOCK || lock_errno == EAGAIN) {
+            return emit_error("state_cas_lock_held");
+        }
+        return emit_recovery_required("state_cas_lock_unavailable");
+    }
+    struct stat status;
+    int exists = fstatat(directory_fd, leaf, &status, AT_SYMLINK_NOFOLLOW) == 0;
+    int observed_errno = errno;
+    int matches = 0;
+    if (!exists && observed_errno == ENOENT) {
+        matches = strcmp(expected_digest, "absent") == 0;
+    } else if (exists && S_ISREG(status.st_mode) && status.st_uid == getuid()
+               && (status.st_mode & 0777) == 0600) {
+        int current_fd = openat(directory_fd, leaf, O_RDONLY | O_NOFOLLOW);
+        unsigned char *current = NULL;
+        size_t current_length = 0U;
+        char current_digest[SHA256_HEX_BYTES];
+        int readable = current_fd >= 0 && read_regular_fd_bounded(
+            current_fd, &current, &current_length, current_digest, MAX_INPUT_BYTES
+        ) == 0;
+        if (current_fd >= 0) close(current_fd);
+        free(current);
+        if (!readable) {
+            close(directory_fd);
+            free(next);
+            return emit_error("unsafe_state_source");
+        }
+        matches = valid_sha256_identifier(expected_digest)
+            && strcmp(expected_digest + 7U, current_digest) == 0;
+    } else {
+        close(directory_fd);
+        free(next);
+        return emit_error("unsafe_state_source");
+    }
+    if (!matches) {
+        close(directory_fd);
+        free(next);
+        return emit_error("state_cas_mismatch");
+    }
+    sha256_context digest_context;
+    unsigned char digest_bytes[32];
+    char digest[SHA256_HEX_BYTES];
+    sha256_init(&digest_context);
+    sha256_update(&digest_context, next, next_length);
+    sha256_final(&digest_context, digest_bytes);
+    digest_hex(digest_bytes, digest);
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(
+        temporary, sizeof(temporary), ".skills-refiner-state-%ld-%08x",
+        (long)getpid(), arc4random()
+    );
+    int temporary_fd = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1 : openat(directory_fd, temporary, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+    int result = temporary_fd < 0 || fchmod(temporary_fd, 0600) != 0 ? -1 : 0;
+    size_t written = 0U;
+    while (result == 0 && written < next_length) {
+        ssize_t part = write(temporary_fd, next + written, next_length - written);
+        if (part <= 0) result = -1;
+        else written += (size_t)part;
+    }
+    if (temporary_fd >= 0) {
+        int durable = result == 0 && fsync(temporary_fd) == 0;
+        int closed = close(temporary_fd) == 0;
+        if (!durable || !closed) result = -1;
+    }
+    int published = 0;
+    if (result == 0 && renameat(directory_fd, temporary, directory_fd, leaf) == 0) published = 1;
+    else if (result == 0) result = -1;
+    if (result == 0 && fsync(directory_fd) != 0) result = -1;
+    if (!published) unlinkat(directory_fd, temporary, 0);
+    close(directory_fd);
+    free(next);
+    if (result != 0 && published) return emit_recovery_required("state_durability_unknown");
+    if (result != 0) return emit_error("state_publish_failed");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"state-cas-v1\","
+           "\"digest\":\"sha256:%s\"}\n", HELPER_PROTOCOL, digest);
+    return 0;
+}
+
 static int directory_has_git_marker(int directory_fd) {
     struct stat marker;
     if (fstatat(directory_fd, ".git", &marker, AT_SYMLINK_NOFOLLOW) == 0) return 1;
@@ -2122,7 +3344,9 @@ static int reconcile_leaf(int parent_fd, const char *leaf,
         return 0;
     }
     entry_identity identity;
-    enum identity_result identity_status = calculate_entry_identity(parent_fd, leaf, &status, &identity);
+    enum identity_result identity_status = calculate_entry_identity(
+        parent_fd, leaf, &status, &identity, 1
+    );
     if (identity_status != IDENTITY_OK) {
         *matches = 0;
         return 0;
@@ -2291,7 +3515,8 @@ static int rename_exclusive(const char *home_path, const char *active_root, cons
         source_fd,
         source_leaf,
         &source_before,
-        &current_identity
+        &current_identity,
+        1
     );
     if (identity_status == IDENTITY_AUTHORING_SOURCE) {
         close(source_fd);
@@ -2331,7 +3556,9 @@ static int rename_exclusive(const char *home_path, const char *active_root, cons
     ) == 0
         && source_revalidated.st_dev == source_before.st_dev
         && source_revalidated.st_ino == source_before.st_ino
-        ? calculate_entry_identity(source_fd, source_leaf, &source_revalidated, &revalidated_identity)
+        ? calculate_entry_identity(
+            source_fd, source_leaf, &source_revalidated, &revalidated_identity, 1
+        )
         : IDENTITY_UNAVAILABLE;
     char revalidated_manifest[sizeof("sha256:") + SHA256_HEX_BYTES];
     int revalidated_manifest_length = revalidated_status == IDENTITY_OK
@@ -2400,7 +3627,9 @@ static int rename_exclusive(const char *home_path, const char *active_root, cons
                 && source_conflict.st_ino == source_before.st_ino;
             entry_identity conflict_identity;
             enum identity_result conflict_status = source_matches
-                ? calculate_entry_identity(source_fd, source_leaf, &source_conflict, &conflict_identity)
+                ? calculate_entry_identity(
+                    source_fd, source_leaf, &source_conflict, &conflict_identity, 1
+                )
                 : IDENTITY_UNAVAILABLE;
             char conflict_manifest[sizeof("sha256:") + SHA256_HEX_BYTES];
             int conflict_manifest_length = conflict_status == IDENTITY_OK
@@ -2430,7 +3659,9 @@ static int rename_exclusive(const char *home_path, const char *active_root, cons
         && destination_after.st_dev == source_before.st_dev && destination_after.st_ino == source_before.st_ino;
     entry_identity destination_identity;
     enum identity_result destination_status = destination_matches
-        ? calculate_entry_identity(destination_fd, destination_leaf, &destination_after, &destination_identity)
+        ? calculate_entry_identity(
+            destination_fd, destination_leaf, &destination_after, &destination_identity, 1
+        )
         : IDENTITY_UNAVAILABLE;
     char destination_manifest[sizeof("sha256:") + SHA256_HEX_BYTES];
     int destination_manifest_length = destination_status == IDENTITY_OK
@@ -2633,7 +3864,10 @@ int main(int argument_count, char **arguments) {
     const char *command = arguments[1];
     if (strcmp(command, "identity") == 0 && argument_count == 2) return emit_identity();
     if (strcmp(command, "inspect") == 0 && argument_count == 5) {
-        return inspect_entry(arguments[2], arguments[3], arguments[4]);
+        return inspect_entry(arguments[2], arguments[3], arguments[4], 0);
+    }
+    if (strcmp(command, "inspect-observation-v1") == 0 && argument_count == 5) {
+        return inspect_entry(arguments[2], arguments[3], arguments[4], 1);
     }
     if (strcmp(command, "hash-install-receipt") == 0 && argument_count == 3) {
         return hash_install_receipt(arguments[2]);
@@ -2647,11 +3881,31 @@ int main(int argument_count, char **arguments) {
     if (strcmp(command, "transaction-init") == 0 && argument_count == 4) {
         return transaction_init(arguments[2], arguments[3]);
     }
+    if (strcmp(command, "transaction-init-batch-v2") == 0 && argument_count == 4) {
+        return transaction_init_batch_v2(arguments[2], arguments[3]);
+    }
+    if (strcmp(command, "batch-init-v1") == 0 && argument_count == 4) {
+        return batch_init_v1(arguments[2], arguments[3]);
+    }
+    if (strcmp(command, "probe-batch-v1") == 0 && argument_count == 4) {
+        return probe_batch_v1(arguments[2], arguments[3]);
+    }
     if (strcmp(command, "probe-transaction") == 0 && argument_count == 4) {
         return probe_transaction(arguments[2], arguments[3]);
     }
+    if (strcmp(command, "probe-transaction-batch-v2") == 0 && argument_count == 4) {
+        return probe_transaction_batch_v2(arguments[2], arguments[3]);
+    }
+    if (strcmp(command, "probe-transaction-kind-v1") == 0 && argument_count == 4) {
+        return probe_transaction_kind_v1(arguments[2], arguments[3]);
+    }
     if (strcmp(command, "lock-acquire") == 0 && argument_count == 7) {
         return lock_acquire(arguments[2], arguments[3], arguments[4], arguments[5], arguments[6]);
+    }
+    if (strcmp(command, "batch-lock-acquire-v1") == 0 && argument_count == 7) {
+        return batch_lock_acquire_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6]
+        );
     }
     if (strcmp(command, "lock-release") == 0 && argument_count == 9) {
         return move_lock_to_transaction(
@@ -2665,10 +3919,43 @@ int main(int argument_count, char **arguments) {
             arguments[7], arguments[8], 1
         );
     }
+    if (strcmp(command, "batch-lock-release-v1") == 0 && argument_count == 9) {
+        return move_batch_lock_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], 0
+        );
+    }
+    if (strcmp(command, "batch-lock-isolate-stale-v1") == 0 && argument_count == 9) {
+        return move_batch_lock_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], 1
+        );
+    }
     if (strcmp(command, "transaction-advance") == 0 && argument_count == 12) {
         return transaction_advance(
             arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
             arguments[7], arguments[8], arguments[9], arguments[10], arguments[11]
+        );
+    }
+    if (strcmp(command, "batch-state-cas-v1") == 0 && argument_count == 12) {
+        return batch_state_cas_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], arguments[9], arguments[10], arguments[11]
+        );
+    }
+    if (strcmp(command, "transaction-advance-batch-v2") == 0 && argument_count == 17) {
+        return transaction_advance_batch_v2(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], arguments[9], arguments[10], arguments[11],
+            arguments[12], arguments[13], arguments[14], arguments[15], arguments[16]
+        );
+    }
+    if (strcmp(command, "probe-state-v1") == 0 && argument_count == 6) {
+        return probe_state_v1(arguments[2], arguments[3], arguments[4], arguments[5]);
+    }
+    if (strcmp(command, "state-cas-v1") == 0 && argument_count == 7) {
+        return state_cas_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6]
         );
     }
     if (strcmp(command, "reconcile") == 0 && argument_count == 10) {

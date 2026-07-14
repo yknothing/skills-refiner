@@ -26,13 +26,32 @@ import test from 'node:test';
 import {
   MacosAdapterError,
   __testing,
+  acquireBatchLock,
+  advanceBatchStateRecord,
+  advanceTransactionStateUnderBatchLease,
+  compareAndSwapDurableJson,
   createMacosAdapter,
   durableWriteJson,
   ensureMacosHelper,
   ensureReferencedMacosHelper,
+  initializeBatchRecords,
+  initializeBatchTransactionRecords,
+  initializeTransactionRecords,
+  isolateStaleBatchLock,
+  probeBatchRecords,
+  probeBatchTransactionRecords,
+  probeDurableJson,
+  probeTransactionRecords,
+  probeTransactionKind,
+  releaseBatchLock,
   renameExclusive,
 } from '../lib/cleanup-macos.mjs';
-import { validatePlan } from '../lib/cleanup-contract.mjs';
+import {
+  canonicalJson,
+  computeIdentityHash,
+  validateObservationIdentity,
+  validatePlan,
+} from '../lib/cleanup-contract.mjs';
 import { compilePlan, compileReview } from '../lib/cleanup-core.mjs';
 import {
   makeSandbox,
@@ -96,6 +115,41 @@ function gitTreeSha1(home, entryPath) {
 
 function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function sha256Json(value) {
+  return `sha256:${createHash('sha256').update(canonicalJson(value)).digest('hex')}`;
+}
+
+function helperExecutionIdentity(homePath) {
+  const helper = ensureMacosHelper({ home: homePath });
+  const identity = {
+    schema_version: 'skills-refiner.cleanup.identity.v1',
+    adapter: 'macos-native.v1',
+    entry_path: join(homePath, '.agents/skills/runtime-authority-link'),
+    active_root: join(homePath, '.agents/skills'),
+    entry_kind: 'symlink',
+    source_hash: `sha256:${helper.sourceHash}`,
+    binary_hash: `sha256:${helper.binaryHash}`,
+    architecture: helper.architecture,
+    compiler_path: helper.compilerPath,
+    compiler_version: helper.compilerVersion,
+    helper_protocol: helper.helperProtocol,
+    cache_path: helper.cachePath,
+    device: '1',
+    inode: '1',
+    mode: 0o777,
+    uid: process.getuid(),
+    gid: process.getgid(),
+    flags: 0,
+    manifest_hash: `sha256:${'1'.repeat(64)}`,
+    security_metadata_hash: `sha256:${'2'.repeat(64)}`,
+    raw_link_target_base64: Buffer.from('../runtime-authority').toString('base64'),
+    receipt_sha256: null,
+    installed_tree_sha1: null,
+  };
+  identity.identity_hash = computeIdentityHash(identity);
+  return identity;
 }
 
 function symlinkCandidate(entryPath, activeRoot, target, entryKind = 'symlink') {
@@ -511,6 +565,10 @@ test('real nested mounts and cross-device quarantine moves fail closed', async (
 test('Git roots, ancestor worktrees, .git files, and proven sources remain review-only', async () => {
   const gitSkill = writeSkill(join(home, '.codex/skills/git-authored'));
   initializeRepository(home, gitSkill);
+  const observation = await adapter.inspectIdentity(gitSkill, join(home, '.codex/skills'));
+  assert.equal(validateObservationIdentity(observation), observation);
+  assert.equal(Object.hasOwn(observation, 'receipt_sha256'), false);
+  assert.equal(Object.hasOwn(observation, 'installed_tree_sha1'), false);
   await assert.rejects(
     adapter.inspectForPlan(gitSkill, join(home, '.codex/skills'), installedCandidate(
       gitSkill,
@@ -609,6 +667,50 @@ test('Git roots, ancestor worktrees, .git files, and proven sources remain revie
       'b'.repeat(40),
     )),
     expectAdapterError('review_only', 'authoring_source'),
+  );
+});
+
+test('observation identity cannot authorize rename or transaction record mutation', async () => {
+  const activeRoot = join(home, '.codex/skills');
+  const entryPath = writeSkill(join(activeRoot, 'observation-authority'));
+  initializeRepository(home, entryPath);
+  const observation = await adapter.inspectIdentity(entryPath, activeRoot);
+  const transactionId = `sha256:${'2'.repeat(64)}`;
+  assert.throws(
+    () => renameExclusive({
+      home,
+      activeRoot,
+      entryPath,
+      destinationRelativeDirectory: `transactions/${transactionId.slice(7)}/payload`,
+      destinationLeaf: 'opaque-item',
+      expectedIdentity: observation,
+    }),
+    expectAdapterError('blocked', 'invalid_mutation_identity'),
+  );
+  assert.equal(existsSync(entryPath), true);
+  assert.throws(
+    () => initializeTransactionRecords({
+      home,
+      transactionId,
+      plan: { schema_version: 'fixture.tx-plan.v1' },
+      manifest: { schema_version: 'fixture.tx-manifest.v1', transaction_id: transactionId },
+      state: { schema_version: 'fixture.tx-state.v1', sequence: 0, state: 'PREPARED' },
+      executionIdentity: observation,
+    }),
+    expectAdapterError('blocked', 'invalid_mutation_identity'),
+  );
+  assert.equal(existsSync(join(
+    home, '.agents/skills-quarantine/transactions', transactionId.slice(7),
+  )), false);
+  assert.throws(
+    () => initializeBatchRecords({
+      home,
+      batchId: `sha256:${'3'.repeat(64)}`,
+      plan: { schema_version: 'fixture.batch-plan.v1' },
+      state: { schema_version: 'fixture.batch-state.v1', sequence: 0, state: 'READY' },
+      executionIdentity: observation,
+    }),
+    expectAdapterError('blocked', 'invalid_mutation_identity'),
   );
 });
 
@@ -988,7 +1090,7 @@ test('exclusive rename binds expected identity and never replaces an occupied de
       destinationLeaf: 'opaque-item',
       expectedIdentity: { ...secondIdentity, inode: '0' },
     })),
-    expectAdapterError('blocked', 'identity_changed'),
+    expectAdapterError('blocked', 'invalid_mutation_identity'),
   );
   assert.equal(readlinkSync(secondEntry), source);
 
@@ -1190,4 +1292,534 @@ test('exclusive rename never clobbers a concurrent destination creator', async (
     assert.equal(readFileSync(destination, 'utf8'), 'competitor bytes');
     assert.equal(readlinkSync(entryPath), source);
   }
+});
+
+test('versioned batch records and lease advance batch and mapped item state independently', () => {
+  const identity = helperExecutionIdentity(home);
+  const batchId = `sha256:${'b'.repeat(64)}`;
+  const transactionId = `sha256:${'c'.repeat(64)}`;
+  const planHash = `sha256:${'d'.repeat(64)}`;
+  const itemId = `sha256:${'0'.repeat(64)}`;
+  const itemHash = `sha256:${'3'.repeat(64)}`;
+  const executionIdentityHash = `sha256:${'4'.repeat(64)}`;
+  const batchPlan = {
+    schema_version: 'skills-refiner.cleanup.batch-plan.v1',
+    batch_id: batchId,
+    plan_hash: planHash,
+    transaction_map: [{
+      execution_identity_hash: executionIdentityHash,
+      item_hash: itemHash,
+      item_id: itemId,
+      transaction_id: transactionId,
+    }],
+  };
+  const batchState = {
+    schema_version: 'skills-refiner.cleanup.batch-state.v1',
+    sequence: 0,
+    state: 'READY',
+  };
+  const transactionState = { schema_version: 'fixture.tx-state.v1', sequence: 0, state: 'PREPARED' };
+
+  assert.equal(initializeBatchRecords({
+    home, batchId, plan: batchPlan, state: batchState, executionIdentity: identity,
+  }).operation, 'batch-init-v1');
+  assert.equal(initializeBatchRecords({
+    home, batchId, plan: batchPlan, state: batchState, executionIdentity: identity,
+  }).result, 'existing');
+  assert.deepEqual(probeBatchRecords({ home, batchId, executionIdentity: identity }), {
+    plan: batchPlan,
+    state: batchState,
+    lock: null,
+  });
+  const binding = {
+    schema_version: 'skills-refiner.cleanup.batch-binding.v1',
+    batch_id: batchId,
+    execution_identity_hash: executionIdentityHash,
+    item_hash: itemHash,
+    item_id: itemId,
+    plan_hash: planHash,
+    transaction_id: transactionId,
+  };
+  initializeBatchTransactionRecords({
+    home,
+    transactionId,
+    plan: { schema_version: 'fixture.tx-plan.v1' },
+    manifest: {
+      schema_version: 'fixture.tx-manifest.v1', transaction_id: transactionId,
+      execution_identity: identity,
+    },
+    state: transactionState,
+    binding,
+    executionIdentity: identity,
+  });
+  assert.deepEqual(probeBatchTransactionRecords({
+    home, transactionId, executionIdentity: identity,
+  }).binding, binding);
+  assert.equal(probeTransactionKind({
+    home, transactionId, executionIdentity: identity,
+  }), 'batch_v2');
+
+  const owner = acquireBatchLock({ home, batchId, planHash, executionIdentity: identity });
+  assert.equal(owner.scope, 'batch');
+  assert.equal(owner.batch_id, batchId);
+  assert.equal(owner.transaction_id, undefined);
+  const nextBatchState = { ...batchState, sequence: 1, state: 'RUNNING' };
+  assert.deepEqual(advanceBatchStateRecord({
+    home, batchId, planHash, currentState: batchState, nextState: nextBatchState,
+    owner, executionIdentity: identity,
+  }).state, nextBatchState);
+  const nextTransactionState = { ...transactionState, sequence: 1, state: 'COMMITTED' };
+  assert.deepEqual(advanceTransactionStateUnderBatchLease({
+    home, batchId, itemId, itemHash, executionIdentityHash,
+    transactionId, planHash, batchPlan,
+    currentState: transactionState, nextState: nextTransactionState,
+    owner, executionIdentity: identity,
+  }).state, nextTransactionState);
+  assert.throws(
+    () => isolateStaleBatchLock({
+      home, batchId, planHash, owner, executionIdentity: identity,
+    }),
+    expectAdapterError('blocked', 'lock_live'),
+  );
+  assert.equal(existsSync(join(home, '.agents/skills-quarantine/lock')), true);
+  assert.equal(releaseBatchLock({
+    home, batchId, planHash, owner, executionIdentity: identity,
+  }).operation, 'batch-lock-release-v1');
+  assert.equal(existsSync(join(
+    home, '.agents/skills-quarantine/batches', batchId.slice(7),
+    `released-lock-${owner.nonce}`,
+  )), true);
+});
+
+test('batch leases cannot advance a transaction absent from the immutable mapping', () => {
+  const identity = helperExecutionIdentity(home);
+  const batchId = `sha256:${'e'.repeat(64)}`;
+  const mappedTransactionId = `sha256:${'f'.repeat(64)}`;
+  const otherTransactionId = `sha256:${'1'.repeat(64)}`;
+  const planHash = `sha256:${'2'.repeat(64)}`;
+  const itemHash = `sha256:${'5'.repeat(64)}`;
+  const executionIdentityHash = `sha256:${'6'.repeat(64)}`;
+  const itemId = `sha256:${'0'.repeat(64)}`;
+  const batchPlan = {
+    schema_version: 'skills-refiner.cleanup.batch-plan.v1', batch_id: batchId, plan_hash: planHash,
+    transaction_map: [{
+      execution_identity_hash: executionIdentityHash,
+      item_hash: itemHash,
+      item_id: itemId,
+      transaction_id: mappedTransactionId,
+    }],
+  };
+  const batchState = { schema_version: 'fixture.batch-state.v1', sequence: 0, state: 'READY' };
+  initializeBatchRecords({
+    home, batchId, plan: batchPlan, state: batchState, executionIdentity: identity,
+  });
+  const owner = acquireBatchLock({ home, batchId, planHash, executionIdentity: identity });
+  const state = { schema_version: 'fixture.tx-state.v1', sequence: 0, state: 'PREPARED' };
+  initializeBatchTransactionRecords({
+    home,
+    transactionId: otherTransactionId,
+    plan: { schema_version: 'fixture.tx-plan.v1' },
+    manifest: {
+      schema_version: 'fixture.tx-manifest.v1', transaction_id: otherTransactionId,
+      execution_identity: identity,
+    },
+    state,
+    binding: {
+      schema_version: 'skills-refiner.cleanup.batch-binding.v1',
+      batch_id: batchId,
+      execution_identity_hash: executionIdentityHash,
+      item_hash: itemHash,
+      item_id: itemId,
+      plan_hash: planHash,
+      transaction_id: otherTransactionId,
+    },
+    executionIdentity: identity,
+  });
+  assert.throws(
+    () => advanceTransactionStateUnderBatchLease({
+      home, batchId, itemId, itemHash, executionIdentityHash,
+      transactionId: otherTransactionId, planHash, batchPlan,
+      currentState: state, nextState: { ...state, sequence: 1, state: 'COMMITTED' },
+      owner, executionIdentity: identity,
+    }),
+    expectAdapterError('recovery_required', 'batch_mapping_invalid'),
+  );
+  assert.deepEqual(probeTransactionRecords({
+    home, transactionId: otherTransactionId, executionIdentity: identity,
+  }).state, state);
+  releaseBatchLock({ home, batchId, planHash, owner, executionIdentity: identity });
+});
+
+test('transaction kind is explicit and unsafe binding metadata fails closed', () => {
+  const identity = helperExecutionIdentity(home);
+  const standaloneId = `sha256:${'7'.repeat(64)}`;
+  const state = { schema_version: 'fixture.tx-state.v1', sequence: 0, state: 'PREPARED' };
+  initializeTransactionRecords({
+    home,
+    transactionId: standaloneId,
+    plan: { schema_version: 'fixture.tx-plan.v1' },
+    manifest: { schema_version: 'fixture.tx-manifest.v1', transaction_id: standaloneId },
+    state,
+    executionIdentity: identity,
+  });
+  assert.equal(probeTransactionKind({
+    home, transactionId: standaloneId, executionIdentity: identity,
+  }), 'standalone_v1');
+
+  const batchTransactionId = `sha256:${'8'.repeat(64)}`;
+  initializeBatchTransactionRecords({
+    home,
+    transactionId: batchTransactionId,
+    plan: { schema_version: 'fixture.tx-plan.v1' },
+    manifest: { schema_version: 'fixture.tx-manifest.v1', transaction_id: batchTransactionId },
+    state,
+    binding: {
+      schema_version: 'skills-refiner.cleanup.batch-binding.v1',
+      batch_id: `sha256:${'9'.repeat(64)}`,
+      execution_identity_hash: `sha256:${'a'.repeat(64)}`,
+      item_hash: `sha256:${'b'.repeat(64)}`,
+      item_id: `sha256:${'d'.repeat(64)}`,
+      plan_hash: `sha256:${'c'.repeat(64)}`,
+      transaction_id: batchTransactionId,
+    },
+    executionIdentity: identity,
+  });
+  const bindingPath = join(
+    home, '.agents/skills-quarantine/transactions', batchTransactionId.slice(7), 'binding.json',
+  );
+  unlinkSync(bindingPath);
+  symlinkSync('/dev/null', bindingPath);
+  assert.throws(
+    () => probeTransactionKind({ home, transactionId: batchTransactionId, executionIdentity: identity }),
+    expectAdapterError('recovery_required', 'transaction_kind_ambiguous'),
+  );
+});
+
+test('batch item state does not advance for missing, tampered, or symlinked binding', () => {
+  const identity = helperExecutionIdentity(home);
+  const batchId = `sha256:${'d'.repeat(64)}`;
+  const transactionId = `sha256:${'e'.repeat(64)}`;
+  const planHash = `sha256:${'f'.repeat(64)}`;
+  const itemHash = `sha256:${'0'.repeat(64)}`;
+  const executionIdentityHash = `sha256:${'1'.repeat(64)}`;
+  const itemId = `sha256:${'2'.repeat(64)}`;
+  const mapping = {
+    execution_identity_hash: executionIdentityHash,
+    item_hash: itemHash,
+    item_id: itemId,
+    transaction_id: transactionId,
+  };
+  const batchPlan = {
+    schema_version: 'skills-refiner.cleanup.batch-plan.v1',
+    batch_id: batchId,
+    plan_hash: planHash,
+    transaction_map: [mapping],
+  };
+  initializeBatchRecords({
+    home,
+    batchId,
+    plan: batchPlan,
+    state: { schema_version: 'fixture.batch-state.v1', sequence: 0, state: 'READY' },
+    executionIdentity: identity,
+  });
+  const state = { schema_version: 'fixture.tx-state.v1', sequence: 0, state: 'PREPARED' };
+  initializeBatchTransactionRecords({
+    home,
+    transactionId,
+    plan: { schema_version: 'fixture.tx-plan.v1' },
+    manifest: { schema_version: 'fixture.tx-manifest.v1', transaction_id: transactionId },
+    state,
+    binding: {
+      schema_version: 'skills-refiner.cleanup.batch-binding.v1',
+      batch_id: batchId,
+      execution_identity_hash: executionIdentityHash,
+      item_hash: itemHash,
+      item_id: itemId,
+      plan_hash: planHash,
+      transaction_id: transactionId,
+    },
+    executionIdentity: identity,
+  });
+  const bindingPath = join(
+    home, '.agents/skills-quarantine/transactions', transactionId.slice(7), 'binding.json',
+  );
+  const owner = acquireBatchLock({ home, batchId, planHash, executionIdentity: identity });
+  const attemptAdvance = () => advanceTransactionStateUnderBatchLease({
+      home, batchId, itemId, itemHash, executionIdentityHash,
+      transactionId, planHash, batchPlan, currentState: state,
+      nextState: { ...state, sequence: 1, state: 'COMMITTED' }, owner,
+      executionIdentity: identity,
+    });
+  unlinkSync(bindingPath);
+  assert.throws(
+    attemptAdvance,
+    expectAdapterError('recovery_required', 'batch_binding_invalid'),
+  );
+  writeFileSync(bindingPath, canonicalJson({
+    schema_version: 'skills-refiner.cleanup.batch-binding.v1',
+    batch_id: batchId,
+    execution_identity_hash: executionIdentityHash,
+    item_hash: itemHash,
+    item_id: 'tampered-item',
+    plan_hash: planHash,
+    transaction_id: transactionId,
+  }), { mode: 0o600 });
+  assert.throws(
+    attemptAdvance,
+    expectAdapterError('recovery_required', 'batch_binding_invalid'),
+  );
+  unlinkSync(bindingPath);
+  symlinkSync('/dev/null', bindingPath);
+  assert.throws(
+    attemptAdvance,
+    expectAdapterError('recovery_required', 'batch_binding_invalid'),
+  );
+  assert.deepEqual(JSON.parse(readFileSync(join(dirname(bindingPath), 'state.json'), 'utf8')), state);
+  releaseBatchLock({ home, batchId, planHash, owner, executionIdentity: identity });
+});
+
+test('Keep state probe and digest CAS fail closed and prevent lost updates', () => {
+  const identity = helperExecutionIdentity(home);
+  const options = {
+    home, role: 'cleanup', relativeDirectory: '.', leaf: 'keep-decisions.json',
+    executionIdentity: identity,
+  };
+  assert.deepEqual(probeDurableJson(options), { exists: false, digest: null, value: null });
+  const first = { schema_version: 'fixture.keep.v1', decisions: { a: true } };
+  const firstResult = compareAndSwapDurableJson({ ...options, expectedDigest: null, value: first });
+  assert.equal(firstResult.digest, sha256Json(first));
+  assert.deepEqual(probeDurableJson(options), {
+    exists: true, digest: sha256Json(first), value: first,
+  });
+  const second = { schema_version: 'fixture.keep.v1', decisions: { a: true, b: true } };
+  assert.throws(
+    () => compareAndSwapDurableJson({ ...options, expectedDigest: null, value: second }),
+    expectAdapterError('blocked', 'state_cas_mismatch'),
+  );
+  assert.deepEqual(probeDurableJson(options).value, first);
+
+  const keepPath = join(home, '.agents/skills-refiner/cleanup/keep-decisions.json');
+  writeFileSync(keepPath, '{malformed', { mode: 0o600 });
+  assert.throws(() => probeDurableJson(options), expectAdapterError('blocked', 'state_invalid'));
+  assert.throws(
+    () => compareAndSwapDurableJson({
+      ...options, expectedDigest: `sha256:${'0'.repeat(64)}`, value: second,
+    }),
+    expectAdapterError('blocked', 'state_invalid'),
+  );
+  assert.equal(readFileSync(keepPath, 'utf8'), '{malformed');
+  unlinkSync(keepPath);
+  symlinkSync('/dev/null', keepPath);
+  assert.throws(() => probeDurableJson(options), expectAdapterError('blocked', 'unsafe_state_source'));
+  unlinkSync(keepPath);
+  writeFileSync(keepPath, '{}', { mode: 0o644 });
+  assert.throws(() => probeDurableJson(options), expectAdapterError('blocked', 'unsafe_state_source'));
+  assert.equal(lstatSync(keepPath).mode & 0o777, 0o644);
+
+  for (const override of [
+    { role: 'quarantine' },
+    { relativeDirectory: 'transactions' },
+    { leaf: 'other.json' },
+  ]) {
+    assert.throws(
+      () => probeDurableJson({ ...options, ...override }),
+      expectAdapterError('blocked', 'invalid_keep_surface'),
+    );
+    assert.throws(
+      () => compareAndSwapDurableJson({
+        ...options, ...override, expectedDigest: null, value: first,
+      }),
+      expectAdapterError('blocked', 'invalid_keep_surface'),
+    );
+  }
+  unlinkSync(keepPath);
+});
+
+test('native Keep primitives cannot target quarantine records or arbitrary cleanup files', () => {
+  const helper = ensureMacosHelper({ home });
+  for (const args of [
+    ['probe-state-v1', home, 'quarantine', '.', 'keep-decisions.json'],
+    ['probe-state-v1', home, 'cleanup', 'transactions', 'keep-decisions.json'],
+    ['probe-state-v1', home, 'cleanup', '.', 'other.json'],
+    ['state-cas-v1', home, 'quarantine', '.', 'keep-decisions.json', 'absent'],
+  ]) {
+    const result = spawnSync(helper.path, args, {
+      encoding: 'utf8',
+      env: gitEnvironment(home),
+      input: canonicalJson({ schema_version: 'fixture.keep.v1', decisions: {} }),
+    });
+    assert.equal(result.status, 10);
+    assert.equal(JSON.parse(result.stdout).reason, 'invalid_keep_surface');
+  }
+});
+
+test('Keep CAS returns promptly without writing when its directory lock is held', async () => {
+  const helper = ensureMacosHelper({ home });
+  const cleanupDirectory = join(home, '.agents/skills-refiner/cleanup');
+  mkdirSync(cleanupDirectory, { recursive: true, mode: 0o700 });
+  const lockerPath = join(home, 'directory-locker');
+  const lockerSource = `
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 64;
+    int fd = open(argv[1], O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0 || flock(fd, LOCK_EX) != 0) return 65;
+    if (write(STDOUT_FILENO, "LOCKED\\n", 7) != 7) return 66;
+    char release;
+    while (read(STDIN_FILENO, &release, 1) < 0 && errno == EINTR) {}
+    close(fd);
+    return 0;
+}
+`;
+  const compiled = spawnSync('/usr/bin/xcrun', [
+    'clang', '-std=c11', '-x', 'c', '-', '-o', lockerPath,
+  ], {
+    encoding: 'utf8',
+    env: gitEnvironment(home),
+    input: lockerSource,
+  });
+  assert.equal(compiled.status, 0, compiled.stderr);
+
+  const locker = spawn(lockerPath, [cleanupDirectory], {
+    env: gitEnvironment(home),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let lockerOutput = '';
+  locker.stdout.setEncoding('utf8');
+  locker.stdout.on('data', (chunk) => { lockerOutput += chunk; });
+  await new Promise((resolveLocked, rejectLocked) => {
+    const timeout = setTimeout(() => {
+      locker.kill('SIGKILL');
+      rejectLocked(new Error('directory locker did not acquire the lock within 2 seconds'));
+    }, 2000);
+    const inspect = () => {
+      if (!lockerOutput.includes('LOCKED')) return;
+      clearTimeout(timeout);
+      locker.stdout.off('data', inspect);
+      resolveLocked();
+    };
+    locker.stdout.on('data', inspect);
+    locker.once('error', (error) => {
+      clearTimeout(timeout);
+      rejectLocked(error);
+    });
+    locker.once('exit', (status) => {
+      if (!lockerOutput.includes('LOCKED')) {
+        clearTimeout(timeout);
+        rejectLocked(new Error(`directory locker exited before readiness: ${status}`));
+      }
+    });
+  });
+
+  const value = canonicalJson({ schema_version: 'fixture.keep.v1', decisions: { held: true } });
+  let cas;
+  try {
+    const started = Date.now();
+    cas = await new Promise((resolveCas, rejectCas) => {
+      const child = spawn(helper.path, [
+        'state-cas-v1', home, 'cleanup', '.', 'keep-decisions.json', 'absent',
+      ], { env: gitEnvironment(home), stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      const timeout = setTimeout(() => {
+        child.kill('SIGKILL');
+        rejectCas(new Error('Keep CAS blocked on a held directory lock'));
+      }, 1000);
+      child.once('error', (error) => {
+        clearTimeout(timeout);
+        rejectCas(error);
+      });
+      child.once('exit', (status) => {
+        clearTimeout(timeout);
+        resolveCas({ status, stdout, stderr, elapsed: Date.now() - started });
+      });
+      child.stdin.end(value);
+    });
+  } finally {
+    const lockerExit = new Promise((resolveExit) => locker.once('exit', resolveExit));
+    locker.stdin.end('x');
+    await lockerExit;
+  }
+  assert.equal(cas.status, 10, cas.stderr);
+  assert.equal(JSON.parse(cas.stdout).reason, 'state_cas_lock_held');
+  assert.ok(cas.elapsed < 1000, `Keep CAS took ${cas.elapsed}ms`);
+  assert.equal(existsSync(join(cleanupDirectory, 'keep-decisions.json')), false);
+  assert.deepEqual(
+    readdirSync(cleanupDirectory).filter((leaf) => leaf.startsWith('.skills-refiner-state-')),
+    [],
+  );
+});
+
+test('native batch item lease accepts only digest item IDs', () => {
+  const helper = ensureMacosHelper({ home });
+  const digest = `sha256:${'4'.repeat(64)}`;
+  for (const itemId of ['item-01', 'x'.repeat(129), 'item"quoted']) {
+    const result = spawnSync(helper.path, [
+      'transaction-advance-batch-v2',
+      home,
+      `sha256:${'5'.repeat(64)}`,
+      `sha256:${'6'.repeat(64)}`,
+      `sha256:${'7'.repeat(64)}`,
+      `sha256:${'8'.repeat(64)}`,
+      itemId,
+      `sha256:${'9'.repeat(64)}`,
+      `sha256:${'a'.repeat(64)}`,
+      `sha256:${'b'.repeat(64)}`,
+      'c'.repeat(64),
+      String(process.pid),
+      '0',
+      '0',
+      '0',
+      '1',
+    ], {
+      encoding: 'utf8',
+      env: gitEnvironment(home),
+      input: canonicalJson({ schema_version: 'fixture.tx-state.v1', sequence: 1, state: 'COMMITTED' }),
+    });
+    assert.equal(result.status, 10, itemId);
+    assert.equal(JSON.parse(result.stdout).reason, 'invalid_batch_transaction_lease');
+  }
+  assert.match(digest, /^sha256:[0-9a-f]{64}$/u);
+});
+
+test('concurrent Keep CAS has one winner, one stable loser, and preserves winner bytes', async () => {
+  const helper = ensureMacosHelper({ home });
+  const leaf = 'keep-decisions.json';
+  const values = [
+    canonicalJson({ schema_version: 'fixture.keep.v1', decisions: { winner: 'a' } }),
+    canonicalJson({ schema_version: 'fixture.keep.v1', decisions: { winner: 'b' } }),
+  ];
+  const invoke = (input) => new Promise((resolveChild, rejectChild) => {
+    const child = spawn(helper.path, [
+      'state-cas-v1', home, 'cleanup', '.', leaf, 'absent',
+    ], { env: gitEnvironment(home), stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.once('error', rejectChild);
+    child.once('exit', (status) => resolveChild({ status, stdout, stderr, input }));
+    child.stdin.end(input);
+  });
+  const results = await Promise.all(values.map(invoke));
+  assert.deepEqual(results.map((result) => result.status).sort((a, b) => a - b), [0, 10]);
+  const loser = results.find((result) => result.status === 10);
+  assert.ok(
+    ['state_cas_lock_held', 'state_cas_mismatch'].includes(JSON.parse(loser.stdout).reason),
+  );
+  const winner = results.find((result) => result.status === 0);
+  assert.equal(
+    readFileSync(join(home, '.agents/skills-refiner/cleanup', leaf), 'utf8'),
+    winner.input,
+  );
 });
