@@ -171,7 +171,11 @@ export function scanFixture(root, { changedSignal = false } = {}) {
       runtime_validation_mode: 'static-preflight',
       hash_normalization: 'strip-canary-crlf-bom.v1',
     },
-    topology: {},
+    topology: {
+      '.agents/skills': { total: 3, symlinks: 0, native: 3, broken_symlinks: 0 },
+      '.claude/skills': { total: 2, symlinks: 1, native: 0, broken_symlinks: 1 },
+      '.cursor/skills': { total: 1, symlinks: 1, native: 0, broken_symlinks: 0 },
+    },
     entries,
     skills: entries.filter((item) => item.entry_kind === 'directory'),
     skill_links: entries.filter((item) => item.entry_kind === 'symlink'),

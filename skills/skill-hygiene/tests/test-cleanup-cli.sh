@@ -53,7 +53,7 @@ plan_file="$SANDBOX/plan.json"
 assert_eq "certified Node major" "24" "$($NODE24_BIN -p 'process.versions.node.split(".")[0]')"
 
 cat >"$scan_file" <<'JSON'
-{"metadata":{"schema_version":"skill-scan.v5"},"entries":[],"skills":[],"skill_links":[],"broken_symlinks":[]}
+{"metadata":{"schema_version":"skill-scan.v5"},"topology":{},"entries":[],"skills":[],"skill_links":[],"broken_symlinks":[]}
 JSON
 
 run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$SANDBOX/missing-node" "$LAUNCHER" cleanup review --json

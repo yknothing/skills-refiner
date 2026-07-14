@@ -777,8 +777,12 @@ test('core plan compilation receives and validates full native execution identit
       runtime_validation_mode: 'static-preflight',
       hash_normalization: 'strip-canary-crlf-bom.v1',
     },
+    topology: {
+      '.agents/skills': { total: 1, symlinks: 0, native: 1, broken_symlinks: 0 },
+    },
     entries: [{
       name: 'Installed Skill 空 格',
+      location: '.agents/skills',
       entry_path: installed,
       active_root: installedRoot,
       entry_kind: 'directory',

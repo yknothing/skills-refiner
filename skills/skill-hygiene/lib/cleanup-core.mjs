@@ -7,10 +7,12 @@ import {
   computePlanHash,
   deriveTransactionId,
   sha256Json,
+  validateObservationIdentity,
   validatePlan,
 } from './cleanup-contract.mjs';
 
 export const POLICY_VERSION = 'skill-disposition.v1';
+export const MAX_KEEP_RECORDS = 10_000;
 
 export const GROUP_ORDER = Object.freeze([
   'broken_distributions',
@@ -25,15 +27,16 @@ const DECISION_ACTIONS = new Set(['retire', 'keep', 'later']);
 const ENTRY_KINDS = new Set(['directory', 'symlink', 'broken_symlink']);
 
 export class CleanupCoreError extends Error {
-  constructor(code, message) {
+  constructor(code, message, reason = code) {
     super(message);
     this.name = 'CleanupCoreError';
     this.code = code;
+    this.reason = reason;
   }
 }
 
-function fail(code, message) {
-  throw new CleanupCoreError(code, message);
+function fail(code, message, reason) {
+  throw new CleanupCoreError(code, message, reason);
 }
 
 function requireObject(value, message) {
@@ -51,7 +54,8 @@ function requireExactKeys(value, allowed, message) {
 
 function validateScan(scan) {
   requireObject(scan, 'scan must be an object');
-  if (scan.metadata?.schema_version !== 'skill-scan.v5' || !Array.isArray(scan.entries)) {
+  if (scan.metadata?.schema_version !== 'skill-scan.v5' || !Array.isArray(scan.entries)
+      || !scan.topology || typeof scan.topology !== 'object' || Array.isArray(scan.topology)) {
     fail('invalid_schema', 'expected a skill-scan.v5 document');
   }
   return scan;
@@ -75,7 +79,7 @@ function entryIdentity(entry) {
   if (typeof entry.entry_path !== 'string' || entry.entry_path.length === 0
       || typeof entry.active_root !== 'string' || entry.active_root.length === 0
       || !ENTRY_KINDS.has(entry.entry_kind)) {
-    fail('invalid_schema', 'scan entry is missing execution identity fields');
+    fail('invalid_schema', 'scan entry is missing entry identity fields');
   }
   return {
     entry_path: entry.entry_path,
@@ -170,9 +174,21 @@ function directInstalledCopy(entry) {
     && /^[0-9a-f]{40}$/u.test(evidence.installed_tree_sha1);
 }
 
-function eligibility(entry) {
+function eligibility(entry, scan) {
+  const governanceScope = Object.hasOwn(scan.topology, entry.location)
+    ? 'installed_or_distributed'
+    : 'outside_scope';
+  if (governanceScope === 'outside_scope') {
+    return {
+      governance_scope: governanceScope,
+      mutation_eligibility: 'review_only',
+      review_only_reason: 'outside_governance_scope',
+      action_scope: { kind: 'none', target_mutated: false },
+    };
+  }
   if (entry.entry_kind === 'symlink' || entry.entry_kind === 'broken_symlink') {
     return {
+      governance_scope: governanceScope,
       mutation_eligibility: 'eligible',
       review_only_reason: null,
       action_scope: { kind: 'link_only', target_mutated: false },
@@ -180,6 +196,7 @@ function eligibility(entry) {
   }
   if (entry.provenance?.git_root) {
     return {
+      governance_scope: governanceScope,
       mutation_eligibility: 'review_only',
       review_only_reason: 'authoring_source',
       action_scope: { kind: 'none', target_mutated: false },
@@ -187,12 +204,14 @@ function eligibility(entry) {
   }
   if (!directInstalledCopy(entry)) {
     return {
+      governance_scope: governanceScope,
       mutation_eligibility: 'review_only',
       review_only_reason: 'unproven_installed_copy',
       action_scope: { kind: 'none', target_mutated: false },
     };
   }
   return {
+    governance_scope: governanceScope,
     mutation_eligibility: 'eligible',
     review_only_reason: null,
     action_scope: { kind: 'installed_entry_only', target_mutated: true },
@@ -235,7 +254,7 @@ function candidateFor(entry, scan, scanDigest, collisions) {
   const colliding = collisions.has(entry.name);
   const signals = relevantSignals(entry, colliding);
   const groups = groupsFor(entry, signals, colliding);
-  const disposition = eligibility(entry);
+  const disposition = eligibility(entry, scan);
   const distributionConsumers = consumersFor(entry, scan.entries);
   const topologyFingerprint = sha256Json({
     name: entry.name ?? basename(entry.entry_path),
@@ -256,6 +275,7 @@ function candidateFor(entry, scan, scanDigest, collisions) {
   const candidateFingerprint = sha256Json({
     candidate_id: candidateId,
     entry_identity: identity,
+    governance_scope: disposition.governance_scope,
     topology_fingerprint: topologyFingerprint,
     relevant_signals: signals,
     mutation_provenance: entry.mutation_provenance ?? null,
@@ -272,6 +292,9 @@ function candidateFor(entry, scan, scanDigest, collisions) {
     entry_kind: entry.entry_kind,
     entry_identity: identity,
     selected_action: null,
+    persisted_decision: null,
+    keep_status: 'none',
+    keep_reason: null,
     groups,
     primary_group: groups[0],
     source: sourceEvidence(entry),
@@ -356,30 +379,202 @@ function validatedDecisions(review, decisions) {
   return [...selected.values()];
 }
 
-export function compilePersistedDecisions(review, decisions) {
-  const selected = validatedDecisions(review, decisions);
-  return {
+export function computeKeepKey(candidate, observationIdentity) {
+  const identity = validateKeepIdentity(candidate, observationIdentity);
+  return sha256Json({
+    candidate_id: candidate.candidate_id,
+    observation_identity: identity,
+    topology_fingerprint: candidate.topology_fingerprint,
+    relevant_signals: candidate.evidence.relevant_signals,
+    scanner_schema: candidate.scanner_schema,
+    policy_version: candidate.policy_version,
+  });
+}
+
+export function validateKeepStore(store) {
+  requireExactKeys(store, ['schema_version', 'kept'], 'keep store contains unsupported fields');
+  if (store.schema_version !== 'skills-refiner.cleanup.keep-decisions.v1'
+      || !Array.isArray(store.kept) || store.kept.length > MAX_KEEP_RECORDS) {
+    fail('invalid_schema', 'keep store schema mismatch');
+  }
+  const seen = new Set();
+  for (const kept of store.kept) {
+    requireExactKeys(
+      kept,
+      ['candidate_id', 'candidate_fingerprint', 'observation_identity_hash', 'keep_key'],
+      'keep record contains unsupported fields',
+    );
+    if (![kept.candidate_id, kept.candidate_fingerprint, kept.observation_identity_hash, kept.keep_key]
+      .every((value) => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/u.test(value))
+      || seen.has(kept.candidate_id)) {
+      fail('invalid_document', 'keep store record is invalid');
+    }
+    seen.add(kept.candidate_id);
+  }
+  return store;
+}
+
+export async function overlayPersistedKeeps(review, store, platform) {
+  validateKeepStore(store);
+  const stored = new Map(store.kept.map((record) => [record.candidate_id, record]));
+  const candidates = [];
+  for (const candidate of review.candidates) {
+    const resetCandidate = {
+      ...candidate,
+      persisted_decision: null,
+      keep_status: 'none',
+      keep_reason: null,
+    };
+    const record = stored.get(candidate.candidate_id);
+    if (record === undefined) {
+      candidates.push(resetCandidate);
+      continue;
+    }
+    if (candidate.governance_scope === 'outside_scope') {
+      candidates.push({
+        ...resetCandidate,
+        keep_status: 'resurfaced',
+        keep_reason: 'outside_governance_scope',
+      });
+      continue;
+    }
+    try {
+      if (!platform || typeof platform.inspectIdentity !== 'function') {
+        fail(
+          'observation_identity_unavailable',
+          'platform adapter is unavailable for observation',
+          'platform_adapter_unavailable',
+        );
+      }
+      const observationIdentity = await platform.inspectIdentity(
+        candidate.entry_path,
+        candidate.active_root,
+        candidate,
+      );
+      const keepKey = computeKeepKey(candidate, observationIdentity);
+      const current = record.candidate_fingerprint === candidate.candidate_fingerprint
+        && record.observation_identity_hash === observationIdentity.identity_hash
+        && record.keep_key === keepKey;
+      candidates.push({
+        ...resetCandidate,
+        persisted_decision: current ? 'keep' : null,
+        keep_status: current ? 'kept' : 'resurfaced',
+        keep_reason: current ? null : 'fingerprint_mismatch',
+      });
+    } catch (error) {
+      const failure = knownObservationFailure(error);
+      if (failure === null) throw error;
+      candidates.push({
+        ...resetCandidate,
+        keep_status: 'resurfaced',
+        keep_reason: failure.reason,
+      });
+    }
+  }
+  return { ...review, candidates };
+}
+
+export async function compilePersistedDecisions(
+  review,
+  decisions,
+  platform,
+  existingStore = {
     schema_version: 'skills-refiner.cleanup.keep-decisions.v1',
-    kept: selected
-      .filter(({ action }) => action === 'keep')
-      .map(({ candidate }) => ({
+    kept: [],
+  },
+) {
+  const selected = validatedDecisions(review, decisions);
+  validateKeepStore(existingStore);
+  const kept = new Map(existingStore.kept.map((record) => [record.candidate_id, record]));
+  const failures = [];
+  for (const { action, candidate } of selected) {
+    if (candidate.governance_scope === 'outside_scope') {
+      kept.delete(candidate.candidate_id);
+      if (action === 'keep') {
+        failures.push({
+          candidate_id: candidate.candidate_id,
+          code: 'outside_governance_scope',
+          reason: 'outside_governance_scope',
+        });
+      }
+      continue;
+    }
+    if (action === 'retire') {
+      kept.delete(candidate.candidate_id);
+      continue;
+    }
+    if (action === 'later') continue;
+    try {
+      if (!platform || typeof platform.inspectIdentity !== 'function') {
+        fail(
+          'observation_identity_unavailable',
+          'platform adapter is unavailable for observation',
+          'platform_adapter_unavailable',
+        );
+      }
+      const observationIdentity = validateKeepIdentity(
+        candidate,
+        await platform.inspectIdentity(candidate.entry_path, candidate.active_root, candidate),
+      );
+      kept.set(candidate.candidate_id, {
         candidate_id: candidate.candidate_id,
         candidate_fingerprint: candidate.candidate_fingerprint,
-        keep_key: sha256Json({
-          candidate_id: candidate.candidate_id,
-          entry_identity: {
-            entry_path: candidate.entry_path,
-            active_root: candidate.active_root,
-            entry_kind: candidate.entry_kind,
-          },
-          topology_fingerprint: candidate.topology_fingerprint,
-          relevant_signals: candidate.evidence.relevant_signals,
-          scanner_schema: candidate.scanner_schema,
-          policy_version: candidate.policy_version,
-        }),
-      }))
-      .sort((left, right) => compareStrings(left.candidate_id, right.candidate_id)),
+        observation_identity_hash: observationIdentity.identity_hash,
+        keep_key: computeKeepKey(candidate, observationIdentity),
+      });
+    } catch (error) {
+      const failure = knownObservationFailure(error);
+      if (failure === null) throw error;
+      kept.delete(candidate.candidate_id);
+      failures.push({ candidate_id: candidate.candidate_id, ...failure });
+    }
+  }
+  const order = new Map(review.candidates.map((candidate, index) => [candidate.candidate_id, index]));
+  failures.sort((left, right) => order.get(left.candidate_id) - order.get(right.candidate_id));
+  const store = {
+    schema_version: 'skills-refiner.cleanup.keep-decisions.v1',
+    kept: [...kept.values()].sort(
+      (left, right) => compareStrings(left.candidate_id, right.candidate_id),
+    ),
   };
+  validateKeepStore(store);
+  return { store, failures };
+}
+
+function validateKeepIdentity(candidate, identity) {
+  try {
+    validateObservationIdentity(identity);
+  } catch {
+    fail(
+      'observation_identity_unavailable',
+      'platform adapter did not provide a valid observation identity',
+      'invalid_observation_identity',
+    );
+  }
+  if (identity.entry_path !== candidate.entry_path
+      || identity.active_root !== candidate.active_root
+      || identity.entry_kind !== candidate.entry_kind) {
+    fail(
+      'observation_identity_unavailable',
+      'platform adapter did not provide a matching observation identity',
+      'mismatched_observation_identity',
+    );
+  }
+  return identity;
+}
+
+function knownObservationFailure(error) {
+  if (error instanceof CleanupCoreError && error.code === 'observation_identity_unavailable') {
+    return { code: error.code, reason: error.reason };
+  }
+  if (typeof error?.name === 'string' && error.name.endsWith('AdapterError')
+      && typeof error.code === 'string' && /^[a-z][a-z0-9_]*$/u.test(error.code)
+      && error.code.length <= 128
+      && typeof error.reason === 'string' && /^[a-z][a-z0-9_]*$/u.test(error.reason)
+      && error.reason.length <= 128) {
+    return { code: error.code, reason: error.reason };
+  }
+  return null;
 }
 
 function validateExecutionIdentity(candidate, identity) {
@@ -416,6 +611,9 @@ export async function compilePlan({
   const selected = validatedDecisions(review, decisions);
   const retirements = selected.filter(({ action }) => action === 'retire').sort(itemOrder);
   for (const { candidate } of retirements) {
+    if (candidate.governance_scope !== 'installed_or_distributed') {
+      fail('outside_governance_scope', 'outside-scope candidate cannot be retired');
+    }
     if (candidate.mutation_eligibility === 'review_only') {
       fail('review_only', 'review_only candidate cannot be retired');
     }
