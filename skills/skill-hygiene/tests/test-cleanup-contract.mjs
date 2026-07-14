@@ -1314,6 +1314,141 @@ test('batch errors preserve current uncertainty, per-item history, and exact fai
   );
 });
 
+test('batch-primary reconciliation errors preserve visible item truth without inventing sequence', () => {
+  const batchPlan = buildBatchPlan(validMultiPlan());
+  const committedThenDrifted = batchPlan.transaction_map.map((mapping, index) => {
+    if (index === 0) return resultItem(mapping, 'COMMITTED');
+    if (index === 1) return resultItem(mapping, 'DRIFTED');
+    return resultItem(mapping, 'NOT_STARTED');
+  });
+  const recoveryThenCommitted = batchPlan.transaction_map.map((mapping, index) => {
+    if (index === 0) return resultItem(mapping, 'RECOVERY_REQUIRED');
+    if (index === 1) return resultItem(mapping, 'COMMITTED');
+    return resultItem(mapping, 'NOT_STARTED');
+  });
+  const committedThenRecovery = batchPlan.transaction_map.map((mapping, index) => {
+    if (index === 0) return resultItem(mapping, 'COMMITTED');
+    if (index === 1) {
+      return resultItem(mapping, 'RECOVERY_REQUIRED', {
+        location: 'unknown',
+        transaction_has_mutated: true,
+      });
+    }
+    return resultItem(mapping, 'NOT_STARTED');
+  });
+  const cases = [
+    {
+      code: BATCH_ERROR_CODES.batchStateProjectionFailed,
+      items: committedThenDrifted,
+      mutationOccurred: false,
+      mutationOutcome: 'unchanged',
+      committedIndex: 0,
+    },
+    {
+      code: BATCH_ERROR_CODES.batchRecordsInvalid,
+      items: recoveryThenCommitted,
+      mutationOccurred: false,
+      mutationOutcome: 'unchanged',
+      committedIndex: 1,
+    },
+    {
+      code: BATCH_ERROR_CODES.batchMutationOutcomeUnknown,
+      items: committedThenRecovery,
+      mutationOccurred: true,
+      mutationOutcome: 'unknown',
+      committedIndex: 0,
+    },
+    {
+      code: BATCH_ERROR_CODES.batchLockReleaseFailed,
+      items: committedThenDrifted,
+      mutationOccurred: false,
+      mutationOutcome: 'unchanged',
+      committedIndex: 0,
+    },
+    {
+      code: BATCH_ERROR_CODES.batchLockAcquireFailed,
+      items: batchPlan.transaction_map.map((mapping, index) => (
+        index === 0 ? resultItem(mapping, 'COMMITTED') : resultItem(mapping, 'NOT_STARTED')
+      )),
+      mutationOccurred: false,
+      mutationOutcome: 'unchanged',
+      committedIndex: 0,
+    },
+  ];
+
+  for (const fixture of cases) {
+    const error = buildBatchError({
+      batchPlan,
+      status: 'recovery_required',
+      overallStatus: 'RECOVERY_REQUIRED',
+      items: fixture.items,
+      mutationOccurred: fixture.mutationOccurred,
+      mutationOutcome: fixture.mutationOutcome,
+      errorCode: fixture.code,
+      failureScope: 'batch',
+    });
+    const committedId = batchPlan.transaction_map[fixture.committedIndex].transaction_id;
+    assert.equal(validateBatchError(error, batchPlan), error);
+    assert.deepEqual(error.committed_transaction_ids, [committedId]);
+    assert.deepEqual(error.undo_commands, [
+      `skills-refiner cleanup undo ${committedId} --confirm ${committedId} --json`,
+    ]);
+    assert.equal(error.failure_item_id, null);
+    assert.equal(error.failure_item_index, null);
+  }
+
+  assert.deepEqual(recoveryThenCommitted.map(({ status }) => status), [
+    'RECOVERY_REQUIRED',
+    'COMMITTED',
+    'NOT_STARTED',
+  ]);
+
+  assert.throws(
+    () => buildBatchError({
+      batchPlan,
+      status: 'blocked',
+      overallStatus: 'blocked',
+      items: batchPlan.transaction_map.map((mapping, index) => (
+        index === 0 ? resultItem(mapping, 'BLOCKED') : resultItem(mapping, 'NOT_STARTED')
+      )),
+      mutationOccurred: false,
+      mutationOutcome: 'unchanged',
+      errorCode: BATCH_ERROR_CODES.batchLockUnavailable,
+      failureScope: 'batch',
+    }),
+    /batch error/,
+  );
+  assert.throws(
+    () => buildBatchError({
+      batchPlan,
+      status: 'blocked',
+      overallStatus: 'blocked',
+      items: batchPlan.transaction_map.map((mapping, index) => (
+        index === 0 ? resultItem(mapping, 'COMMITTED') : resultItem(mapping, 'NOT_STARTED')
+      )),
+      mutationOccurred: false,
+      mutationOutcome: 'unchanged',
+      errorCode: BATCH_ERROR_CODES.batchLockUnavailable,
+      failureScope: 'batch',
+    }),
+    /batch error/,
+  );
+  assert.throws(
+    () => buildBatchError({
+      batchPlan,
+      status: 'recovery_required',
+      overallStatus: 'RECOVERY_REQUIRED',
+      items: recoveryThenCommitted,
+      mutationOccurred: false,
+      mutationOutcome: 'unchanged',
+      errorCode: BATCH_ERROR_CODES.itemRecoveryRequired,
+      failureScope: 'item',
+      failureItemIndex: 0,
+    }),
+    /batch error/,
+  );
+});
+
 test('undo guidance is generated as executable argv and survives a controlled no-shell invocation', () => {
   const transactionId = sha256Json({ transaction: 'undo-guidance' });
   const args = undoCommandArguments(transactionId);

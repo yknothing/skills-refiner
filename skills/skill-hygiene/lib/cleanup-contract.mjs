@@ -31,6 +31,8 @@ export const BATCH_ERROR_CODES = Object.freeze({
   batchRecoveryRequired: 'batch_recovery_required',
   batchRecordsInvalid: 'batch_records_invalid',
   batchMutationOutcomeUnknown: 'batch_mutation_outcome_unknown',
+  batchLockAcquireFailed: 'batch_lock_acquire_failed',
+  batchLockReleaseFailed: 'batch_lock_release_failed',
 });
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
@@ -717,35 +719,50 @@ const BATCH_ERROR_POLICIES = new Map([
   [BATCH_ERROR_CODES.preflightDrift, {
     scope: 'item', itemStatus: 'DRIFTED',
     pairs: new Set(['blocked\u0000drifted', 'recovery_required\u0000PARTIAL']),
+    enforceStopFirst: true,
   }],
   [BATCH_ERROR_CODES.itemBlocked, {
     scope: 'item', itemStatus: 'BLOCKED', pairs: new Set(['blocked\u0000blocked']),
+    enforceStopFirst: true,
   }],
   [BATCH_ERROR_CODES.itemRecoveryRequired, {
     scope: 'item', itemStatus: 'RECOVERY_REQUIRED',
     pairs: new Set(['recovery_required\u0000PARTIAL', 'recovery_required\u0000RECOVERY_REQUIRED']),
+    enforceStopFirst: true,
   }],
   [BATCH_ERROR_CODES.itemOutcomeAmbiguous, {
     scope: 'item', itemStatus: 'RECOVERY_REQUIRED',
     pairs: new Set(['recovery_required\u0000PARTIAL', 'recovery_required\u0000RECOVERY_REQUIRED']),
     requiresUnknownOutcome: true,
     failedItemMustHaveHistory: true,
+    enforceStopFirst: true,
   }],
   [BATCH_ERROR_CODES.batchLockUnavailable, {
     scope: 'batch', pairs: new Set(['blocked\u0000blocked']),
   }],
   [BATCH_ERROR_CODES.batchStateProjectionFailed, {
     scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
+    allowsKnownItemTruth: true,
   }],
   [BATCH_ERROR_CODES.batchRecoveryRequired, {
     scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
   }],
   [BATCH_ERROR_CODES.batchRecordsInvalid, {
     scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
+    allowsKnownItemTruth: true,
   }],
   [BATCH_ERROR_CODES.batchMutationOutcomeUnknown, {
     scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
     unknownWithoutItemHistory: true,
+    allowsKnownItemTruth: true,
+  }],
+  [BATCH_ERROR_CODES.batchLockReleaseFailed, {
+    scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
+    allowsKnownItemTruth: true,
+  }],
+  [BATCH_ERROR_CODES.batchLockAcquireFailed, {
+    scope: 'batch', pairs: new Set(['recovery_required\u0000RECOVERY_REQUIRED']),
+    allowsKnownItemTruth: true,
   }],
 ]);
 
@@ -1403,7 +1420,7 @@ export function validateBatchError(error, batchPlan = null) {
   }
   validateBatchEnvelopeIdentity(error, batchPlan, 'batch error');
   validatePublicItems(
-    error.items, batchPlan, 'batch error', error.plan_hash, BATCH_STATE_ITEM_STATUSES, true,
+    error.items, batchPlan, 'batch error', error.plan_hash, BATCH_STATE_ITEM_STATUSES, false,
   );
   if (typeof error.mutation_occurred !== 'boolean'
       || !['unchanged', 'moved', 'unknown'].includes(error.mutation_outcome)
@@ -1419,9 +1436,17 @@ export function validateBatchError(error, batchPlan = null) {
   const failures = error.items
     .map((item, index) => ({ item, index }))
     .filter(({ item }) => ['DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED'].includes(item.status));
+  if (policy.enforceStopFirst === true) {
+    validateStopFirst(
+      error.items,
+      'batch error',
+      new Set(['DRIFTED', 'BLOCKED', 'RECOVERY_REQUIRED']),
+    );
+  }
   if (policy.scope === 'batch') {
+    const knownItemTruth = error.items.some(({ status: itemStatus }) => itemStatus !== 'NOT_STARTED');
     if (error.failure_item_id !== null || error.failure_item_index !== null
-        || failures.length !== 0) {
+        || (knownItemTruth && policy.allowsKnownItemTruth !== true)) {
       fail('batch error batch-scoped failure must not masquerade a known item failure');
     }
   } else {
