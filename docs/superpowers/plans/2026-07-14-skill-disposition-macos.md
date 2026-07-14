@@ -1092,9 +1092,11 @@ Expected: one commit containing the certified single-item transaction engine.
 
 - Modify: `skills/skill-hygiene/native/cleanup-macos-helper.c`
 - Modify: `skills/skill-hygiene/lib/cleanup-macos.mjs`
+- Modify: `skills/skill-hygiene/lib/cleanup-contract.mjs`
 - Modify: `skills/skill-hygiene/lib/cleanup-core.mjs`
 - Modify: `skills/skill-hygiene/lib/cleanup-cli.mjs`
 - Modify: `skills/skill-hygiene/lib/cleanup-transaction.mjs`
+- Modify: `skills/skill-hygiene/tests/test-cleanup-contract.mjs`
 - Modify: `skills/skill-hygiene/tests/test-cleanup-core.mjs`
 - Modify: `skills/skill-hygiene/tests/test-cleanup-macos.mjs`
 - Modify: `skills/skill-hygiene/tests/test-cleanup-transaction.mjs`
@@ -1102,10 +1104,12 @@ Expected: one commit containing the certified single-item transaction engine.
 
 - [ ] **Step 1: Write failing durable batch-coordinator tests**
 
-Before lock acquisition, durably publish
+Before lock acquisition, durably publish exact, versioned `batch-plan.v1` and
+`batch-state.v1` records at
 `~/.agents/skills-quarantine/batches/BATCH_ID/plan.json` and `state.json`.
 `BATCH_ID` derives from the validated plan hash. The batch document maps every
-item ID to its preallocated transaction ID and terminal status. Creation uses
+item ID to its preallocated transaction ID, item hash, and execution-identity
+hash; state stores the durable status projection separately. Creation uses
 the same exclusive-`mkdirat` winner/read-only-loser protocol as item
 transactions; no loser writes before acquiring the global lock. Assert:
 
@@ -1125,7 +1129,8 @@ transactions; no loser writes before acquiring the global lock. Assert:
 - `status TRANSACTION_ID` loads the immutable item transaction, follows its
   validated batch ID, proves the item-to-transaction mapping, verifies the
   batch lock nonce plus PID/start facts, reconciles every started item, rebuilds
-  batch truth, and only then uses native exclusive rename to isolate a stale
+  batch truth in memory without publishing a new projection, and only then
+  uses native exclusive rename to isolate a stale
   batch-owned lock;
 - a transaction absent from the batch mapping, a nonce mismatch, a live or
   ambiguous owner, or any ambiguous item returns `RECOVERY_REQUIRED` and leaves
@@ -1159,16 +1164,23 @@ reported with exit `10`.
 - [ ] **Step 3: Implement durable serial coordination**
 
 Publish or validate the deterministic batch document, acquire one coordinating
-lock referencing that batch, run full-plan preflight, then call the existing
-single-item transaction path in topology order while passing the same lock
-lease; an item must not reacquire or release the batch-owned lock. Revalidate
+batch lock referencing that batch, run full-plan preflight, then call a new
+caller-owned item execution core in plan order while passing the same lock
+lease; an item must not reacquire, release, archive, or isolate the batch-owned
+lock. Keep the Task 5 standalone wrapper and all v1 records compatible. Add
+explicit `batch-init-v1`, `batch-probe-v1`, `batch-lock-*-v1`,
+`batch-state-advance-v1`, and `transaction-advance-batch-v2` primitives rather
+than putting a batch ID into the transaction-owned v1 protocol. Revalidate
 immediately before each item, durably update the batch after each result, and on
 retry reconcile transaction truth before continuing. Preserve committed
 transaction IDs and exact undo commands in the result if a later item stops the
-run. Batch directory creation and every batch-state publication use the same
-fd-bound helper as item transactions. The public recovery entry remains
-`status TRANSACTION_ID`; its JSON includes `batch_id` and the reconciled batch
-summary so Agent clients need no hidden batch command.
+run. Item transactions remain authoritative mutation truth; batch state is a
+monotonic, rebuildable projection. Batch directory creation and every
+batch-state publication use the same fd-bound helper as item transactions. The
+public recovery entry remains `status TRANSACTION_ID`; its JSON includes
+`batch_id` and the read-only reconciled batch summary so Agent clients need no
+hidden batch command. A retrying `apply` may repair the durable projection only
+while holding the exact batch lease.
 
 - [ ] **Step 4: Write failing TTY safety tests**
 
@@ -1182,7 +1194,8 @@ Drive the launcher through a pseudo-terminal. Cover:
 - EOF before confirmation exits without mutation;
 - non-TTY stdin never renders a prompt or waits for input;
 - bracketed paste and multi-line input cannot carry an extra newline into the
-  next prompt or satisfy `apply SHORT_HASH`;
+  next prompt or satisfy `apply SHORT_HASH`; any paste marker, control
+  character, or multi-line burst cancels the entire session;
 - machine review JSON carries all evidence rendered by `Inspect`, so Agent/IDE
   clients never need to parse terminal text.
 
@@ -1198,15 +1211,22 @@ Canonical target: /informational/source/example-skill
 Action scope: installed entry only
 ```
 
-The presenter owns no filesystem operations. It produces the same decision and
-plan objects used by machine mode.
+The presenter owns no filesystem operations. A blank answer becomes an
+implicit, session-only `Later`, not a fourth persisted decision. `Inspect`
+returns to the same candidate without selecting it. Keep updates stay in
+memory until review completes and, when Retire is also selected, until exact
+confirmation succeeds. `Ctrl-C` or EOF before confirmation performs no active
+entry, quarantine, transaction, or Keep-store mutation; a lazily compiled
+runtime-helper cache is outside this user-data guarantee. The presenter
+produces the same decision and plan objects used by machine mode.
 
 - [ ] **Step 6: Implement fingerprint-sensitive Keep persistence**
 
 Store decisions outside discovery roots under
 `~/.agents/skills-refiner/cleanup/keep-decisions.json`, owner-only and through
-the `durableWriteJson` wrapper that delegates to the helper's fd-bound
-`publish-state` primitive. The persisted key must include:
+native no-follow bounded reads plus an expected-digest compare-and-swap under
+the cleanup directory lock. Never implement Keep as an unconditional
+read-modify-write. The persisted key must include:
 
 ```js
 sha256Json({
@@ -1221,19 +1241,24 @@ sha256Json({
 
 Do not persist `Later`. A mismatch re-surfaces the candidate. A malformed or
 symlinked Keep store is blocked and never repaired by changing permissions.
-Before persisting `Keep`, call the same read-only `inspectForPlan` adapter for
-that candidate and include its execution identity in the key. If identity
-inspection is blocked or unsupported, report the reason and leave the candidate
-unpersisted; do not degrade to a scan-only Keep key.
+Before persisting `Keep`, call a pure read-only `inspectIdentity` adapter for
+that candidate and include its native execution identity in the key.
+`inspectForPlan` builds on `inspectIdentity` and adds mutation-authority checks;
+Keep must not reject an authoring source merely because it is not mutable. If
+identity inspection is blocked or unsupported, report the reason and leave the
+candidate unpersisted; do not degrade to a scan-only Keep key. Machine review
+retains every candidate and its evidence, adding a `kept` or `resurfaced`
+overlay rather than silently filtering rows. Agent mode persists Keep only
+through an explicit `--persist-keep` request.
 
 - [ ] **Step 7: Generate reverse-topology undo guidance**
 
-For every serial apply result, generate an ordered `undo_commands` array from
-the committed transaction identities: installed real directories first,
-explicitly selected native copies next, and distribution links last. Test a
-three-item topology and require the Agent harness to execute commands in that
-order. This proves reverse dependency restoration without inventing a
-batch-undo command or claiming cross-item atomicity.
+For every serial apply result, generate `undo_commands` directly from the
+committed plan items in strict reverse plan order. Do not re-infer topology
+classes after mutation. Test a three-item topology and require the Agent
+harness to execute commands in that order. This proves reverse dependency
+restoration without inventing a batch-undo command or claiming cross-item
+atomicity.
 
 - [ ] **Step 8: Add rehydration reporting**
 
@@ -1253,17 +1278,21 @@ git diff --check
 Expected: zero-default TTY, strict non-TTY, sequential stop, Keep invalidation,
 reverse-topology undo guidance, and rehydration tests pass.
 
-- [ ] **Step 10: Commit the guided-flow batch**
+- [ ] **Step 10: Commit independently reviewable guided-flow slices**
 
 ```bash
 test -z "$(git diff --cached --name-only)"
-git add skills/skill-hygiene/native/cleanup-macos-helper.c skills/skill-hygiene/lib/cleanup-macos.mjs skills/skill-hygiene/lib/cleanup-core.mjs skills/skill-hygiene/lib/cleanup-cli.mjs skills/skill-hygiene/lib/cleanup-transaction.mjs skills/skill-hygiene/tests/test-cleanup-macos.mjs skills/skill-hygiene/tests/test-cleanup-core.mjs skills/skill-hygiene/tests/test-cleanup-transaction.mjs skills/skill-hygiene/tests/test-cleanup-cli.sh
-git diff --cached --check
-git commit -m "feat(cleanup): add guided sequential disposition flow"
+# Commit and re-run Task 5 regression gates after each slice:
+# 1. batch contracts and native primitives
+# 2. durable coordinator and recovery
+# 3. Keep identity and compare-and-swap persistence
+# 4. zero-default TTY presenter
+# 5. undo guidance and rehydration reporting
 ```
 
-Expected: one commit containing only coordination, TTY, Keep, and associated
-tests.
+Expected: five narrow commits whose staged diffs contain only their named
+slice and associated tests. No slice may weaken Task 5 compatibility or leave
+the worktree with staged spillover.
 
 ## Task 7: Certify installed layout, setup-cli, documentation, and CI
 
