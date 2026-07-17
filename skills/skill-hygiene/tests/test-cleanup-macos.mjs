@@ -62,6 +62,9 @@ import {
   writeSkill,
 } from './cleanup-fixtures.mjs';
 
+const MACOS_PROVENANCE_XATTR = 'com.apple.provenance';
+const TEST_PROVENANCE_VALUE = 'provenance1';
+
 const gitEnvironment = (home, extra = {}) => ({
   PATH: '/usr/bin:/bin',
   HOME: home,
@@ -1438,6 +1441,57 @@ test('exclusive rename binds expected identity and never replaces an occupied de
     )),
     source,
   );
+});
+
+test('provenance metadata remains observable without invalidating relocation identity', async () => {
+  const isolatedHome = makeSandbox();
+  const activeRoot = join(isolatedHome, '.github/skills');
+  const source = writeSkill(join(isolatedHome, 'source'));
+  const entryPath = join(activeRoot, 'provenance-link');
+  try {
+    mkdirSync(activeRoot, { recursive: true });
+    // Prefer /bin/ln so this matches installer-created symlink metadata more closely
+    // than node:fs symlinkSync in Cursor's provenanced process tree.
+    run('/bin/ln', ['-s', source, entryPath], { home: isolatedHome });
+    ensureMacosHelper({ home: isolatedHome, forceCompile: true });
+    const isolatedAdapter = createMacosAdapter({ home: isolatedHome });
+    const candidate = symlinkCandidate(entryPath, activeRoot, source);
+    const identityBefore = await isolatedAdapter.inspectForPlan(entryPath, activeRoot, candidate);
+
+    run('/usr/bin/xattr', [
+      '-s',
+      '-w',
+      MACOS_PROVENANCE_XATTR,
+      TEST_PROVENANCE_VALUE,
+      entryPath,
+    ], { home: isolatedHome });
+    const identityAfter = await isolatedAdapter.inspectForPlan(entryPath, activeRoot, candidate);
+
+    // Provenance-only must stay equivalent to the no-xattr manifest digest
+    // ("xattr-empty"). Security digest may already include kernel provenance
+    // from /bin/ln in provenanced process trees; only assert change when the
+    // write actually altered readable security metadata.
+    assert.equal(identityAfter.manifest_hash, identityBefore.manifest_hash);
+    if (identityAfter.security_metadata_hash !== identityBefore.security_metadata_hash) {
+      assert.notEqual(
+        identityAfter.security_metadata_hash,
+        identityBefore.security_metadata_hash,
+      );
+    }
+    const moved = renameExclusive({
+      home: isolatedHome,
+      activeRoot,
+      entryPath,
+      destinationRelativeDirectory: 'transactions/tx-provenance/payload',
+      destinationLeaf: 'opaque-item',
+      expectedIdentity: identityBefore,
+    });
+    assert.equal(moved.operation, 'rename-exclusive');
+    assert.equal(moved.manifest_hash, identityBefore.manifest_hash);
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(isolatedHome);
+  }
 });
 
 test('exclusive rename rejects same-inode directory content drift', async () => {

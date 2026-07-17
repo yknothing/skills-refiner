@@ -664,6 +664,17 @@ static int hash_security_metadata(int fd, const struct stat *status,
         name_index += 1U;
     }
     qsort(names, name_count, sizeof(*names), compare_names);
+    /*
+     * macOS may attach or rewrite com.apple.provenance during rename into
+     * quarantine. Keep it in the security digest for observability, but omit
+     * it from the relocation manifest so exclusive rename/reconcile can still
+     * prove inode+content identity across that kernel side effect.
+     *
+     * If provenance is the only xattr, the manifest digest must still match the
+     * no-xattr case ("xattr-empty"); otherwise a clean symlink becomes
+     * irreconcilable the moment the kernel stamps provenance.
+     */
+    size_t manifest_xattr_count = 0U;
     for (size_t index = 0; index < name_count; index += 1U) {
         size_t name_length = strlen(names[index]);
         if (!valid_utf8_without_control((const unsigned char *)names[index], name_length)) {
@@ -671,6 +682,7 @@ static int hash_security_metadata(int fd, const struct stat *status,
             free(names_buffer);
             return -1;
         }
+        int skip_manifest = strcmp(names[index], "com.apple.provenance") == 0;
         ssize_t value_length = fgetxattr(fd, names[index], NULL, 0U, 0U, 0);
         if (value_length < 0 || (size_t)value_length > MAX_INPUT_BYTES) {
             free(names);
@@ -690,11 +702,17 @@ static int hash_security_metadata(int fd, const struct stat *status,
             free(names_buffer);
             return -1;
         }
-        hash_bytes(manifest, names[index], name_length);
-        hash_bytes(manifest, value, (size_t)value_length);
+        if (!skip_manifest) {
+            hash_bytes(manifest, names[index], name_length);
+            hash_bytes(manifest, value, (size_t)value_length);
+            manifest_xattr_count += 1U;
+        }
         hash_bytes(security, names[index], name_length);
         hash_bytes(security, value, (size_t)value_length);
         free(value);
+    }
+    if (manifest_xattr_count == 0U) {
+        hash_bytes(manifest, "xattr-empty", 11U);
     }
     free(names);
     free(names_buffer);
