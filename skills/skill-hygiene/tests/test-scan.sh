@@ -504,6 +504,39 @@ EOF
     assert_eq "YAML trailing spaces do not inflate description length" "5:unknown" "$(echo "$locale_json" | jq -r '.skills[] | select(.dir_name == "trailing-space-skill") | [.runtime_contract.description_length, .runtime_contract.status] | map(tostring) | join(":")')"
     echo ""
 
+    echo -e "${BOLD}── Provenance Tree Bounds ──${NC}"
+    local oversized_home oversized_skill oversized_receipt oversized_json skipped_json i
+    local provenance_tree_file_limit=400
+    local fake_tree_sha1="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    oversized_home="$SANDBOX/provenance-bound-home"
+    oversized_skill="$oversized_home/.agents/skills/receipt-backed"
+    oversized_receipt="$oversized_home/.agents/.skill-lock.json"
+    mkdir -p "$oversized_skill/bulk"
+    write_skill "$oversized_skill" "receipt-backed" "Use when testing oversized installer trees." "This skill has many files so provenance tree hashing must fail closed without hanging the scan."
+    # Exceed the scanner's hard ceiling by one file so git write-tree is skipped.
+    for i in $(seq 1 "$((provenance_tree_file_limit + 1))"); do
+        printf 'x' > "$oversized_skill/bulk/file-$i.txt"
+    done
+    jq -n --arg hash "$fake_tree_sha1" '{
+      version: 3,
+      skills: {
+        "receipt-backed": {
+          source: "fixture",
+          sourceType: "github",
+          sourceUrl: "https://example.invalid/fixture.git",
+          skillPath: "skills/receipt-backed",
+          skillFolderHash: $hash
+        }
+      }
+    }' > "$oversized_receipt"
+    oversized_json=$(HOME="$oversized_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Oversized receipt tree does not authorize mutation" "unknown" "$(echo "$oversized_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Oversized receipt tree records bound evidence" "provenance_tree_too_large" "$(echo "$oversized_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.evidence.kind')"
+    skipped_json=$(HOME="$oversized_home" bash "$SCAN_SCRIPT" --json --skip-provenance-tree 2>/dev/null)
+    assert_eq "Skip provenance tree flag remains unknown" "unknown" "$(echo "$skipped_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Skip provenance tree flag records skip evidence" "provenance_tree_skipped" "$(echo "$skipped_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.evidence.kind')"
+    echo ""
+
     echo -e "${BOLD}── CLI Contract ──${NC}"
     local unknown_option_rc
     HOME="$SANDBOX" bash "$SCAN_SCRIPT" --definitely-unknown >/dev/null 2>&1

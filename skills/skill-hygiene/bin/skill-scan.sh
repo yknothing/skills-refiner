@@ -29,9 +29,13 @@ detect_home_dir() {
 STALE_DAYS=180
 JSON_ONLY=false
 NO_WRITE=false
+SKIP_PROVENANCE_TREE=false
 MAX_DESCRIPTION_LENGTH=1024
 SKILL_LOCK_SCHEMA_VERSION=3
 MAX_SKILL_LOCK_BYTES=1048576
+# Bound installer tree hashing so one oversized skill (docs/assets) cannot stall the
+# whole inventory. Small receipt-backed fixtures remain fully verified.
+MAX_PROVENANCE_TREE_FILES=400
 PROVENANCE_GIT_TMP=""
 PROVENANCE_RECEIPT_TMP=""
 GIT_TREE_HASH_RESULT=""
@@ -55,11 +59,13 @@ show_help() {
     echo "  bash skill-scan.sh --stale-days 365   # Custom staleness threshold"
     echo "  bash skill-scan.sh --json             # JSON to stdout only"
     echo "  bash skill-scan.sh --no-write         # Terminal report without writing JSON"
+    echo "  bash skill-scan.sh --skip-provenance-tree  # Skip git tree hashing for receipts"
     echo ""
     echo "Options:"
     echo "  --stale-days N   Override stale threshold (default: 180 days)"
     echo "  --json           Output JSON to stdout only (no report file)"
     echo "  --no-write       Do not write ~/.agents/skills-report/scan-*.json"
+    echo "  --skip-provenance-tree  Skip git write-tree provenance (faster inventory)"
     echo "  --help, -h       Show this help message"
 }
 
@@ -75,6 +81,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --json) JSON_ONLY=true; shift ;;
         --no-write) NO_WRITE=true; shift ;;
+        --skip-provenance-tree) SKIP_PROVENANCE_TREE=true; shift ;;
         --help|-h) show_help; exit 0 ;;
         *) echo "[ERROR] Unknown option: $1" >&2; exit 2 ;;
     esac
@@ -417,6 +424,18 @@ git_tree_hash_for_directory() {
     echo "$GIT_TREE_HASH_RESULT" | grep -Eq '^[0-9a-f]{40}$'
 }
 
+# Count files under a skill tree with a hard ceiling (does not walk forever).
+count_tree_files_bounded() {
+    local entry_path="$1"
+    local limit="$2"
+    local counted
+    counted=$(find "$entry_path" \( -type f -o -type l \) 2>/dev/null \
+        | head -n "$((limit + 1))" \
+        | wc -l \
+        | tr -d '[:space:]')
+    echo "${counted:-0}"
+}
+
 snapshot_install_receipt() {
     local receipt_file="$1"
     local receipt_owner receipt_size receipt_mode path_inode fd_inode snapshot tmp_root
@@ -493,9 +512,38 @@ mutation_provenance_for_entry() {
         (.skills[$skill].sourceType == "github") and
         (.skills[$skill].skillFolderHash | type == "string" and test("^[0-9a-f]{40}$"))
     ' "$receipt_snapshot" >/dev/null 2>&1; then
-        local receipt_sha256 expected_tree_sha1 installed_tree_sha1
+        local receipt_sha256 expected_tree_sha1 installed_tree_sha1 tree_file_count
         receipt_sha256=$(sr_hash_file_raw "$receipt_snapshot" 2>/dev/null || true)
         expected_tree_sha1=$(jq -r --arg skill "$entry_name" '.skills[$skill].skillFolderHash' "$receipt_snapshot" 2>/dev/null || true)
+
+        if $SKIP_PROVENANCE_TREE; then
+            MUTATION_PROVENANCE_JSON=$(jq -n \
+                --arg receipt_file "$receipt_file" \
+                --arg receipt_sha256 "${receipt_sha256:-}" \
+                '{kind:"unknown", confidence:"truncated",
+                  evidence:{kind:"provenance_tree_skipped",
+                            receipt_file:$receipt_file,
+                            receipt_sha256:$receipt_sha256}}')
+            return
+        fi
+
+        tree_file_count=$(count_tree_files_bounded "$entry_path" "$MAX_PROVENANCE_TREE_FILES")
+        if ! echo "$tree_file_count" | grep -Eq '^[0-9]+$' \
+            || [ "$tree_file_count" -gt "$MAX_PROVENANCE_TREE_FILES" ]; then
+            MUTATION_PROVENANCE_JSON=$(jq -n \
+                --arg receipt_file "$receipt_file" \
+                --arg receipt_sha256 "${receipt_sha256:-}" \
+                --argjson max_files "$MAX_PROVENANCE_TREE_FILES" \
+                --argjson observed_files "${tree_file_count:-0}" \
+                '{kind:"unknown", confidence:"truncated",
+                  evidence:{kind:"provenance_tree_too_large",
+                            receipt_file:$receipt_file,
+                            receipt_sha256:$receipt_sha256,
+                            max_files:$max_files,
+                            observed_files:$observed_files}}')
+            return
+        fi
+
         if git_tree_hash_for_directory "$entry_path" 2>/dev/null; then
             installed_tree_sha1="$GIT_TREE_HASH_RESULT"
         else
