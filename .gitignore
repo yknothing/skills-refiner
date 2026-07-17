@@ -21,3 +21,10 @@ __pycache__/
 *.bak
 /blog
 
+.env
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
