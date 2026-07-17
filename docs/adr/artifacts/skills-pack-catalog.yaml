@@ -1,0 +1,221 @@
+# skills-pack-catalog.yaml — ADR-0002 artifact (draft intent)
+# This file declares deployment intent. It does NOT mount/unmount discovery
+# surfaces by itself. See docs/adr/0002-on-demand-pack-catalog.md.
+
+schema_version: "1.0.0"
+catalog_id: skills-pack-catalog
+updated: "2026-07-17"
+status: draft
+enforcement: none
+
+# Named constants for status / mount enums (no magic strings in consumers).
+constants:
+  status:
+    draft: draft
+    active: active
+    deprecated: deprecated
+  mount:
+    always: always
+    on_demand: on_demand
+    never: never
+  enforcement:
+    none: none
+    advisory: advisory
+    hard: hard
+
+deploy_root_hint: "~/.agents/skills"
+notes:
+  - "Core list is an owner hypothesis pending non-invasive usage signals (ADR-0001)."
+  - "Skills listed under packs remain on disk; on_demand means they should not stay on the default discovery mount once S1 tooling exists."
+  - "Retired Lark and non-bs twins are archive-only; do not re-list as mountable."
+
+targets:
+  discoverable_skill_count_max: 80
+  description_budget_tokens_max: 4000
+
+profile:
+  id: core
+  mount: always
+  purpose: "Weekly high-frequency SDLC + governance + canonical bs-* entry points."
+  skills:
+    # Lifecycle spine
+    - prodcraft
+    - intake
+    - brainstorming
+    - writing-plans
+    - executing-plans
+    - spec-writing
+    - task-breakdown
+    - task-execution
+    - feature-development
+    - tdd
+    - systematic-debugging
+    - diagnosing-bugs
+    - code-review
+    - requesting-code-review
+    - receiving-code-review
+    - verification-before-completion
+    # Governance / meta
+    - skill-hygiene
+    - skill-debug
+    - skills-refiner
+    - skills-appreciation
+    - bs-skill-health
+    - bs-skill-bootstrap
+    - adversarial-product-pk
+    # Canonical Better-Skills (non-meta)
+    - bs-dev-flow
+    - bs-requirements-engineering
+    - bs-prose-craft
+    - bs-article-illustrate
+    - bs-social-card
+    - bs-first-customer-finder
+    # Common engineering glue
+    - documentation
+    - git-guardrails-claude-code
+    - security-audit
+    - testing-strategy
+    - delivery-completion
+
+packs:
+  loopos:
+    mount: on_demand
+    purpose: "Verifiable long-running autonomous loops; not a silent default for ordinary coding."
+    skills:
+      - loopos
+      - loopos-goal
+      - loopos-run
+      - loopos-compile
+      - loopos-review
+      - loopos-improve
+      - loopos-benchmark
+      - loopos-doctor
+      - loopos-accept
+      - loopos-recover
+
+  impeccable_design:
+    mount: on_demand
+    purpose: "Frontend polish / generation suite; heavy description and payload cost."
+    skills:
+      - impeccable
+      - frontend-design
+      - teach-impeccable
+      - adapt
+      - animate
+      - audit
+      - bolder
+      - clarify
+      - colorize
+      - critique
+      - delight
+      - distill
+      - extract
+      - harden
+      - normalize
+      - onboard
+      - optimize
+      - polish
+      - quieter
+
+  geo_seo:
+    mount: on_demand
+    purpose: "SEO / GEO specialist work."
+    skills:
+      - seo-geo
+
+  grilling:
+    mount: on_demand
+    purpose: "Adversarial plan interview; prefer user-invoked."
+    skills:
+      - grilling
+      - grill-me
+      - grill-with-docs
+
+  visual_gen:
+    mount: on_demand
+    purpose: "Image / slide / high-end visual generation packs."
+    skills:
+      - pptx
+      - image-to-code
+      - imagegen-frontend-web
+      - imagegen-frontend-mobile
+      - high-end-visual-design
+      - design-taste-frontend
+      - stitch-design-taste
+      - gpt-taste
+      - brandkit
+      - minimalist-ui
+
+  teaching_writing:
+    mount: on_demand
+    purpose: "Skill-authoring teaching surfaces; keep one teaching entry in Core via skills-appreciation."
+    skills:
+      - writing-skills
+      - writing-great-skills
+      - example-skill
+
+  residual_library:
+    mount: on_demand
+    purpose: "TEMPORARY catch-all for skills not yet assigned a coherent domain pack. Architecture debt (ADR-0002 S4): split before treating as stable end-state."
+    debt: split_before_stable
+    skills:
+      - acceptance-criteria
+      - accessibility
+      - api-design
+      - ask-matt
+      - bug-history-retrieval
+      - business-ops-analysis
+      - ci-cd
+      - compliance
+      - data-modeling
+      - decision-mapping
+      - deployment-strategy
+      - domain-modeling
+      - e2e-scenario-design
+      - estimation
+      - feasibility-study
+      - full-output-enforcement
+      - growth-pdca-ops
+      - handoff
+      - implementation-alignment-review
+      - implementation-integrity-audit
+      - incident-response
+      - internationalization
+      - langcraft
+      - loop-me
+      - market-analysis
+      - module-design
+      - monitoring-observability
+      - observability
+      - obsidian-vault
+      - philosophical-discourse
+      - playwright-cli
+      - problem-framing
+      - redesign-existing-projects
+      - refactoring
+      - release-management
+      - retrospective
+      - risk-assessment
+      - runbooks
+      - script-craft
+      - security-design
+      - sprint-planning
+      - system-design
+      - talantsai-frontier-hard-task-design
+      - tech-debt-management
+      - tech-selection
+      - tech-writing
+      - translation
+      - user-research
+      - using-superpowers
+
+archive:
+  mount: never
+  purpose: "Retired from global deploy/discovery; restore only with explicit owner exception."
+  references:
+    - id: lark-pack
+      shelf: "~/.agents/skills-quarantine/authoring-retired/2026-07-17-lark-retire"
+      policy: "~/.agents/skills/POLICY-LARK-RETIRED.md"
+    - id: non-bs-twins
+      shelf: "~/.agents/skills-quarantine/authoring-retired/2026-07-17-bs-canonical"
+      policy: "~/.agents/skills/POLICY-BS-CANONICAL.md"

@@ -4,6 +4,10 @@ This repository has three distinct runtime surfaces: host-agent `SKILL.md`
 loading, Bash-based read-only governance/observability, and the local cleanup
 CLI. Support on one surface does not imply support on another.
 
+Architecture supplements for **non-invasive usage telemetry** and **on-demand
+pack catalogs** live under [`docs/adr/`](adr/README.md) (ADR-0001, ADR-0002).
+Those ADRs do not expand the cleanup mutation support matrix below.
+
 ## Support matrix
 
 | Environment | Skill content | Read-only governance (`scan`, `probe`, `dashboard`, `doctor`) | Trace transform / canary | Cleanup review | Cleanup mutation (`plan`, `apply`, `status`, `undo`) | `setup-cli` |
