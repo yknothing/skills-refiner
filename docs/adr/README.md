@@ -9,6 +9,7 @@
 | [0001](0001-non-invasive-skill-observability.md) | 非侵入式 Skill 用量观测 | Accepted with limitations | 2026-07-17 |
 | [0002](0002-on-demand-pack-catalog.md) | On-demand Pack Catalog（目录级渐进披露） | Accepted with limitations | 2026-07-17 |
 | [0003](0003-versioned-skill-control-plane-and-physical-collections.md) | 版本资格化的 Skill 控制面与物理 Collection | Accepted with limitations | 2026-07-19 |
+| [0004](0004-managed-collection-store-and-transactional-artifact-set-upgrades.md) | 受管 Collection Store 与可恢复 Artifact-Set 升级 | Proposed | 2026-07-20 |
 
 ## 产物
 
@@ -23,6 +24,8 @@
 - 验收：`docs/verification/2026-07-17-observability-pack-catalog-acceptance.md`
 - ADR-0003 评审包：`docs/adversarial-product-pk/2026-07-19-versioned-skill-control-plane/`
 - ADR-0003 验收：`docs/verification/2026-07-19-versioned-skill-control-plane-acceptance.md`
+- ADR-0004 评审包：`docs/adversarial-product-pk/2026-07-20-prodcraft-artifact-set-upgrade/`
+- ADR-0004 验收：`docs/verification/2026-07-20-prodcraft-artifact-set-upgrade-acceptance.md`
 
 ## 约定
 
