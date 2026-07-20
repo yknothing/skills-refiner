@@ -117,6 +117,8 @@ langcraft      FILESYSTEM_READY  issues=[]  name_collisions=0  attention=[]
 
 因此 external receipt 是历史证据而非 controller writer。每个 active operation 均有独立 recovery plan/bytes 和 quarantine root；本轮不执行 recovery GC。37 个 same-repository historical locators 经过显式 path disposition 进入 cleanup quarantine，而不是由 collection apply 自动清退；LangCraft 与 Better Skills 的两个物理 `prose-craft` 仍分别存在于自己的 collection。
 
+Controller 发布闭环也独立完成：以 repository commit `ed00ede64b53c5292c070ecbc7d1436bea472bbb` 为安装时 source identity，通过 `npx skills` local-path copy 更新全局 `skill-hygiene` 与 `skills-refiner`；canonical installed trees 与 repository skill trees `diff -qr` 为 0，已有 Agent projections 继续是指向 canonical trees 的 symlink。Installed launcher help、fresh collection list 与 installed scanner 均成功；scanner 对两项 controller Skills 的 `load_blockers=[]`、全局 `broken_symlink_count=0`。安装前后 `.skill-lock.json` digest 不变，未把本地 controller 发布伪装成第三方 GitHub receipt。
+
 Better v3 apply 后约 5 秒，Finder 在 `bs-dev-flow` 写入 `.DS_Store`，第一次 fresh status 正确暴露 `MEMBER_DRIFT`。最终 observer 将 deployment member/resource content digest 的 portable metadata policy 精确限定为递归忽略 basename `.DS_Store`；source/artifact/predecessor/quarantine/recovery digest 仍 exact，新增任意 `.unexpected` 文件仍触发 `MEMBER_DRIFT`。未删除现场 `.DS_Store` 来制造绿灯。
 
 ## 6. Runtime 与 non-claims

@@ -116,3 +116,5 @@ Status 同时返回 source path、source digest 和 extraction rule。Controller
 Fresh post-cleanup review fingerprint 为 `sha256:94dd99ece7d773586c2a7df43b083be8b74a766f0ea8ee0fbd1f17751733d6e8`：27 个实际 Agent roots、`broken_symlink_count=0`、`eligible_count=0`。`collection list --fresh` 再次确认 ProdCraft、LoopOS、Better Skills、LangCraft 均为 `FILESYSTEM_READY`；三组 managed collections 的 `issues=[]`、`name_collisions=[]`、`management_attention=[]`。Better `bs-prose-craft` 与 LangCraft `prose-craft` 均存在于各自物理 collection，未发生跨仓库代替或清退。
 
 回归门禁：collection controller 90/90、cleanup contract/core/native/transaction 104/104、cleanup CLI 284/284、scanner 101/101，全部 PASS。版本证据由 active immutable artifact 原文件与 digest 直接复核；未向任何 installed `SKILL.md` 写入自定义版本。
+
+全局 controller 最终从 repository commit `ed00ede64b53c5292c070ecbc7d1436bea472bbb` 发布，`skill-hygiene` / `skills-refiner` installed trees 与 repository skill trees byte-exact；installed launcher、fresh collection list、scanner 均通过，`.skill-lock.json` 未被改写。仓库实现完成与全局部署完成因此有各自独立证据，不再互相替代。
