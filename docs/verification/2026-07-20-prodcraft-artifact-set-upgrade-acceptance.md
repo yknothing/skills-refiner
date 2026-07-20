@@ -1,5 +1,7 @@
 # ADR-0004 First-Draft Acceptance Record
 
+> Historical design-stage record. Its implementation/migration veto was superseded for the bounded filesystem scope by ADR-0005 and the [live migration acceptance](2026-07-20-prodcraft-physical-collection-migration.md). Runtime/context qualification remains unproven.
+
 - **Date:** 2026-07-20
 - **Target:** `docs/adr/0004-managed-collection-store-and-transactional-artifact-set-upgrades.md`
 - **Target SHA-256:** `ba9305741bc491147ade85aabe66333560c7c3f83bc879a6a267db088d7b150f`

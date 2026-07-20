@@ -1,6 +1,6 @@
 # ADR-0005: `.agents/skills/prodcraft` 物理 Collection 与 `pc-*` 投影
 
-- **Status:** Proposed — design approved; written-spec review required before implementation
+- **Status:** Accepted and implemented for filesystem scope — Agent runtime/context qualification remains open
 - **Date:** 2026-07-20
 - **Deciders:** Product owner (host machine) + skills-refiner maintainers
 - **Supersedes in part:** ADR-0004 §§1, 4, 5.2, 8（ProdCraft active physical topology and projection publication）
@@ -99,6 +99,8 @@ Profile 规则：
 
 如果某 Agent 会递归发现 `prodcraft/pc-*`，物理迁移仍可被验证，但该 Agent 的 context-containment claim 失败。若 context containment 是该 target 的硬要求，则 live apply 必须阻断，而不是隐藏结果。
 
+实现中的 `filesystem_only` 是显式的未资格化状态，不等于上述三个 runtime profile。Planner 必须先枚举所有物理依赖 root，避免迁走 canonical 实体后留下断链；截至本次 live plan，共发现 15 个 root、585 个精确指向旧 ProdCraft 实体的 symlink。V1 对这些 root 发布单一 `pc-prodcraft` gateway，但在 fresh-session probe 完成前只声明 filesystem projection 成功，不声明 Agent runtime/context 成功。
+
 ## 5. Collection index
 
 `~/.agents/skills/prodcraft/INDEX.json` 是只读 generated view，不是 desired-state writer。其 schema 最少包含：
@@ -120,11 +122,7 @@ gateway.name
 gateway.locator_digest
 profile_matrix_digest
 receipt_snapshot_digest
-fetched_at
-qualified_at
-activated_at
-updated_at
-last_observed_at
+plan_created_at
 operation_id
 ```
 
@@ -136,6 +134,7 @@ operation_id
 - filesystem mtime 不得冒充 install/update time；
 - index 可由 ledger + direct observation 重建；手工编辑不能改变 desired state；
 - index digest 被 generation/operation manifest 绑定。
+- collection root 可忽略唯一的 macOS Finder metadata `.DS_Store`；任何其他未知直接条目仍是 drift。该例外不进入 member set、index 或 runtime surface。
 
 ## 6. Source selection and qualification
 
@@ -193,19 +192,21 @@ Live operation 顺序：
 1. acquire global mutation lock；
 2. fresh-observe receipt、46 legacy entities、known Agent projections and target paths；
 3. materialize exact artifact and target `prodcraft/` tree outside discovery roots；
-4. run source/package/reference/index/locator/discovery gates；
+4. run source/package/Markdown-link-reference/index/locator gates and separately record upstream repository validators；
 5. durable-publish independent pre-state recovery bytes and re-read them；
 6. compile and approve immutable plan hash；
-7. stop participating Agent sessions；
+7. record that already-running Agent sessions may retain stale catalog/context state and require a fresh session after cutover；
 8. move identity-approved legacy entities and projections into operation quarantine；
 9. rename the verified same-filesystem staged collection into `~/.agents/skills/prodcraft/`；
 10. create top-level and Agent-root projections from the approved profile matrix；
 11. verify exact 40-member tree, index, locator, raw symlink targets and absence of old scoped names；
-12. run fresh-session discovery/runtime probes；
-13. seal operation/ledger only after all scoped postconditions pass；
+12. seal filesystem operation/ledger only after all scoped filesystem postconditions pass；
+13. run fresh-session discovery/runtime probes as a separate qualification stage；
 14. on failure, restore the old 46 entities and exact raw projection links；otherwise return `RECOVERY_REQUIRED`。
 
 “transactional” continues to mean managed-writer serialization and crash-consistent recovery, not multi-root atomic visibility.
+
+所有 active/quarantine/publish rename 和 gateway symlink mutation 通过 macOS no-follow native helper 执行；helper 使用已打开 parent directory identity、`openat`、`renameatx_np(RENAME_EXCL)`/`symlinkat` 和 parent `fsync`。五个 durable apply phase 必须各自通过真实 `SIGKILL → RECOVERY_REQUIRED → recover → exact pre-state` 验收。
 
 ## 9. Receipt and provenance handling
 
@@ -232,6 +233,8 @@ Raw `npx/npm` 对 managed names 仍是 competing writer；status/apply 前必须
 - no scoped old unprefixed ProdCraft entity has reappeared；
 - external receipt drift is explicit。
 
+`FILESYSTEM_READY` 只表示上述直接物理检查通过；响应必须同时显示 `scope: filesystem` 和 `runtime_status: UNVERIFIED`，直到独立 Agent probe evidence 可用。不得以该状态替代 Agent loadability/context 结论。
+
 手工删除一个 member、index、locator 或 projection 会产生 `MISSING`/`DRIFTED`，不会成为 formal uninstall。`repair` 只从 exact active artifact/recovery bytes 恢复；`accept-removal` 是独立 approved transaction。
 
 ## 11. CLI implementation surface
@@ -244,6 +247,7 @@ skills-refiner collection plan prodcraft --candidate <commit> --profile-matrix <
 skills-refiner collection apply --plan <file> --confirm <plan-hash> --json
 skills-refiner collection status prodcraft --fresh --json
 skills-refiner collection repair prodcraft --confirm <operation-id> --json
+skills-refiner collection recover <operation-id> --confirm <operation-id> --json
 skills-refiner collection undo <operation-id> --confirm <operation-id> --json
 ```
 
@@ -255,14 +259,14 @@ skills-refiner collection undo <operation-id> --confirm <operation-id> --json
 |---|---|---|
 | 1. Read-only | check/status/plan schemas, source pin, 46→40 disposition, target tree simulation | forbidden |
 | 2. Isolated transaction | apply/status/repair/undo against synthetic HOME and copied upstream fixture | forbidden |
-| 3. Agent probes | real directory nesting, recursion, symlink and gateway routing per target | forbidden |
-| 4. Live cutover | exact approved plan, recovery proof, stopped sessions, all prior gates green | separately authorized by Owner's implementation command |
+| 3. Live filesystem cutover | exact approved plan, recovery proof, isolated transaction gates green, explicit `runtime_status: UNVERIFIED` | separately authorized by Owner's implementation command |
+| 4. Agent qualification | fresh-session nesting, recursion, symlink and gateway routing evidence per target | only bounded repair/rollback if a qualification result requires it |
 
-The Owner's `实施` command authorizes progressing through these stages and, after the specified live gates pass, performing Stage 4 without a second design discussion. Exact plan-hash confirmation remains a machine safety precondition, not a new product decision.
+The Owner's `实施` command authorizes progressing through these stages and, after the specified filesystem gates pass, performing Stage 3 without a second design discussion. Exact plan-hash confirmation remains a machine safety precondition, not a new product decision. Stage 4 controls runtime/context claims; it is not allowed to retroactively make the physical filesystem result untrue, and its absence is always surfaced as `UNVERIFIED`.
 
 ## 13. Acceptance criteria
 
-Implementation is complete only when fresh evidence proves：
+Physical migration is complete only when fresh evidence proves：
 
 ```text
 physical_collection_root == ~/.agents/skills/prodcraft
@@ -274,10 +278,10 @@ top_level_scoped_legacy_prodcraft_count == 0
 default_top_level_projection_set == {pc-prodcraft}
 INDEX/artifact/member/locator digests match
 known unrelated Skills unchanged
-manual_member_delete -> non-READY
+manual_member_delete -> non-FILESYSTEM_READY
 raw_installer_rewrite -> DRIFTED or CONFLICT
 undo -> old 46 entities and known raw links restored under rollback identity schema
-fresh-session discovery/runtime result recorded per participating Agent
+runtime_status == UNVERIFIED until fresh-session evidence is recorded per participating Agent
 ```
 
 Context reduction may be claimed only for Agent/profile pairs whose discovery evidence proves it.
@@ -285,6 +289,8 @@ Context reduction may be claimed only for Agent/profile pairs whose discovery ev
 ## 14. Rollback and recovery scope
 
 No old entity is permanently deleted during apply. Pre-state bytes, modes, xattrs/ACLs where required, raw link targets, receipt digest and topology manifest must be preserved under the independently addressed recovery root before mutation.
+
+macOS may rewrite `com.apple.provenance` when copying an entry. The recovery identity therefore binds content plus stable mode/owner/flags/ACL/xattrs and explicitly excludes only this OS-generated telemetry xattr; the active pre-state native manifest is still bound until quarantine. This exclusion must be regression-tested with a real provenanced file and must not generalize to other xattrs.
 
 Undo removes only objects whose post-state identity matches the committed operation, then restores the exact approved pre-state. A user-created or externally replaced conflicting path blocks undo instead of being overwritten.
 
@@ -314,5 +320,6 @@ Reopen when：
 
 - [ADR-0004: Managed collection store and recoverable artifact-set upgrade](0004-managed-collection-store-and-transactional-artifact-set-upgrades.md)
 - [ADR-0004 acceptance](../verification/2026-07-20-prodcraft-artifact-set-upgrade-acceptance.md)
+- [ADR-0005 live migration acceptance](../verification/2026-07-20-prodcraft-physical-collection-migration.md)
 - [ProdCraft pinned upstream snapshot](https://github.com/yknothing/prodcraft/commit/fd05978dbbbf5a064205a695af47c8a550f1b224)
 - [ProdCraft global/npx compatibility contract](https://github.com/yknothing/prodcraft/blob/fd05978dbbbf5a064205a695af47c8a550f1b224/docs/distribution/npx-skills-compat.md)
