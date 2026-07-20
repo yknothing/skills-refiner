@@ -10,7 +10,8 @@
 | [0002](0002-on-demand-pack-catalog.md) | On-demand Pack Catalog（目录级渐进披露） | Accepted with limitations | 2026-07-17 |
 | [0003](0003-versioned-skill-control-plane-and-physical-collections.md) | 版本资格化的 Skill 控制面与物理 Collection | Accepted with limitations | 2026-07-19 |
 | [0004](0004-managed-collection-store-and-transactional-artifact-set-upgrades.md) | 受管 Collection Store 与可恢复 Artifact-Set 升级 | Proposed | 2026-07-20 |
-| [0005](0005-prodcraft-in-root-physical-collection-and-projection.md) | `.agents/skills/prodcraft` 物理 Collection 与 `pc-*` 投影 | Proposed | 2026-07-20 |
+| [0005](0005-prodcraft-in-root-physical-collection-and-projection.md) | `.agents/skills/prodcraft` 物理 Collection 与 `pc-*` 投影 | Accepted for filesystem scope | 2026-07-20 |
+| [0006](0006-declarative-managed-collections-and-reconciliation-catalog.md) | 声明式 Managed Collections 与可调和管理目录 | Accepted with limitations | 2026-07-20 |
 
 ## 产物
 
@@ -27,6 +28,8 @@
 - ADR-0003 验收：`docs/verification/2026-07-19-versioned-skill-control-plane-acceptance.md`
 - ADR-0004 评审包：`docs/adversarial-product-pk/2026-07-20-prodcraft-artifact-set-upgrade/`
 - ADR-0004 验收：`docs/verification/2026-07-20-prodcraft-artifact-set-upgrade-acceptance.md`
+- ADR-0006 / Managed Collections V2 评审包：`docs/adversarial-product-pk/2026-07-20-managed-collections-v2/`
+- ADR-0006 / 三组 live migrations 验收：`docs/verification/2026-07-20-managed-collections-v2-and-three-collection-migrations.md`
 
 ## 约定
 
