@@ -398,7 +398,20 @@ static int allowed_active_root(const char *home, const char *active_root) {
             && active_root[strlen(home)] == '/'
             && strcmp(active_root + strlen(home) + 1U, allowed[index]) == 0) return 1;
     }
-    return 0;
+    const char *relative = relative_to_home(home, active_root);
+    if (relative == NULL || relative[0] != '.'
+        || relative[1] == '\0' || !((relative[1] >= 'A' && relative[1] <= 'Z')
+          || (relative[1] >= 'a' && relative[1] <= 'z')
+          || (relative[1] >= '0' && relative[1] <= '9'))) return 0;
+    const char *separator = strchr(relative, '/');
+    if (separator == NULL || strcmp(separator, "/skills") != 0) return 0;
+    for (const char *cursor = relative + 2; cursor < separator; cursor += 1) {
+        if (!((*cursor >= 'A' && *cursor <= 'Z')
+              || (*cursor >= 'a' && *cursor <= 'z')
+              || (*cursor >= '0' && *cursor <= '9')
+              || *cursor == '.' || *cursor == '_' || *cursor == '-')) return 0;
+    }
+    return 1;
 }
 
 static int open_relative_directory(int base_fd, const char *relative, int create, int owner_only) {

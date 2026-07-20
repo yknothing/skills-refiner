@@ -1,5 +1,6 @@
 import {
   BATCH_ERROR_CODES,
+  CLEANUP_BATCH_MAX_ITEMS,
   SCHEMAS,
   buildBatchBinding,
   buildBatchError,
@@ -65,6 +66,9 @@ export const RESTORE_DURABLE_STATES = Object.freeze([
   'RESTORING',
   'RESTORED',
 ]);
+
+export { CLEANUP_BATCH_MAX_ITEMS };
+const NATIVE_HELPER_MAX_INPUT_BYTES = 1024 * 1024;
 
 function publicationFaultPhases(state) {
   const name = state.toLowerCase();
@@ -334,6 +338,27 @@ function initialStateFor(plan, item) {
     lock: null,
     outcome: null,
   };
+}
+
+export function assertBatchPlanCapacity(plan) {
+  validatePlan(plan);
+  if (plan.items.length <= 1) return plan;
+  if (plan.items.length > CLEANUP_BATCH_MAX_ITEMS) {
+    throw new CleanupBatchError('batch_item_limit_exceeded', 'invalid');
+  }
+  const batchPlan = buildBatchPlan(plan);
+  for (const item of plan.items) {
+    const input = [
+      plan,
+      manifestFor(plan, item),
+      initialStateFor(plan, item),
+      buildBatchBinding(batchPlan, item.item_id),
+    ].map((value) => canonicalJson(value)).join('\n').concat('\n');
+    if (Buffer.byteLength(input, 'utf8') > NATIVE_HELPER_MAX_INPUT_BYTES) {
+      throw new CleanupBatchError('batch_native_input_limit_exceeded', 'invalid');
+    }
+  }
+  return plan;
 }
 
 function isObject(value) {
@@ -908,6 +933,18 @@ function assertActiveBatchOwnerConsistent(truth, owner) {
   }
 }
 
+function untouchedStaleBatchCanRelease(batchState, truth, owner) {
+  return batchState?.state === 'READY' && batchState.sequence === 0
+    && batchState.items.every(({ status }) => status === 'NOT_STARTED')
+    && truth.observations.every((observation) => {
+      const state = observation.transaction?.state;
+      return state?.state === 'PLANNED' && state.sequence === 0
+        && state.lock === null && state.outcome === null
+        && canonicalJson(observation.transaction?.lock) === canonicalJson(owner)
+        && observation.transactionHasMutated === false;
+    });
+}
+
 function statusBatchTransactionInternal({
   home,
   transactionId,
@@ -956,10 +993,7 @@ function statusBatchTransactionInternal({
     batchLock: batchRecords.lock,
     executionIdentity,
   };
-  const truth = rebuildBatchTruth(batch, { summary: true });
-  if (truth.items.some(({ status }) => status === 'RECOVERY_REQUIRED')) {
-    fail('batch_recovery_required', 'recovery_required');
-  }
+  let truth = rebuildBatchTruth(batch, { summary: true });
   const targetIndex = batchPlan.transaction_map.findIndex((mapping) => (
     mapping.transaction_id === transactionId
       && mapping.item_id === binding.item_id
@@ -969,6 +1003,9 @@ function statusBatchTransactionInternal({
   if (targetIndex < 0) fail('batch_binding_invalid', 'recovery_required');
 
   if (batchRecords.lock !== null) {
+    const releaseUntouchedStaleLock = untouchedStaleBatchCanRelease(batchRecords.state, truth, batchRecords.lock);
+    if (truth.items.some(({ status }) => status === 'RECOVERY_REQUIRED')
+        && !releaseUntouchedStaleLock) fail('batch_recovery_required', 'recovery_required');
     assertActiveBatchOwnerConsistent(truth, batchRecords.lock);
     try {
       isolateStaleBatchLock({
@@ -992,6 +1029,12 @@ function statusBatchTransactionInternal({
         || canonicalJson(afterIsolation.state) !== canonicalJson(batchRecords.state)) {
       fail('batch_lock_isolation_postcondition_failed', 'recovery_required');
     }
+    batch.batchLock = null;
+    truth = rebuildBatchTruth(batch, { summary: true });
+  }
+
+  if (truth.items.some(({ status }) => status === 'RECOVERY_REQUIRED')) {
+    fail('batch_recovery_required', 'recovery_required');
   }
 
   const target = truth.observations[targetIndex];
@@ -2702,6 +2745,7 @@ async function applyPlanInternal({
       failureIndex: null,
     });
   }
+  assertBatchPlanCapacity(plan);
   let batch;
   try {
     batch = initializeBatch({ home, plan });
@@ -3070,4 +3114,5 @@ export async function applyPlan(options = {}) {
 export const __testing = Object.freeze({
   joinMutationTruth,
   rebuildBatchTruthForReporting,
+  untouchedStaleBatchCanRelease,
 });

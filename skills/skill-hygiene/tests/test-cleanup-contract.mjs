@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 import {
+  CLEANUP_BATCH_MAX_ITEMS,
   SCHEMAS,
   buildBatchBinding,
   buildBatchError,
@@ -19,6 +20,7 @@ import {
   deriveBatchId,
   deriveBatchSummaryOverallStatus,
   deriveTransactionId,
+  partitionPlan,
   sha256Json,
   transactionStorageKey,
   undoCommandArguments,
@@ -35,6 +37,30 @@ import {
   validateTransactionBatchStatus,
   validateTransactionResult,
 } from '../lib/cleanup-contract.mjs';
+
+test('plan partitioning preserves item evidence and derives bounded child identities', () => {
+  const source = validMultiPlan((CLEANUP_BATCH_MAX_ITEMS * 2) + 1);
+  const children = partitionPlan(source);
+  assert.deepEqual(children.map(({ items }) => items.length), [
+    CLEANUP_BATCH_MAX_ITEMS,
+    CLEANUP_BATCH_MAX_ITEMS,
+    1,
+  ]);
+  assert.deepEqual(
+    children.flatMap(({ items }) => items.map(({ item_id: itemId }) => itemId)),
+    source.items.map(({ item_id: itemId }) => itemId),
+  );
+  for (const child of children) {
+    assert.equal(validatePlan(child), child);
+    assert.equal(child.authorization_id, source.authorization_id);
+    assert.equal(child.scan_fingerprint, source.scan_fingerprint);
+    assert.notEqual(child.plan_hash, source.plan_hash);
+  }
+  assert.throws(
+    () => partitionPlan(source, CLEANUP_BATCH_MAX_ITEMS + 1),
+    /partition size is unsupported/,
+  );
+});
 
 function validPlan(overrides = {}) {
   const executionIdentity = {

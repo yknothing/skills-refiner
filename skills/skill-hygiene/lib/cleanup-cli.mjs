@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import {
   buildApplyReport,
   canonicalJson,
+  CLEANUP_BATCH_MAX_ITEMS,
   ContractError,
+  partitionPlan,
   SCHEMAS,
   validatePlan,
 } from './cleanup-contract.mjs';
@@ -37,6 +39,7 @@ import {
   CleanupTransactionError,
   APPLY_FAULT_PHASES,
   RESTORE_FAULT_PHASES,
+  assertBatchPlanCapacity,
   applyItem,
   applyPlan,
   statusTransaction,
@@ -463,6 +466,103 @@ function parseNamedFileOption(args, option) {
   return args[index + 1];
 }
 
+function writeJsonOutputExclusive(outputPath, value, artifactType) {
+  if (!isAbsolute(outputPath) || resolve(outputPath) !== outputPath) {
+    invalid('invalid_output_path', '[ERROR] --output must be a normalized absolute path.');
+  }
+  const parent = dirname(outputPath);
+  try {
+    if (realpathSync(parent) !== parent || lstatSync(parent).isSymbolicLink()) throw new Error('unsafe parent');
+  } catch {
+    invalid('invalid_output_path', '[ERROR] --output parent must be an existing real directory.');
+  }
+  let descriptor;
+  let created = false;
+  try {
+    descriptor = openSync(outputPath, 'wx', 0o600);
+    created = true;
+    const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+    writeFileSync(descriptor, bytes);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    return {
+      schema_version: 'skills-refiner.cleanup.output.v1', overall_status: 'ok',
+      artifact_type: artifactType, output_path: outputPath,
+      artifact_digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+    };
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
+    if (created) try { unlinkSync(outputPath); } catch {}
+    invalid('output_write_failed', `[ERROR] Cannot create --output artifact: ${error.message}`);
+  }
+}
+
+function writePlanPartition(outputDirectory, plan) {
+  if (!isAbsolute(outputDirectory) || resolve(outputDirectory) !== outputDirectory) {
+    invalid('invalid_partition_directory', '[ERROR] --partition-dir must be a normalized absolute path.');
+  }
+  let directoryStat;
+  try {
+    directoryStat = lstatSync(outputDirectory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
+        || realpathSync(outputDirectory) !== outputDirectory
+        || directoryStat.uid !== process.getuid() || (directoryStat.mode & 0o077) !== 0) {
+      throw new Error('unsafe directory');
+    }
+  } catch {
+    invalid('invalid_partition_directory', '[ERROR] --partition-dir must be an existing owner-private real directory.');
+  }
+  const children = partitionPlan(plan);
+  const created = [];
+  try {
+    const childPlans = children.map((child, index) => {
+      assertBatchPlanCapacity(child);
+      const outputPath = join(
+        outputDirectory,
+        `plan-${String(index + 1).padStart(4, '0')}-${child.plan_hash.slice(7, 19)}.json`,
+      );
+      const receipt = writeJsonOutputExclusive(outputPath, child, 'plan');
+      created.push(outputPath);
+      return {
+        index,
+        item_count: child.items.length,
+        plan_hash: child.plan_hash,
+        output_path: outputPath,
+        artifact_digest: receipt.artifact_digest,
+      };
+    });
+    const manifestBase = {
+      schema_version: 'skills-refiner.cleanup.plan-partition.v1',
+      source_plan_hash: plan.plan_hash,
+      max_items_per_plan: CLEANUP_BATCH_MAX_ITEMS,
+      total_items: plan.items.length,
+      child_plans: childPlans,
+    };
+    const manifest = {
+      ...manifestBase,
+      partition_hash: `sha256:${createHash('sha256').update(canonicalJson(manifestBase)).digest('hex')}`,
+    };
+    const manifestPath = join(outputDirectory, 'manifest.json');
+    const receipt = writeJsonOutputExclusive(manifestPath, manifest, 'plan_partition');
+    created.push(manifestPath);
+    return {
+      schema_version: 'skills-refiner.cleanup.partition-output.v1',
+      overall_status: 'ok',
+      output_path: manifestPath,
+      artifact_digest: receipt.artifact_digest,
+      partition_hash: manifest.partition_hash,
+      child_plan_count: childPlans.length,
+      total_items: plan.items.length,
+    };
+  } catch (error) {
+    for (const path of created.toReversed()) {
+      try { unlinkSync(path); } catch {}
+    }
+    throw error;
+  }
+}
+
 function rejectUnknownOptions(args, allowed) {
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
@@ -476,15 +576,46 @@ function rejectUnknownOptions(args, allowed) {
 }
 
 async function runReview(args) {
-  rejectUnknownOptions(args, new Set(['--scan']));
+  rejectUnknownOptions(args, new Set(['--scan', '--output']));
   const scanPath = parseNamedFileOption(args, '--scan');
+  const outputPath = parseNamedFileOption(args, '--output');
+  let review;
   if (scanPath) {
-    return compileReview(validateScan(readJsonFile(scanPath)), {
+    review = compileReview(validateScan(readJsonFile(scanPath)), {
       executionEligible: false,
       source: 'offline_scan',
     });
+  } else {
+    review = (await compileLiveReview()).review;
   }
-  return (await compileLiveReview()).review;
+  return outputPath ? writeJsonOutputExclusive(outputPath, review, 'review') : review;
+}
+
+function decisionsFromRetirePaths(review, selectorPath) {
+  const selector = readJsonFile(selectorPath);
+  if (selector?.schema_version !== 'skills-refiner.cleanup.retire-paths.v1'
+      || selector.review_fingerprint !== review.review_fingerprint
+      || !Array.isArray(selector.entry_paths)
+      || selector.entry_paths.some((path) => typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path)
+      || new Set(selector.entry_paths).size !== selector.entry_paths.length) {
+    invalid('invalid_retire_paths', '[ERROR] Retire-path selector validation failed.');
+  }
+  const candidatePaths = new Map(review.candidates.map((candidate) => [candidate.entry_path, candidate]));
+  for (const path of selector.entry_paths) {
+    const candidate = candidatePaths.get(path);
+    if (!candidate || candidate.mutation_eligibility !== 'eligible'
+        || candidate.governance_scope !== 'installed_or_distributed') {
+      invalid('invalid_retire_paths', `[ERROR] Retire path is not an eligible reviewed entry: ${path}`);
+    }
+  }
+  const retired = new Set(selector.entry_paths);
+  return {
+    schema_version: SCHEMAS.decisions,
+    review_fingerprint: review.review_fingerprint,
+    decisions: review.candidates.map(({ candidate_id: candidateId, entry_path: entryPath }) => ({
+      candidate_id: candidateId, action: retired.has(entryPath) ? 'retire' : 'later',
+    })),
+  };
 }
 
 async function runPlan(args) {
@@ -494,13 +625,16 @@ async function runPlan(args) {
   if (persistIndexes.length > 1) invalid();
   const persistKeep = persistIndexes.length === 1;
   const valueArgs = args.filter((argument) => argument !== '--persist-keep');
-  rejectUnknownOptions(valueArgs, new Set(['--review', '--decisions']));
+  rejectUnknownOptions(valueArgs, new Set(['--review', '--decisions', '--retire-paths', '--output', '--partition-dir']));
   const reviewPath = parseNamedFileOption(args, '--review');
   const decisionsPath = parseNamedFileOption(args, '--decisions');
-  if (!reviewPath || !decisionsPath) invalid();
+  const retirePathsPath = parseNamedFileOption(args, '--retire-paths');
+  const outputPath = parseNamedFileOption(args, '--output');
+  const partitionDirectory = parseNamedFileOption(args, '--partition-dir');
+  if (!reviewPath || (decisionsPath === null) === (retirePathsPath === null)) invalid();
+  if (outputPath !== null && partitionDirectory !== null) invalid();
 
   const savedReview = readJsonFile(reviewPath);
-  const decisions = readJsonFile(decisionsPath);
   const live = await compileLiveReview();
   const freshReview = live.review;
   if (savedReview?.schema_version !== SCHEMAS.review
@@ -511,6 +645,9 @@ async function runPlan(args) {
       '[ERROR] The live skill state changed after review.',
     );
   }
+  const decisions = decisionsPath === null
+    ? decisionsFromRetirePaths(freshReview, retirePathsPath)
+    : readJsonFile(decisionsPath);
 
   if (process.platform !== 'darwin') {
     unsupported(
@@ -525,7 +662,19 @@ async function runPlan(args) {
   if (persistKeep) {
     await persistKeepDecisions(freshReview, decisions, live.adapter);
   }
-  return plan;
+  if (partitionDirectory !== null) return writePlanPartition(partitionDirectory, plan);
+  assertBatchPlanCapacity(plan);
+  return outputPath ? writeJsonOutputExclusive(outputPath, plan, 'plan') : plan;
+}
+
+function runPartition(args) {
+  rejectUnknownOptions(args, new Set(['--plan', '--output-dir']));
+  const planPath = parseNamedFileOption(args, '--plan');
+  const outputDirectory = parseNamedFileOption(args, '--output-dir');
+  if (planPath === null || outputDirectory === null) invalid();
+  const plan = readJsonFile(planPath);
+  try { validatePlan(plan); } catch { invalid('invalid_plan', '[ERROR] Plan validation failed.'); }
+  return writePlanPartition(outputDirectory, plan);
 }
 
 async function runApply(args) {
@@ -1354,6 +1503,7 @@ async function runGuidedCleanup(args) {
     }
 
     const plan = await compilePlan({ review, decisions }, live.adapter);
+    assertBatchPlanCapacity(plan);
     const confirmation = `apply ${plan.plan_hash.slice(7, 7 + CONFIRMATION_HEX_LENGTH)}`;
     const answer = await prompter.question(`Type ${confirmation} to retire ${retireCount}: `);
     if (answer !== confirmation) {
@@ -1421,8 +1571,9 @@ function helpText() {
     '',
     'Usage:',
     '  skills-refiner setup-cli [--node ABS] [--target ABS] [--confirm DIGEST] [--json]',
-    '  skills-refiner cleanup review [--scan FILE] [--json]',
-    '  skills-refiner cleanup plan --review FILE --decisions FILE [--persist-keep] [--json]',
+    '  skills-refiner cleanup review [--scan FILE] [--output FILE] [--json]',
+    `  skills-refiner cleanup plan --review FILE (--decisions FILE | --retire-paths FILE) [--output FILE | --partition-dir DIR] [--persist-keep] [--json]  # max ${CLEANUP_BATCH_MAX_ITEMS} items per executable plan`,
+    '  skills-refiner cleanup partition --plan FILE --output-dir DIR [--json]',
     '  skills-refiner cleanup apply --plan FILE --confirm HASH [--post-scan] [--json]',
     '  skills-refiner cleanup status TRANSACTION_ID [--json]',
     '  skills-refiner cleanup undo TRANSACTION_ID --confirm TRANSACTION_ID [--json]',
@@ -1467,6 +1618,7 @@ async function run(argv) {
   }
   if (command === 'review') return { kind: 'result', value: await runReview(args) };
   if (command === 'plan') return { kind: 'result', value: await runPlan(args) };
+  if (command === 'partition') return { kind: 'result', value: runPartition(args) };
   if (command === 'apply') return { kind: 'result', value: await runApply(args) };
   if (command === 'status') return { kind: 'result', value: runStatus(args) };
   if (command === 'undo') return { kind: 'result', value: await runUndo(args) };

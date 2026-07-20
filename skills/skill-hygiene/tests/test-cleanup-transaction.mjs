@@ -49,11 +49,13 @@ import {
   __testing as transactionTesting,
   CleanupTransactionError,
   CleanupBatchError,
+  CLEANUP_BATCH_MAX_ITEMS,
   APPLY_FAULT_PHASES,
   RESTORE_FAULT_PHASES,
   advanceTransactionState,
   applyItem,
   applyPlan,
+  assertBatchPlanCapacity,
   assertTransactionTransition,
   initializeTransaction,
   statusTransaction,
@@ -103,6 +105,59 @@ test('mutation truth join is monotonic and command-specific', () => {
       { mutationOccurred: false, mutationOutcome: 'unknown' }),
     { mutationOccurred: true, mutationOutcome: 'unknown' },
   );
+});
+
+test('only an untouched stale batch may release its lock despite externally missing entries', () => {
+  const owner = { scope: 'batch' };
+  const state = {
+    state: 'READY', sequence: 0,
+    items: [{ status: 'NOT_STARTED' }, { status: 'NOT_STARTED' }],
+  };
+  const planned = () => ({
+    transaction: { lock: owner, state: { state: 'PLANNED', sequence: 0, lock: null, outcome: null } },
+    transactionHasMutated: false,
+  });
+  const truth = { observations: [planned(), planned()] };
+  assert.equal(transactionTesting.untouchedStaleBatchCanRelease(state, truth, owner), true);
+  truth.observations[0].transactionHasMutated = true;
+  assert.equal(transactionTesting.untouchedStaleBatchCanRelease(state, truth, owner), false);
+  truth.observations[0] = planned();
+  truth.observations[1].transaction.state.state = 'APPLYING';
+  assert.equal(transactionTesting.untouchedStaleBatchCanRelease(state, truth, owner), false);
+  truth.observations[1] = planned();
+  state.state = 'RUNNING';
+  assert.equal(transactionTesting.untouchedStaleBatchCanRelease(state, truth, owner), false);
+});
+
+test('oversized cleanup batches fail before durable batch initialization', async () => {
+  const home = makeSandbox();
+  try {
+    const activeRoot = join(home, '.claude/skills');
+    mkdirSync(activeRoot, { recursive: true });
+    ensureMacosHelper({ home, forceCompile: true });
+    const source = writeSkill(join(home, 'capacity-source'), 'capacity-source');
+    const adapter = createMacosAdapter({ home });
+    const identities = [];
+    for (let index = 0; index <= CLEANUP_BATCH_MAX_ITEMS; index += 1) {
+      const entryPath = join(activeRoot, `capacity-entry-${index}`);
+      symlinkSync(source, entryPath);
+      identities.push(await adapter.inspectForPlan(entryPath, activeRoot, {
+        entry_kind: 'symlink',
+        entry_identity: { raw_link_target_base64: Buffer.from(source).toString('base64') },
+      }));
+    }
+    const plan = planForIdentities(identities, '7'.repeat(32));
+    assert.throws(
+      () => assertBatchPlanCapacity(plan),
+      (error) => error instanceof CleanupBatchError
+        && error.code === 'batch_item_limit_exceeded'
+        && error.status === 'invalid',
+    );
+    assert.equal(existsSync(join(home, '.agents/skills-quarantine/batches')), false);
+  } finally {
+    __testing.clearHelperCache();
+    removeSandbox(home);
+  }
 });
 
 function planForIdentity(identity, authorizationId = '0'.repeat(32)) {

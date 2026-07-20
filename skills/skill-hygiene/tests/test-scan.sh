@@ -161,6 +161,8 @@ EOF
     mkdir -p "$SANDBOX/.claude/skills"
     ln -s "../../.agents/skills/healthy-skill" "$SANDBOX/.claude/skills/healthy-skill"
     ln -s "../../.agents/skills/deleted-skill" "$SANDBOX/.claude/skills/broken-link"
+    mkdir -p "$SANDBOX/.qoder/skills"
+    ln -s "../../.agents/skills/deleted-dynamic-skill" "$SANDBOX/.qoder/skills/dynamic-broken-link"
     write_skill "$SANDBOX/vendor/pipe|target" "pipe-target" "Use when testing literal pipe characters in raw symlink targets." "The scanner must preserve the raw target byte-for-byte instead of parsing a delimiter-encoded classification record."
     ln -s "../../vendor/pipe|target" "$SANDBOX/.claude/skills/pipe-link"
     local newline_target
@@ -257,6 +259,7 @@ run_tests() {
     assert_eq "Claude symlink count" "3" "$(echo "$json_output" | jq '.topology[".claude/skills"].symlinks // 0')"
     assert_eq "Claude native count" "1" "$(echo "$json_output" | jq '.topology[".claude/skills"].native // 0')"
     assert_eq "Cursor symlink count" "1" "$(echo "$json_output" | jq '.topology[".cursor/skills"].symlinks // 0')"
+    assert_eq "Dynamically discovered Qoder broken count" "1" "$(echo "$json_output" | jq '.topology[".qoder/skills"].broken_symlinks // 0')"
     assert_eq "Gemini empty dir has zero skills" "0" "$(echo "$json_output" | jq '.topology[".gemini/skills"].total // 0')"
     echo ""
 
@@ -271,7 +274,7 @@ run_tests() {
     absolute_canonical="$(cd -P "$SANDBOX/vendor/absolute-linked-skill" && pwd)/SKILL.md"
     assert_eq "Absolute symlink resolves to target" "$absolute_canonical" "$(echo "$json_output" | jq -r '.skill_links[] | select(.name == "absolute-linked-skill") | .canonical_skill_file')"
     assert_eq "Absolute symlink is not broken" "0" "$(echo "$json_output" | jq '[.broken_symlinks[] | select(.dir_name == "absolute-linked-skill")] | length')"
-    assert_eq "Broken symlink detected" "2" "$(echo "$json_output" | jq '.broken_symlinks | length')"
+    assert_eq "Broken symlink detected" "3" "$(echo "$json_output" | jq '.broken_symlinks | length')"
     assert_eq "Broken symlink name" "broken-link" "$(echo "$json_output" | jq -r '.broken_symlinks[] | select(.dir_name == "broken-link") | .dir_name')"
     assert_eq "Pipe link target preserved" "../../vendor/pipe|target" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "pipe-link") | .link_target')"
     assert_eq "Pipe raw link target preserved" "../../vendor/pipe|target" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "pipe-link") | .raw_link_target')"

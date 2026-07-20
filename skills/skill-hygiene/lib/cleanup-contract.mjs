@@ -22,6 +22,7 @@ export const SCHEMAS = Object.freeze({
 });
 
 export const ACTIONS = Object.freeze(['quarantine']);
+export const CLEANUP_BATCH_MAX_ITEMS = 8;
 
 export const BATCH_ERROR_CODES = Object.freeze({
   preflightDrift: 'batch_preflight_drift',
@@ -151,6 +152,36 @@ export function computeItemHash(item) {
   canonicalJson(item);
   const { item_hash: _itemHash, transaction_id: _transactionId, ...hashInput } = item;
   return sha256Json(hashInput);
+}
+
+export function partitionPlan(plan, maxItems = CLEANUP_BATCH_MAX_ITEMS) {
+  validatePlan(plan);
+  if (!Number.isSafeInteger(maxItems) || maxItems < 1
+      || maxItems > CLEANUP_BATCH_MAX_ITEMS) {
+    fail('plan partition size is unsupported');
+  }
+  const children = [];
+  for (let offset = 0; offset < plan.items.length; offset += maxItems) {
+    const child = {
+      schema_version: plan.schema_version,
+      product_version: plan.product_version,
+      platform: plan.platform,
+      authorization_id: plan.authorization_id,
+      scan_fingerprint: plan.scan_fingerprint,
+      created_at: plan.created_at,
+      items: plan.items.slice(offset, offset + maxItems).map((item) => {
+        const { transaction_id: _transactionId, ...copy } = item;
+        return copy;
+      }),
+    };
+    child.plan_hash = computePlanHash(child);
+    child.items = child.items.map((item) => ({
+      ...item,
+      transaction_id: deriveTransactionId(child.plan_hash, item.item_id),
+    }));
+    children.push(validatePlan(child));
+  }
+  return Object.freeze(children);
 }
 
 export function computeIdentityHash(identity) {

@@ -541,6 +541,17 @@ test('path authorization rejects relative, nested, unknown, and symlinked active
     expectAdapterError('blocked', 'not_immediate_child'),
   );
 
+  const dynamicRoot = join(home, '.qoder/skills');
+  const dynamicEntry = join(dynamicRoot, 'stale-link');
+  mkdirSync(dynamicRoot, { recursive: true });
+  symlinkSync('../../.agents/skills/missing-stale-link', dynamicEntry);
+  const dynamicCandidate = symlinkCandidate(
+    dynamicEntry, dynamicRoot, '../../.agents/skills/missing-stale-link', 'broken_symlink',
+  );
+  const dynamicIdentity = await adapter.inspectForPlan(dynamicEntry, dynamicRoot, dynamicCandidate);
+  assert.equal(dynamicIdentity.entry_kind, 'broken_symlink');
+  assert.equal(dynamicIdentity.raw_link_target_base64, dynamicCandidate.entry_identity.raw_link_target_base64);
+
   const realRoot = join(home, 'factory-real-skills');
   mkdirSync(realRoot);
   symlinkSync(realRoot, join(home, '.factory/skills'));

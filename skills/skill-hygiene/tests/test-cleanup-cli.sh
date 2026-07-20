@@ -48,6 +48,7 @@ scan_file="$SANDBOX/scan.json"
 review_file="$SANDBOX/review.json"
 decisions_file="$SANDBOX/decisions.json"
 plan_file="$SANDBOX/plan.json"
+selector_file="$SANDBOX/retire-paths.json"
 
 [ -x "$NODE24_BIN" ] || { echo "Node 24 test runtime missing: $NODE24_BIN" >&2; exit 1; }
 assert_eq "certified Node major" "24" "$($NODE24_BIN -p 'process.versions.node.split(".")[0]')"
@@ -665,8 +666,25 @@ assert_eq "live review is execution eligible" "true" "$(jq -r '.execution_eligib
 assert_eq "live review stdout is one object" "1" "$(jq -s 'length' "$stdout_file")"
 
 cp "$stdout_file" "$review_file"
+review_output="$SANDBOX/review-output.json"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup review --output "$review_output" --json
+assert_eq "review --output returns a compact artifact receipt" "skills-refiner.cleanup.output.v1" "$(jq -r '.schema_version' "$stdout_file")"
+assert_eq "review --output writes the full review" "skills-refiner.cleanup.review.v1" "$(jq -r '.schema_version' "$review_output")"
+assert_eq "review --output is owner-only" "600" "$(stat -f '%Lp' "$review_output")"
+review_output_digest=$(shasum -a 256 "$review_output" | awk '{print $1}')
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup review --output "$review_output" --json
+assert_eq "review --output refuses replacement" "2" "$RUN_STATUS"
+assert_eq "review --output preserves existing artifact" "$review_output_digest" \
+    "$(shasum -a 256 "$review_output" | awk '{print $1}')"
 jq '{schema_version:"skills-refiner.cleanup.decisions.v1",review_fingerprint:.review_fingerprint,decisions:[.candidates[]|{candidate_id,action:"later"}]}' \
     "$review_file" >"$decisions_file"
+plan_output="$SANDBOX/plan-output.json"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --output "$plan_output" --json
+assert_eq "plan --output returns a compact artifact receipt" "skills-refiner.cleanup.output.v1" "$(jq -r '.schema_version' "$stdout_file")"
+assert_eq "plan --output writes the full plan" "skills-refiner.cleanup.plan.v1" "$(jq -r '.schema_version' "$plan_output")"
 run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
     "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
 assert_eq "empty live plan exits cleanly" "0" "$RUN_STATUS"
@@ -687,8 +705,32 @@ ln -s "$SANDBOX/source-one" "$SANDBOX/home/.claude/skills/source-skill"
 run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
     "$LAUNCHER" cleanup review --json
 cp "$stdout_file" "$review_file"
+jq '{schema_version:"skills-refiner.cleanup.retire-paths.v1",review_fingerprint:.review_fingerprint,entry_paths:[.candidates[].entry_path]}' \
+    "$review_file" >"$selector_file"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --retire-paths "$selector_file" --json
+assert_eq "retire-path selector exits cleanly" "0" "$RUN_STATUS"
+assert_eq "retire-path selector plans exact entry" "1" "$(jq '.items | length' "$stdout_file")"
+jq '.review_fingerprint = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"' \
+    "$selector_file" >"$selector_file.invalid"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --retire-paths "$selector_file.invalid" --json
+assert_eq "retire-path selector rejects wrong review" "2" "$RUN_STATUS"
+assert_eq "retire-path selector uses stable error" "invalid_retire_paths" "$(jq -r '.error_code' "$stdout_file")"
 jq '{schema_version:"skills-refiner.cleanup.decisions.v1",review_fingerprint:.review_fingerprint,decisions:[.candidates[]|{candidate_id,action:"retire"}]}' \
     "$review_file" >"$decisions_file"
+partition_dir="$SANDBOX/plan-partition"
+mkdir -m 700 "$partition_dir"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" \
+    --partition-dir "$partition_dir" --json
+assert_eq "plan partition exits cleanly" "0" "$RUN_STATUS"
+assert_eq "plan partition returns compact receipt" "skills-refiner.cleanup.partition-output.v1" \
+    "$(jq -r '.schema_version' "$stdout_file")"
+assert_eq "plan partition writes one bounded child" "1" \
+    "$(jq '.child_plans | length' "$partition_dir/manifest.json")"
+assert_eq "plan partition preserves exact item count" "1" \
+    "$(jq '.total_items' "$partition_dir/manifest.json")"
 run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
     "$LAUNCHER" cleanup plan --review "$review_file" --decisions "$decisions_file" --json
 assert_eq "macOS retirement plan exits cleanly" "0" "$RUN_STATUS"
@@ -696,6 +738,13 @@ assert_eq "macOS retirement plan has one item" "1" "$(jq '.items | length' "$std
 assert_eq "macOS plan uses native helper identity" "macos-native.v1" "$(jq -r '.items[0].execution_identity.adapter' "$stdout_file")"
 assert_eq "macOS plan binds helper protocol" "skills-refiner.macos-helper.v1" "$(jq -r '.items[0].execution_identity.helper_protocol' "$stdout_file")"
 cp "$stdout_file" "$plan_file"
+offline_partition_dir="$SANDBOX/offline-plan-partition"
+mkdir -m 700 "$offline_partition_dir"
+run_capture "$stdout_file" "$stderr_file" env SKILLS_REFINER_NODE_BIN="$NODE24_BIN" HOME="$SANDBOX/home" \
+    "$LAUNCHER" cleanup partition --plan "$plan_file" --output-dir "$offline_partition_dir" --json
+assert_eq "offline partition exits cleanly" "0" "$RUN_STATUS"
+assert_eq "offline partition preserves source plan hash" "$(jq -r '.plan_hash' "$plan_file")" \
+    "$(jq -r '.source_plan_hash' "$offline_partition_dir/manifest.json")"
 plan_hash=$(jq -r '.plan_hash' "$plan_file")
 transaction_id=$(jq -r '.items[0].transaction_id' "$plan_file")
 

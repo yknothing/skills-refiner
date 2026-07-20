@@ -100,7 +100,7 @@ REPORT_JSON="$REPORT_DIR/scan-$TIMESTAMP.json"
 AGENT_DIRS=()
 while IFS= read -r _skill_dir; do
     AGENT_DIRS+=("$HOME_DIR/$_skill_dir")
-done < <(sr_agent_skill_dirs)
+done < <(sr_agent_skill_dirs "$HOME_DIR")
 
 # ── Helpers ───────────────────────────────────────────────────────────
 if ! command -v jq >/dev/null 2>&1; then

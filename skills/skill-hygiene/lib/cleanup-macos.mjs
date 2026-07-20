@@ -35,7 +35,7 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const TREE_SHA1 = /^[0-9a-f]{40}$/u;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const SHA256_IDENTIFIER = /^sha256:[0-9a-f]{64}$/u;
-const ACTIVE_ROOTS = new Set([
+const STATIC_ACTIVE_ROOTS = new Set([
   '.warp/skills',
   '.agents/skills',
   '.claude/skills',
@@ -48,6 +48,7 @@ const ACTIVE_ROOTS = new Set([
   '.github/skills',
   '.opencode/skills',
 ]);
+const DISCOVERED_AGENT_ACTIVE_ROOT = /^\.[A-Za-z0-9][A-Za-z0-9._-]*\/skills$/u;
 
 const helperCache = new Map();
 
@@ -129,7 +130,10 @@ function safePath(path, name) {
 
 function authorizedActiveRoot(home, activeRoot) {
   safePath(activeRoot, 'activeRoot');
-  if (!ACTIVE_ROOTS.has(relative(home, activeRoot))) fail('blocked', 'unrecognized_active_root');
+  const relativeRoot = relative(home, activeRoot);
+  if (!STATIC_ACTIVE_ROOTS.has(relativeRoot) && !DISCOVERED_AGENT_ACTIVE_ROOT.test(relativeRoot)) {
+    fail('blocked', 'unrecognized_active_root');
+  }
   return activeRoot;
 }
 
@@ -721,7 +725,8 @@ export function createMacosAdapter({ home = process.env.HOME, forceCompile = fal
   const inspectIdentity = async (entryPath, activeRoot, candidate = null) => {
     safePath(entryPath, 'entryPath');
     safePath(activeRoot, 'activeRoot');
-    if (!ACTIVE_ROOTS.has(relative(verifiedHome, activeRoot))
+    const relativeRoot = relative(verifiedHome, activeRoot);
+    if ((!STATIC_ACTIVE_ROOTS.has(relativeRoot) && !DISCOVERED_AGENT_ACTIVE_ROOT.test(relativeRoot))
         || dirname(entryPath) !== activeRoot || basename(entryPath).length === 0) {
       fail('blocked', 'not_immediate_child');
     }
