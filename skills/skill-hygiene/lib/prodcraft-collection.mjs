@@ -31,6 +31,7 @@ import {
   validateOperationRecord,
 } from './collection-contract.mjs';
 import { canonicalJson } from './cleanup-contract.mjs';
+import { computeTreeDigest } from './collection-tree.mjs';
 import {
   createCollectionSymlinkExclusive,
   ensureMacosHelper,
@@ -103,6 +104,7 @@ function sha256(data) {
 function controllerIdentity(home) {
   const files = [
     import.meta.url,
+    new URL('./collection-tree.mjs', import.meta.url),
     new URL('./collection-cli.mjs', import.meta.url),
     new URL('./collection-contract.mjs', import.meta.url),
     new URL('./cleanup-macos.mjs', import.meta.url),
@@ -134,32 +136,8 @@ function assertAbsoluteRealDirectory(path, label) {
   if (realpathSync(path) !== path) fail('unsafe_path', `${label} must be canonical: ${path}`);
 }
 
-function walkTree(root, current, hash) {
-  const entries = readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, 'en'));
-  for (const entry of entries) {
-    const path = join(current, entry.name);
-    const rel = relative(root, path);
-    if (rel === '.git' && entry.isDirectory()) continue;
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) fail('source_symlink', `tree contains symlink: ${path}`);
-    if (stat.isDirectory()) {
-      hash.update(`d\0${rel}\0${stat.mode & 0o777}\0`);
-      walkTree(root, path, hash);
-    } else if (stat.isFile()) {
-      hash.update(`f\0${rel}\0${stat.mode & 0o777}\0${stat.size}\0`);
-      hash.update(readFileSync(path));
-      hash.update('\0');
-    } else {
-      fail('unsafe_tree_entry', `tree contains unsupported entry: ${path}`);
-    }
-  }
-}
-
 export function treeDigest(root) {
-  assertAbsoluteRealDirectory(root, 'tree root');
-  const hash = createHash('sha256');
-  walkTree(root, root, hash);
-  return `sha256:${hash.digest('hex')}`;
+  return computeTreeDigest(root, fail);
 }
 
 function frontmatter(path) {
@@ -951,12 +929,12 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
   const issues = [];
   let index = null;
   let expectedIndex = null;
-  if (canonicalJson(controllerIdentity(plan.home)) !== canonicalJson(plan.controller)) issues.push('CONTROLLER_IDENTITY_DRIFT');
+  let observedOperation = null;
   try {
-    const operation = readJson(paths.operationPath, 'invalid_operation');
-    validateOperationRecord(operation);
-    if (operation.operation_id !== paths.id || operation.plan_hash !== plan.plan_hash) issues.push('OPERATION_IDENTITY_DRIFT');
-    if (requireCommitted && operation.state !== OPERATION_STATES.committed) issues.push(`OPERATION_NOT_COMMITTED:${operation.state}`);
+    observedOperation = readJson(paths.operationPath, 'invalid_operation');
+    validateOperationRecord(observedOperation);
+    if (observedOperation.operation_id !== paths.id || observedOperation.plan_hash !== plan.plan_hash) issues.push('OPERATION_IDENTITY_DRIFT');
+    if (requireCommitted && observedOperation.state !== OPERATION_STATES.committed) issues.push(`OPERATION_NOT_COMMITTED:${observedOperation.state}`);
   } catch { issues.push('OPERATION_MISSING_OR_INVALID'); }
   try {
     const rootStat = lstatSync(plan.target.collection_root);
@@ -1005,6 +983,10 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
   for (const entry of plan.legacy) {
     if (entry.name !== 'prodcraft' && lstatExists(entry.path)) issues.push(`LEGACY_REAPPEARED:${entry.name}`);
   }
+  for (const name of PUBLIC_MEMBER_NAMES) {
+    const topLevel = join(plan.home, '.agents/skills', name);
+    if (name !== 'pc-prodcraft' && lstatExists(topLevel)) issues.push(`COMPETING_TOP_LEVEL_MEMBER:${name}`);
+  }
   for (const entry of plan.legacy) {
     const quarantined = join(paths.quarantineOperationRoot, 'skills', entry.name);
     try {
@@ -1038,7 +1020,20 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     if (sha256(readFileSync(join(paths.recoveryPreState, 'skill-lock.json'))) !== plan.receipt.digest) issues.push('RECOVERY_RECEIPT_DRIFT');
   } catch { issues.push('RECOVERY_RECEIPT_MISSING'); }
   let receiptState = 'unknown';
-  try { receiptState = sha256(readFileSync(plan.receipt.path)) === plan.receipt.digest ? 'superseded' : 'drifted'; } catch {}
+  try {
+    const receiptBytes = readFileSync(plan.receipt.path);
+    const receiptData = JSON.parse(receiptBytes.toString('utf8'));
+    const scopedEntries = Object.entries(receiptData.skills ?? {})
+      .filter(([, value]) => value?.source === RECEIPT_SOURCE)
+      .map(([name, receipt]) => ({ name, receipt }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'en'));
+    const scopedDigest = sha256(Buffer.from(canonicalJson(scopedEntries)));
+    if (scopedDigest !== plan.receipt.entries_digest) issues.push('SCOPED_RECEIPT_DRIFT');
+    receiptState = sha256(receiptBytes) === plan.receipt.digest ? 'superseded'
+      : scopedDigest === plan.receipt.entries_digest ? 'unrelated_history_changed' : 'drifted';
+  } catch {}
+  const installedTimes = plan.legacy.map(({ receipt }) => receipt.installed_at).sort();
+  const updatedTimes = plan.legacy.map(({ receipt }) => receipt.updated_at).sort();
   return {
     schema_version: 'skills-refiner.collection.status.v1',
     collection_id: 'prodcraft',
@@ -1052,6 +1047,20 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     physical_collection_root: plan.target.collection_root,
     member_count: index?.members?.length ?? 0,
     external_receipt_state: receiptState,
+    source: {
+      provider: plan.source.provider, repository_id: plan.source.repository_id,
+      resolved_revision: plan.source.revision, artifact_digest: plan.source.tree_digest,
+    },
+    lifecycle: {
+      receipt_history: {
+        entry_count: plan.legacy.length,
+        first_installed_at: installedTimes[0],
+        last_updated_at: updatedTimes.at(-1),
+      },
+      plan_created_at: plan.created_at,
+      first_activated_at: observedOperation?.state === OPERATION_STATES.committed ? observedOperation.updated_at : null,
+      current_generation_activated_at: observedOperation?.state === OPERATION_STATES.committed ? observedOperation.updated_at : null,
+    },
     issues,
   };
 }
@@ -1121,7 +1130,7 @@ export function statusProdcraftCollection({ home }) {
         issues: [`NONTERMINAL_OPERATION:${pending.operation.state}`],
       };
     }
-    return { schema_version: 'skills-refiner.collection.status.v1', collection_id: 'prodcraft', status: 'UNMANAGED', scope: 'filesystem', runtime_status: 'UNVERIFIED', observed_at: new Date().toISOString(), observer_version: 'skills-refiner.collection.observer.v1', operation_id: null, plan_hash: null, physical_collection_root: join(home, '.agents/skills/prodcraft'), member_count: 0, external_receipt_state: 'unknown', issues: ['NO_ACTIVE_GENERATION'] };
+    return { schema_version: 'skills-refiner.collection.status.v1', collection_id: 'prodcraft', status: 'UNMANAGED', scope: 'filesystem', runtime_status: 'UNVERIFIED', observed_at: new Date().toISOString(), observer_version: 'skills-refiner.collection.observer.v1', operation_id: null, plan_hash: null, physical_collection_root: join(home, '.agents/skills/prodcraft'), member_count: 0, external_receipt_state: 'unknown', source: null, lifecycle: null, issues: ['NO_ACTIVE_GENERATION'] };
   }
   const result = statusAgainstPlan(plan);
   if (result.issues.some((issue) => issue.startsWith('OPERATION_NOT_COMMITTED:'))) result.status = 'RECOVERY_REQUIRED';

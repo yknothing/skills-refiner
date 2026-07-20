@@ -104,7 +104,113 @@ while that original payload remains quarantined, and running Agents may cache
 old skill state. Never automatically re-quarantine a rehydrated entry; review it
 again.
 
-## Managing the ProdCraft physical collection
+## Managing declared physical collections
+
+Use `collection` for an artifact-set upgrade when several source-owned Skills
+must move as one physical and recoverable unit. Do not substitute manual `mv`,
+wildcard deletion, ad-hoc symlinks, or direct `.skill-lock.json` edits.
+
+The current declarative managed profiles are `loopos`, `langcraft`, and
+`better-skills`. A reviewed source must be a clean Git worktree at the exact
+40-character revision and approved origin. A branch or `latest` is only a
+candidate discovery input; resolve it before `check`.
+
+```bash
+NODE24=/absolute/path/to/node24
+LAUNCHER=/absolute/path/to/reviewed/skills-refiner/skills/skill-hygiene/bin/skills-refiner
+COLLECTION=loopos # or langcraft / better-skills
+SOURCE=/absolute/path/to/clean-reviewed-repository
+REVISION=full-40-character-reviewed-commit
+PLAN=/private/tmp/$COLLECTION-collection-plan.json
+
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection check "$COLLECTION" \
+  --source "$SOURCE" --revision "$REVISION" --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection plan "$COLLECTION" \
+  --source "$SOURCE" --revision "$REVISION" --output "$PLAN" --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection apply \
+  --plan "$PLAN" --confirm 'sha256:...' --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection status "$COLLECTION" \
+  --fresh --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection list --fresh --json
+```
+
+V2 keeps four sets separate: installer receipt history, fresh active
+filesystem entries, the immutable upstream candidate, and the exact approved
+disposition. A missing historical receipt directory is not automatically a
+failure, and a receipt is never proof that an entity still exists. An active
+directory enters the mutation set only when repository, exact source path,
+receipt evidence, filesystem path, and plan-time digest jointly qualify it.
+An unqualified same-name directory is preserved unless it occupies the required
+collection/exposure path. An unplanned receipt-owned name or a source-scoped
+receipt rewrite fails closed.
+
+Never use a flat Skill name as a cross-repository ownership key. Qualified
+identity binds repository, immutable revision, source path, and declared name.
+Same-name Skills from different repositories may coexist inside their physical
+collections. A flat same-name path that is not qualified to this collection is
+reported in `name_collisions` with `disposition: preserve`; do not move, unlink,
+or reinterpret it without an explicit user disposition. A preserved historical
+name from the same repository may justify publishing the new collection
+exposure to that Agent root, but still does not authorize deleting the old path.
+Current plans bind the complete preserved collision snapshot into `plan_hash`,
+including raw/resolved target, target health/digest, and the receipt claim as a
+claim rather than ownership. Apply re-observes it before mutation. Status keeps
+collection drift separate from `name_collision_status` and
+`management_attention`; a broken preserved symlink is visible but is never
+silently redirected, deleted, or adopted.
+
+`loopos` and `langcraft` use a nested gateway projection because their
+collection id and gateway Skill name are identical. `better-skills` has no
+upstream gateway and uses a collection projection; never fabricate a gateway
+or rewrite third-party frontmatter to make the topology look uniform. Selected
+members must pass portable YAML frontmatter checks; a source member that fails
+is excluded by the reviewed packaging profile rather than patched in the
+artifact. Shared files/directories are spec-bound, their references are checked
+from both members and resources, and declared authoring-example exclusions are
+explicit in the spec.
+
+The external current-generation catalog lives under
+`~/Library/Application Support/skills-refiner/`; its view under
+`~/.agents/skill-control/catalog.json` is reconstructable. It records the exact
+repository/revision/artifact selection plus receipt install/update history and
+activation lifecycle; `collection list --fresh` also derives these fields for
+ProdCraft V1. If collection-local control is manually deleted, direct status
+reports `ORPHANED_CONTROL` rather than silently downgrading the deployment to
+`UNMANAGED`.
+
+Planning against an already active V2 collection creates a predecessor-bound
+generation replacement, not another legacy migration. The plan binds the prior
+active record, catalog entry, collection bytes, exposure identities, and
+independent recovery bytes. Interrupted upgrades must surface the new operation
+id even before the active pointer changes; exact recovery restores the prior
+generation, and undo returns the catalog and active pointer to that generation.
+
+Use the exact operation id for missing-object repair, interrupted-operation
+recovery, or exact undo:
+
+```bash
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection repair "$COLLECTION" \
+  --confirm '<collection>-............' --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection recover \
+  '<collection>-............' --confirm '<collection>-............' --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection undo \
+  '<collection>-............' --confirm '<collection>-............' --json
+```
+
+`FILESYSTEM_READY` still means only that the plan-bound collection, index,
+members, shared resources, exposure projections, quarantine, recovery, catalog,
+operation and scoped receipt evidence are exact. It does not prove real Agent
+recursive discovery, gateway routing, cache invalidation, runtime loadability,
+or context-window reduction. Keep `runtime_status: UNVERIFIED` until separate
+fresh-session profile probes pass.
+
+Deployment comparison ignores only the exact Finder metadata basename
+`.DS_Store` at any collection depth. Source, immutable artifact, predecessor,
+quarantine, and recovery identities remain exact, and every other unknown file
+still causes drift. Do not delete `.DS_Store` merely to manufacture a green
+status.
+
+## Managing the ProdCraft V1 physical collection
 
 Use the `collection` flow for the revision-pinned ProdCraft artifact-set
 upgrade. It is separate from single-entry cleanup: never replace it with manual

@@ -35,6 +35,23 @@ test('source inspection binds the exact 40-package pc-* public surface', (t) => 
   assert.match(observation.tree_digest, /^sha256:[0-9a-f]{64}$/u);
 });
 
+test('v1 applies from a clean Git linked worktree without hashing its .git pointer', (t) => {
+  const root = makeRoot();
+  t.after(() => removeRoot(root));
+  const source = makeSource(root);
+  const linked = join(root, 'linked-worktree');
+  const added = spawnSync('/usr/bin/git', ['-C', source, 'worktree', 'add', '--detach', linked, 'HEAD'], { encoding: 'utf8' });
+  assert.equal(added.status, 0, added.stderr);
+  const fixture = makeLegacyHome(root);
+  const revision = sourceRevision(linked);
+  const plan = compileProdcraftPlan({
+    home: fixture.home, sourceRoot: linked, revision,
+    now: '2026-07-20T00:00:00.000Z',
+  });
+  assert.equal(applyProdcraftPlan(plan, plan.plan_hash).status, 'FILESYSTEM_READY');
+  assert.equal(statusProdcraftCollection({ home: fixture.home }).status, 'FILESYSTEM_READY');
+});
+
 test('source inspection rejects symlinked members and frontmatter identity drift', (t) => {
   const root = makeRoot();
   t.after(() => removeRoot(root));
