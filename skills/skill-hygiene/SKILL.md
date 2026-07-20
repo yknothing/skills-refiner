@@ -1,6 +1,6 @@
 ---
 name: skill-hygiene
-description: Use when you need to audit, evaluate, govern, or safely retire locally installed or distributed agent skills. Triggers include skill sprawl, stale, broken, or conflicting skills, local cleanup or quarantine, pre-migration review, and periodic inventory checks.
+description: Use when you need to audit, evaluate, govern, safely retire, or transactionally upgrade locally installed or distributed agent skills. Triggers include skill sprawl, stale, broken, or conflicting skills, local cleanup or quarantine, managed physical collections, pre-migration review, and periodic inventory checks.
 ---
 
 # skill-hygiene
@@ -103,6 +103,69 @@ individually. Post-apply evidence uses `QUARANTINED`, `REHYDRATED`,
 while that original payload remains quarantined, and running Agents may cache
 old skill state. Never automatically re-quarantine a rehydrated entry; review it
 again.
+
+## Managing the ProdCraft physical collection
+
+Use the `collection` flow for the revision-pinned ProdCraft artifact-set
+upgrade. It is separate from single-entry cleanup: never replace it with manual
+`mv`, wildcard deletion, or direct `.skill-lock.json` edits.
+
+```bash
+NODE24=/absolute/path/to/node24
+LAUNCHER="$HOME/.agents/skills/skill-hygiene/bin/skills-refiner"
+SOURCE=/absolute/path/to/reviewed/prodcraft-repository
+REVISION=full-40-character-reviewed-commit
+PLAN=/private/tmp/prodcraft-collection-plan.json
+
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection check prodcraft \
+  --source "$SOURCE" --revision "$REVISION" --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection plan prodcraft \
+  --source "$SOURCE" --revision "$REVISION" --output "$PLAN" --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection apply \
+  --plan "$PLAN" --confirm 'sha256:...' --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection status prodcraft \
+  --fresh --json
+```
+
+`check` proves source/revision structure and the bounded Markdown-link reference
+graph; prose/backtick repository references remain covered only by separately
+recorded upstream validators. It returns
+`STRUCTURALLY_VALID`, not runtime qualification. Take the apply confirmation
+from that exact plan's full `plan_hash`. The physical deployment is healthy only
+when direct status returns `FILESYSTEM_READY`; this still reports
+`runtime_status: UNVERIFIED` until separate fresh-session Agent probes pass.
+Ledger or index state alone is not proof. `status` re-observes the physical
+collection, all 40 plan-bound member digests, locator, top-level gateway, every
+discovered physical Agent projection root, scoped legacy absence, quarantine,
+independent recovery, operation state, and external receipt drift.
+
+If an interrupted operation reports `RECOVERY_REQUIRED`, use its exact operation
+ID twice to reconcile a stale lock and restore the exact pre-state:
+
+```bash
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection recover \
+  'prodcraft-............' --confirm 'prodcraft-............' --json
+```
+
+If a managed member or projection is accidentally deleted and status reports
+only missing-object drift, repair from the exact active artifact:
+
+```bash
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection repair prodcraft \
+  --confirm 'prodcraft-............' --json
+```
+
+To restore the pre-upgrade deployment, use the exact active operation ID twice:
+
+```bash
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection undo \
+  'prodcraft-............' --confirm 'prodcraft-............' --json
+```
+
+The controller leaves `.skill-lock.json` under its native installer's
+ownership. Its digest and old ProdCraft receipts are evidence; they are not the
+desired-state writer. Recovery copies and same-device quarantine remain until a
+separate, explicit retention decision.
 
 ## Understanding the Skill Topology
 

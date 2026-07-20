@@ -665,16 +665,15 @@ static int hash_security_metadata(int fd, const struct stat *status,
     }
     qsort(names, name_count, sizeof(*names), compare_names);
     /*
-     * macOS may attach or rewrite com.apple.provenance during rename into
-     * quarantine. Keep it in the security digest for observability, but omit
-     * it from the relocation manifest so exclusive rename/reconcile can still
-     * prove inode+content identity across that kernel side effect.
-     *
-     * If provenance is the only xattr, the manifest digest must still match the
-     * no-xattr case ("xattr-empty"); otherwise a clean symlink becomes
-     * irreconcilable the moment the kernel stamps provenance.
+     * macOS may attach or rewrite com.apple.provenance while copying or moving
+     * an entry. It is OS-generated origin telemetry, not a stable access-control
+     * attribute. Exclude it from both relocation identity and the portable
+     * security-metadata digest so an independently addressed recovery copy can
+     * still prove every stable mode/owner/flags/ACL/xattr byte. Other xattrs
+     * remain bound. If provenance is the only xattr, hash the same
+     * "xattr-empty" marker as an entry with no stable xattrs.
      */
-    size_t manifest_xattr_count = 0U;
+    size_t stable_xattr_count = 0U;
     for (size_t index = 0; index < name_count; index += 1U) {
         size_t name_length = strlen(names[index]);
         if (!valid_utf8_without_control((const unsigned char *)names[index], name_length)) {
@@ -705,14 +704,15 @@ static int hash_security_metadata(int fd, const struct stat *status,
         if (!skip_manifest) {
             hash_bytes(manifest, names[index], name_length);
             hash_bytes(manifest, value, (size_t)value_length);
-            manifest_xattr_count += 1U;
+            hash_bytes(security, names[index], name_length);
+            hash_bytes(security, value, (size_t)value_length);
+            stable_xattr_count += 1U;
         }
-        hash_bytes(security, names[index], name_length);
-        hash_bytes(security, value, (size_t)value_length);
         free(value);
     }
-    if (manifest_xattr_count == 0U) {
+    if (stable_xattr_count == 0U) {
         hash_bytes(manifest, "xattr-empty", 11U);
+        hash_bytes(security, "xattr-empty", 11U);
     }
     free(names);
     free(names_buffer);
@@ -4073,6 +4073,192 @@ static int restore_exclusive(const char *home_path, const char *active_root,
     return 0;
 }
 
+static int collection_directory_still_bound(int home_fd, const char *relative, int expected_fd) {
+    int observed_fd = open_relative_directory(home_fd, relative, 0, 0);
+    struct stat expected;
+    struct stat observed;
+    int result = observed_fd >= 0
+        && fstat(expected_fd, &expected) == 0
+        && fstat(observed_fd, &observed) == 0
+        && expected.st_dev == observed.st_dev
+        && expected.st_ino == observed.st_ino;
+    if (observed_fd >= 0) close(observed_fd);
+    return result ? 0 : -1;
+}
+
+static int collection_inspect_v1(const char *home_path, const char *parent_relative,
+                                 const char *leaf) {
+    if (!valid_component(leaf)) return emit_error("invalid_collection_leaf");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int parent_fd = open_relative_directory(home_fd, parent_relative, 0, 0);
+    if (parent_fd < 0 || collection_directory_still_bound(home_fd, parent_relative, parent_fd) != 0) {
+        if (parent_fd >= 0) close(parent_fd);
+        close(home_fd);
+        return emit_error("unsafe_collection_parent");
+    }
+    struct stat status;
+    if (fstatat(parent_fd, leaf, &status, AT_SYMLINK_NOFOLLOW) != 0) {
+        close(parent_fd);
+        close(home_fd);
+        return emit_error("entry_unavailable");
+    }
+    entry_identity identity;
+    enum identity_result result = calculate_entry_identity(parent_fd, leaf, &status, &identity, 0);
+    close(parent_fd);
+    close(home_fd);
+    if (result != IDENTITY_OK) return emit_error("collection_identity_unavailable");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"collection-inspect-v1\","
+           "\"entry_kind\":\"%s\",\"device\":\"%llu\",\"inode\":\"%llu\","
+           "\"manifest_hash\":\"sha256:%s\",\"security_metadata_hash\":\"sha256:%s\","
+           "\"raw_link_target_base64\":",
+           HELPER_PROTOCOL, identity.kind, (unsigned long long)identity.snapshot.st_dev,
+           (unsigned long long)identity.snapshot.st_ino, identity.manifest_hex, identity.security_hex);
+    if (identity.raw_target_base64 == NULL) printf("null");
+    else printf("\"%s\"", identity.raw_target_base64);
+    printf("}\n");
+    free(identity.raw_target_base64);
+    return 0;
+}
+
+static int collection_rename_exclusive_v1(
+    const char *home_path,
+    const char *source_parent_relative,
+    const char *source_leaf,
+    const char *destination_parent_relative,
+    const char *destination_leaf,
+    const char *expected_device,
+    const char *expected_inode,
+    const char *expected_manifest
+) {
+    if (!valid_component(source_leaf) || !valid_component(destination_leaf)
+        || !valid_sha256_identifier(expected_manifest)) return emit_error("invalid_collection_move");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int source_fd = open_relative_directory(home_fd, source_parent_relative, 0, 0);
+    int destination_fd = open_relative_directory(home_fd, destination_parent_relative, 1, 0);
+    struct stat source_parent;
+    struct stat destination_parent;
+    struct stat source_status;
+    if (source_fd < 0 || destination_fd < 0
+        || fstat(source_fd, &source_parent) != 0 || fstat(destination_fd, &destination_parent) != 0
+        || source_parent.st_dev != destination_parent.st_dev
+        || fstatat(source_fd, source_leaf, &source_status, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (source_fd >= 0) close(source_fd);
+        if (destination_fd >= 0) close(destination_fd);
+        close(home_fd);
+        return emit_error("collection_move_paths_unavailable");
+    }
+    char actual_device[32];
+    char actual_inode[32];
+    (void)snprintf(actual_device, sizeof(actual_device), "%llu", (unsigned long long)source_status.st_dev);
+    (void)snprintf(actual_inode, sizeof(actual_inode), "%llu", (unsigned long long)source_status.st_ino);
+    entry_identity identity;
+    enum identity_result identity_status = calculate_entry_identity(source_fd, source_leaf, &source_status, &identity, 0);
+    char actual_manifest[sizeof("sha256:") + SHA256_HEX_BYTES];
+    (void)snprintf(actual_manifest, sizeof(actual_manifest), "sha256:%s", identity.manifest_hex);
+    int identity_matches = identity_status == IDENTITY_OK
+        && strcmp(actual_device, expected_device) == 0
+        && strcmp(actual_inode, expected_inode) == 0
+        && strcmp(actual_manifest, expected_manifest) == 0;
+    if (identity_status == IDENTITY_OK) free(identity.raw_target_base64);
+    if (!identity_matches
+        || collection_directory_still_bound(home_fd, source_parent_relative, source_fd) != 0
+        || collection_directory_still_bound(home_fd, destination_parent_relative, destination_fd) != 0) {
+        close(source_fd);
+        close(destination_fd);
+        close(home_fd);
+        return emit_error(identity_matches ? "unsafe_collection_parent" : "collection_identity_changed");
+    }
+    close(home_fd);
+    if (renameatx_np(source_fd, source_leaf, destination_fd, destination_leaf, RENAME_EXCL) != 0) {
+        close(source_fd);
+        close(destination_fd);
+        return emit_error(errno == EEXIST ? "collection_destination_exists" : "collection_rename_failed");
+    }
+    crash_at_test_seam("after_collection_rename");
+    struct stat destination_status;
+    int durable = fstatat(destination_fd, destination_leaf, &destination_status, AT_SYMLINK_NOFOLLOW) == 0
+        && destination_status.st_dev == source_status.st_dev
+        && destination_status.st_ino == source_status.st_ino
+        && fsync(source_fd) == 0 && fsync(destination_fd) == 0;
+    close(source_fd);
+    close(destination_fd);
+    if (!durable) return emit_recovery_required("collection_rename_recovery_required");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"collection-rename-exclusive-v1\","
+           "\"manifest_hash\":\"%s\"}\n", HELPER_PROTOCOL, expected_manifest);
+    return 0;
+}
+
+static int collection_symlink_exclusive_v1(const char *home_path, const char *parent_relative,
+                                            const char *leaf, const char *raw_target) {
+    size_t target_length = strlen(raw_target);
+    if (!valid_component(leaf) || target_length == 0U || target_length > PATH_MAX
+        || !valid_utf8_without_control((const unsigned char *)raw_target, target_length)) {
+        return emit_error("invalid_collection_symlink");
+    }
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int parent_fd = open_relative_directory(home_fd, parent_relative, 0, 0);
+    if (parent_fd < 0 || collection_directory_still_bound(home_fd, parent_relative, parent_fd) != 0) {
+        if (parent_fd >= 0) close(parent_fd);
+        close(home_fd);
+        return emit_error("unsafe_collection_parent");
+    }
+    close(home_fd);
+    if (symlinkat(raw_target, parent_fd, leaf) != 0) {
+        close(parent_fd);
+        return emit_error(errno == EEXIST ? "collection_destination_exists" : "collection_symlink_failed");
+    }
+    char observed[PATH_MAX + 1U];
+    ssize_t observed_length = readlinkat(parent_fd, leaf, observed, PATH_MAX);
+    int durable = observed_length == (ssize_t)target_length
+        && memcmp(observed, raw_target, target_length) == 0
+        && fsync(parent_fd) == 0;
+    close(parent_fd);
+    if (!durable) return emit_recovery_required("collection_symlink_recovery_required");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"collection-symlink-exclusive-v1\"}\n",
+           HELPER_PROTOCOL);
+    return 0;
+}
+
+static int collection_unlink_symlink_v1(const char *home_path, const char *parent_relative,
+                                         const char *leaf, const char *raw_target) {
+    if (!valid_component(leaf)) return emit_error("invalid_collection_symlink");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int parent_fd = open_relative_directory(home_fd, parent_relative, 0, 0);
+    char observed[PATH_MAX + 1U];
+    ssize_t observed_length = parent_fd < 0 ? -1 : readlinkat(parent_fd, leaf, observed, PATH_MAX);
+    size_t expected_length = strlen(raw_target);
+    if (parent_fd < 0 || observed_length != (ssize_t)expected_length
+        || memcmp(observed, raw_target, expected_length) != 0
+        || collection_directory_still_bound(home_fd, parent_relative, parent_fd) != 0) {
+        if (parent_fd >= 0) close(parent_fd);
+        close(home_fd);
+        return emit_error("collection_symlink_identity_changed");
+    }
+    close(home_fd);
+    int result = unlinkat(parent_fd, leaf, 0) == 0 && fsync(parent_fd) == 0;
+    close(parent_fd);
+    if (!result) return emit_recovery_required("collection_unlink_recovery_required");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"collection-unlink-symlink-v1\"}\n",
+           HELPER_PROTOCOL);
+    return 0;
+}
+
 static int emit_identity(void) {
     struct utsname information;
     if (uname(&information) != 0) return emit_error("identity_unavailable");
@@ -4205,6 +4391,21 @@ int main(int argument_count, char **arguments) {
     if (strcmp(command, "rename-exclusive") == 0 && argument_count == 11) {
         return rename_exclusive(arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
                                 arguments[7], arguments[8], arguments[9], arguments[10]);
+    }
+    if (strcmp(command, "collection-inspect-v1") == 0 && argument_count == 5) {
+        return collection_inspect_v1(arguments[2], arguments[3], arguments[4]);
+    }
+    if (strcmp(command, "collection-rename-exclusive-v1") == 0 && argument_count == 10) {
+        return collection_rename_exclusive_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6],
+            arguments[7], arguments[8], arguments[9]
+        );
+    }
+    if (strcmp(command, "collection-symlink-exclusive-v1") == 0 && argument_count == 6) {
+        return collection_symlink_exclusive_v1(arguments[2], arguments[3], arguments[4], arguments[5]);
+    }
+    if (strcmp(command, "collection-unlink-symlink-v1") == 0 && argument_count == 6) {
+        return collection_unlink_symlink_v1(arguments[2], arguments[3], arguments[4], arguments[5]);
     }
     return emit_error("unsupported_command");
 }

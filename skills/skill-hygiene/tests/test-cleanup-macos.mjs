@@ -1467,17 +1467,10 @@ test('provenance metadata remains observable without invalidating relocation ide
     ], { home: isolatedHome });
     const identityAfter = await isolatedAdapter.inspectForPlan(entryPath, activeRoot, candidate);
 
-    // Provenance-only must stay equivalent to the no-xattr manifest digest
-    // ("xattr-empty"). Security digest may already include kernel provenance
-    // from /bin/ln in provenanced process trees; only assert change when the
-    // write actually altered readable security metadata.
+    // Provenance-only stays equivalent to the no-stable-xattr digest for both
+    // relocation identity and portable security metadata.
     assert.equal(identityAfter.manifest_hash, identityBefore.manifest_hash);
-    if (identityAfter.security_metadata_hash !== identityBefore.security_metadata_hash) {
-      assert.notEqual(
-        identityAfter.security_metadata_hash,
-        identityBefore.security_metadata_hash,
-      );
-    }
+    assert.equal(identityAfter.security_metadata_hash, identityBefore.security_metadata_hash);
     const moved = renameExclusive({
       home: isolatedHome,
       activeRoot,

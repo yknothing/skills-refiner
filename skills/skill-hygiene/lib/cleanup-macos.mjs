@@ -415,7 +415,7 @@ function compileAndInstallHelper(home, targetArchitecture, sourceSnapshot, xcrun
       outputPath,
     ], {
       encoding: 'utf8',
-      env: environment,
+      env: { ...environment, TMPDIR: buildDirectory },
       maxBuffer: MAX_HELPER_OUTPUT,
       shell: false,
     });
@@ -888,6 +888,90 @@ function renameExclusiveInternal({
 
 export function renameExclusive(options = {}) {
   return renameExclusiveInternal(options);
+}
+
+function collectionPathParts(home, path, name) {
+  const verified = safePath(path, name);
+  const parent = dirname(verified);
+  const parentRelative = relative(home, parent);
+  const leaf = basename(verified);
+  if (parentRelative.length === 0 || parentRelative === '..'
+      || parentRelative.startsWith(`..${sep}`) || isAbsolute(parentRelative)
+      || leaf.length === 0 || leaf === '.' || leaf === '..') {
+    fail('blocked', 'invalid_collection_path');
+  }
+  return { path: verified, parentRelative, leaf };
+}
+
+export function inspectCollectionEntry({ home = process.env.HOME, path } = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const entry = collectionPathParts(verifiedHome, path, 'path');
+  const helper = ensureMacosHelper({ home: verifiedHome });
+  return invokeHelper(helper, [
+    'collection-inspect-v1', verifiedHome, entry.parentRelative, entry.leaf,
+  ]);
+}
+
+export function moveCollectionEntryExclusive({
+  home = process.env.HOME,
+  source,
+  destination,
+  expectedManifest = null,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const sourceEntry = collectionPathParts(verifiedHome, source, 'source');
+  const destinationEntry = collectionPathParts(verifiedHome, destination, 'destination');
+  const helper = ensureMacosHelper({ home: verifiedHome });
+  const identity = invokeHelper(helper, [
+    'collection-inspect-v1', verifiedHome, sourceEntry.parentRelative, sourceEntry.leaf,
+  ]);
+  if (expectedManifest !== null
+      && (!SHA256_IDENTIFIER.test(expectedManifest) || identity.manifest_hash !== expectedManifest)) {
+    fail('blocked', 'collection_identity_changed');
+  }
+  return invokeHelper(helper, [
+    'collection-rename-exclusive-v1',
+    verifiedHome,
+    sourceEntry.parentRelative,
+    sourceEntry.leaf,
+    destinationEntry.parentRelative,
+    destinationEntry.leaf,
+    identity.device,
+    identity.inode,
+    identity.manifest_hash,
+  ], { mutationMayHaveOccurred: true });
+}
+
+export function createCollectionSymlinkExclusive({
+  home = process.env.HOME,
+  path,
+  rawTarget,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const entry = collectionPathParts(verifiedHome, path, 'path');
+  if (typeof rawTarget !== 'string' || rawTarget.length === 0 || CONTROL_CHARACTERS.test(rawTarget)) {
+    fail('blocked', 'invalid_collection_symlink_target');
+  }
+  const helper = ensureMacosHelper({ home: verifiedHome });
+  return invokeHelper(helper, [
+    'collection-symlink-exclusive-v1', verifiedHome, entry.parentRelative, entry.leaf, rawTarget,
+  ], { mutationMayHaveOccurred: true });
+}
+
+export function unlinkCollectionSymlinkExact({
+  home = process.env.HOME,
+  path,
+  rawTarget,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const entry = collectionPathParts(verifiedHome, path, 'path');
+  if (typeof rawTarget !== 'string' || rawTarget.length === 0 || CONTROL_CHARACTERS.test(rawTarget)) {
+    fail('blocked', 'invalid_collection_symlink_target');
+  }
+  const helper = ensureMacosHelper({ home: verifiedHome });
+  return invokeHelper(helper, [
+    'collection-unlink-symlink-v1', verifiedHome, entry.parentRelative, entry.leaf, rawTarget,
+  ], { mutationMayHaveOccurred: true });
 }
 
 function validateMutationIdentity(executionIdentity) {

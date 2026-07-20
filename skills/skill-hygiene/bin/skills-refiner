@@ -79,4 +79,8 @@ if ! [[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] || [ "$NODE_MAJOR" -ne 24 ]; then
     bootstrap_error
 fi
 
+if [ "${1:-}" = "collection" ]; then
+    exec "$NODE_BIN" "$SCRIPT_DIR/../lib/collection-cli.mjs" "$@"
+fi
+
 exec "$NODE_BIN" "$SCRIPT_DIR/../lib/cleanup-cli.mjs" "$@"
