@@ -96,3 +96,4 @@ Manual deletion or replacement does not change desired state. `collection status
 - Context-window reduction is not claimed until those probes exist.
 - Recovery/quarantine retention remains in force; no purge was performed.
 - `.skill-lock.json` still describes the superseded installer history by design.
+- The controller implementation is committed in this repository. The separately installed global `skill-hygiene` package remains on its prior published upstream version: an isolated `npx skills add <local-repo>` probe copied the Skill but emitted no `.skill-lock.json` source receipt, so it was deliberately not used on the live global entry. Publish the controller commit to an immutable upstream revision before that self-update; do not trade operability for false provenance.
