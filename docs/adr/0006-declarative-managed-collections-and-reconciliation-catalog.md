@@ -23,6 +23,8 @@ skills-refiner 采用 **schema-versioned transaction engine + declarative `Colle
 
 因此“GitHub 是天然唯一事实源”在这里被精确定义为：GitHub immutable revision 是 **content authority**；本机 catalog 只记录哪个已审核 artifact 被批准激活；filesystem observation 决定它现在是否真的存在且 exact。
 
+上游 release version 也必须属于 content authority，而不是 controller 的本地命名。每个 collection profile 只能选择一个明确、严格的上游字段提取规则；status 同时返回字段值、字段所在文件、该文件 digest 与 extraction rule。上游没有声明版本时返回 `not_declared`，不得从日期、commit message、controller schema、operation id 或本地迁移次数合成版本。`schema_version` 只描述 skills-refiner 自己的数据协议，绝不是第三方 Skill 版本。
+
 ## 2. Why V1 was not copied
 
 ProdCraft controller 是一次成功但高度专用的 vertical slice：source registry、40 个 `pc-*`、46→40 disposition、gateway、operation ID 与路径均写死。复制 1,286 行再替换字符串会制造四套恢复协议和四种漂移语义。
@@ -53,6 +55,8 @@ V1/V2 plan 与 index 使用不同 schema。CLI 根据 plan schema 分派，避�
 4. `approved_disposition`：本次迁移实际移动、替换、保留或新增的对象。
 
 Better Skills 证明了不能合并这些集合：本机 receipt 同时保留旧无前缀与新 `bs-*` 两代，旧目录已经消失但仍有 broken projections。更重要的是，Better Skills 历史 `prose-craft` 与 LangCraft 当前 `prose-craft` 同名但不是同一实体。V2 因此只迁移能由当前 repository receipt、source path 和 fresh filesystem identity 共同证明拥有的对象；无前缀历史名称和跨仓库同名路径进入 `preservedNames` / `name_collisions` 观察面，默认 `preserve`，不得按名称自动清退。
+
+`preserve` 不是永久豁免。Fresh observation 若证明一个 broken projection 指向同一 repository 已退役的历史名称，status 将其分类为 `STALE_SAME_REPOSITORY_PROJECTION`；这仍然只是 disposition candidate，必须经过独立 cleanup review、exact path selector、plan hash 和 recoverable quarantine 才能退役。跨仓库同名实体继续是 `BROKEN_PRESERVED_SYMLINK` 或 collision evidence，绝不能被前述规则连带清退。
 
 Skill 的 qualified identity 至少是 `(repository_id, resolved_revision, source_path, declared_name)`。平面部署名称只是 locator，不是实体主键。两个仓库的同名 Skill 可以分别存在于各自 collection 物理目录；若某个 Agent 只支持平面 locator，管理中心报告冲突并要求用户明确选择投影策略，不能替用户推导 replacement。
 
@@ -119,6 +123,7 @@ V2 的 activation catalog 位于 deploy root 之外：
 - plan 后新增 collection exposure：`UNPLANNED_AGENT_EXPOSURE`；
 - 其他仓库、历史 receipt 或无 receipt 的平面同名路径：`name_collisions[].disposition=preserve`，不作为本 collection 的 mutation target 或 deployment drift。
 - preserved symlink target 缺失或 plan-time collision set 改变：collection readiness 与 `name_collision_status: ATTENTION_REQUIRED` 分层报告，不自动删除、重定向或接管。
+- 同仓库历史名称的缺失投影：`STALE_SAME_REPOSITORY_PROJECTION`；只授权生成审核候选，不授权 collection apply 自动清理。
 
 只有占用 collection required publication path 的外部实体才阻断计划；其他仓库或无资格证据的真实同名全局目录与平面 symlink 一样默认 preserve。这样允许 `better-skills/bs-prose-craft` 与 `langcraft/prose-craft` 物理共存，也不会把 Better 的历史 `prose-craft` locator 误归给 LangCraft。
 
@@ -151,6 +156,10 @@ Managed plan.v3 还绑定 preserved collision snapshot。Plan.v2 作为 compatib
 
 全局 collection mutation lock 必须先于 `PLANNED` operation 落盘；锁竞争属于零 mutation 阻塞，不得制造 phantom `RECOVERY_REQUIRED`。Interrupted upgrade 即使 predecessor active pointer 尚未切换，也必须被 pending-operation scan 发现并返回新 operation id。
 
+Cleanup batch 若遗留 lease，只能在可证明完全未启动时自动隔离 stale lock：batch 必须仍为 `READY/sequence=0`、每项 `NOT_STARTED`，所有 transaction 必须仍为 `PLANNED/sequence=0`、绑定同一 owner，且没有任何 mutation truth。任一 durable phase、outcome 或 mutation evidence 出现后都必须保持 `RECOVERY_REQUIRED`，禁止以“owner PID 已消失”为由释放锁。
+
+Cleanup executable plan 固定最多 8 项，并在任何 durable write 前校验 native helper 的精确输入 bytes。更大的已审核集合必须确定性 partition 为 content-addressed child plans；manifest 固定执行顺序，首次失败停止，每项 transaction/undo identity 保持独立。Partition 只改变调度批次，不改变 review fingerprint、条目证据、授权路径或恢复语义。
+
 `repair` 只处理明确的 missing-object drift：missing member、collection/index/locator 或 projection。Modified、unexpected、receipt/source conflict 必须先审查，不能自动覆盖。
 
 ## 7. Controller upgrade compatibility
@@ -161,11 +170,12 @@ Managed plan.v3 还绑定 preserved collision snapshot。Plan.v2 作为 compatib
 
 ## 8. Current collection specs
 
-| Collection | Approved candidate | Members | Exposure | Candidate changes from live active set |
-|---|---|---:|---|---|
-| LoopOS | `yknothing/loopos@f4454019414143e976edac5a250eca58d92ed12d` | 10 | gateway | content upgrade; exact set |
-| LangCraft | `yknothing/langcraft@fa31c4b85a7400c53abee3bd19c278395a0df3fa` | 6 | gateway | adds upstream `prose-craft`; removes local router overlay |
-| Better Skills | `yknothing/better-skills@8e8d2af4c5cb2099e27fdea9c723befe91701593` | 8 | collection | rejects invalid portable-YAML `bs-visual-design`; packages four shared inputs; preserves old flat names pending explicit user disposition |
+| Collection | Approved candidate | Upstream version evidence | Members | Exposure | Candidate changes from live active set |
+|---|---|---|---:|---|---|
+| ProdCraft | `yknothing/prodcraft@fd05978dbbbf5a064205a695af47c8a550f1b224` | `manifest.yml` root `version` = `1.0.0` | 40 | gateway | exact `pc-*` generation |
+| LoopOS | `yknothing/loopos@f4454019414143e976edac5a250eca58d92ed12d` | `pyproject.toml` `[project].version` = `0.2.1` | 10 | gateway | content upgrade; exact set |
+| LangCraft | `yknothing/langcraft@fa31c4b85a7400c53abee3bd19c278395a0df3fa` | `not_declared`; commit is the only release identity used here | 6 | gateway | adds upstream `prose-craft`; removes local router overlay |
+| Better Skills | `yknothing/better-skills@8e8d2af4c5cb2099e27fdea9c723befe91701593` | `skills.json` root `version` = `0.2.0-dev` | 8 | collection | rejects invalid portable-YAML `bs-visual-design`; packages four shared inputs |
 
 这些 commit 是本次 reviewed candidates；后续 upstream `main` 变化不会自动更新 active revision。
 
@@ -186,6 +196,10 @@ Live apply 前至少需要：
 11. fresh enumeration of newly added collection exposures and same-name flat collisions；
 12. multi-collection catalog coexistence and per-collection undo；
 13. post-live direct status, nested Finder-metadata policy and static/fresh-runtime loader/reference checks。
+14. static roots 与 fresh `~/.<agent>/skills` discovery 的集合一致；新增 Agent root 必须同时进入 scanner 与 native path authorization regression。
+15. stale same-repository projection 与 cross-repository collision 分开分类；cleanup 的 retire-path selector 必须绑定 exact review fingerprint。
+16. declared upstream version 的 path/value/digest/extractor，以及无声明时的 `not_declared`，必须从 immutable artifact 重建。
+17. cleanup plan 的 item/input capacity 必须在 durable initialization 前 fail closed；partition manifest、child hash、8-item 上限与首次失败停止语义必须有回归测试。
 
 ## 10. Limitations and non-claims
 
@@ -195,6 +209,7 @@ Live apply 前至少需要：
 - Collection mutation and cleanup transaction families still require a future shared global lease audit; current collection operations serialize against other collection operations only.
 - Upstream validation quality differs by repository. Repository-provided validators supplement but do not replace controller packaging validation.
 - Deployment content comparison ignores only exact basename `.DS_Store` recursively. Source/artifact/predecessor/recovery digests remain exact; any other unknown entry is drift.
+- Dynamic root discovery intentionally accepts only an immediate hidden home directory followed by `/skills`；project-local `.agents` trees and deeper arbitrary repositories remain outside the global scan.
 
 ## 11. Consequences
 

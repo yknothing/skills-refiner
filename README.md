@@ -196,44 +196,52 @@ bash ~/.agents/skills/skill-hygiene/bin/skills-refiner setup-cli \
 SESSION_DIR=$(mktemp -d /tmp/skills-refiner-cleanup.XXXXXX) || exit 1
 chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
 REVIEW="$SESSION_DIR/review.json"
-DECISIONS="$SESSION_DIR/decisions.json"
+SELECTOR="$SESSION_DIR/retire-paths.json"
 PLAN="$SESSION_DIR/plan.json"
-skills-refiner cleanup review --json > "$REVIEW"
+skills-refiner cleanup review --output "$REVIEW" --json
 ```
 
-Never place these artifacts in the current project/source repository. Create
-`$DECISIONS` inside the private session directory with the exact review
-fingerprint and one explicit decision for every candidate:
+Never place these artifacts in the current project/source repository. For an
+exact reviewed subset, create `$SELECTOR` inside the private session directory:
 
 ```json
 {
-  "schema_version": "skills-refiner.cleanup.decisions.v1",
+  "schema_version": "skills-refiner.cleanup.retire-paths.v1",
   "review_fingerprint": "<copy the exact review_fingerprint value>",
-  "decisions": [
-    {"candidate_id": "<copy the exact candidate_id value>", "action": "later"}
-  ]
+  "entry_paths": ["<copy an exact normalized absolute entry_path>"]
 }
 ```
 
 Then compile and apply the immutable plan:
 
 ```bash
-skills-refiner cleanup plan --review "$REVIEW" --decisions "$DECISIONS" --json > "$PLAN"
+skills-refiner cleanup plan --review "$REVIEW" --retire-paths "$SELECTOR" --output "$PLAN" --json
 skills-refiner cleanup apply --plan "$PLAN" --confirm 'sha256:...' --post-scan --json
 skills-refiner cleanup status 'sha256:...' --json
 skills-refiner cleanup undo 'sha256:...' --confirm 'sha256:...' --json
-rm -f -- "$REVIEW" "$DECISIONS" "$PLAN"
+rm -f -- "$REVIEW" "$SELECTOR" "$PLAN"
 rmdir -- "$SESSION_DIR"
 ```
 
 Use the exact `plan_hash` from `$PLAN` for apply and each item's exact
 `transaction_id` for status/undo. `--persist-keep` on `cleanup plan` is the only
 Agent/IDE path that persists Keep decisions; without it, planning has no Keep
-side effect. Every candidate must be assigned `keep`, `later`, or `retire`—an
-omitted decision is invalid. `Inspect` is a TTY-only view, not a fourth JSON
-action. If the flow stops early, delete only those three session files and then
-remove their private directory; never clean up by deleting the current working
-tree.
+side effect. Use the mutually exclusive `--decisions` form when every candidate
+needs an explicit `keep`, `later`, or `retire` action. The selector form retires
+only its reviewed eligible paths and assigns Later to everything else.
+`Inspect` is a TTY-only view, not a JSON action. If the flow stops early, delete
+only those three session files and then remove their private directory; never
+clean up by deleting the current working tree.
+
+An executable cleanup plan is deliberately bounded to 8 items so its exact
+native-helper request remains below the helper input contract. For a larger
+approved subset, replace `--output "$PLAN"` with
+`--partition-dir "$SESSION_DIR/parts"` after creating that owner-private mode
+`0700` directory. Apply the emitted child plans in manifest order and stop on
+the first failure; every item still has its own transaction and undo identity.
+`cleanup partition --plan OLD_PLAN --output-dir DIR` exists only to convert a
+previously compiled oversized plan without rescanning. It revalidates the old
+plan and writes new, content-addressed child plans; it never applies them.
 
 The TTY presents **Keep / Later / Inspect / Retire**. Blank input means Later,
 so nothing is selected for retirement by default. Keep is persisted only while
@@ -267,6 +275,8 @@ stderr. Exit codes are stable at this boundary:
 | `130` | Interactive interruption |
 
 Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, and `skill-scan.v5` are schema versions, not product release numbers. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v5 preserves the v4 conservative runtime semantics while adding exact active-entry identity, a unified compatibility view, and content-bound GitHub installer-receipt evidence for later disposition planning. Its `entries` order is the documented concatenation `skills + skill_links + broken_symlinks`.
+
+Managed third-party collection versions are a separate namespace: skills-refiner reports only values extracted from an approved immutable upstream artifact, together with source path/digest, or `not_declared`. It never derives a third-party release version from these local schema/product numbers.
 
 ## Repository layout
 

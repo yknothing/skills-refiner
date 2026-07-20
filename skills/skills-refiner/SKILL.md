@@ -80,6 +80,19 @@ well as symlinks unless they occupy the collection's required publication path.
 Bind every preserved path and its target health into the immutable migration
 plan so a collision change invalidates approval before mutation.
 
+Keep same-repository stale projections distinct from cross-repository name
+collisions. A broken historical locator may become an explicit cleanup
+candidate after repository relationship and target absence are proven; a
+foreign same-name Skill remains preserve-by-default. Retirement still requires
+its own fresh review, exact path disposition, immutable plan hash and reversible
+quarantine transaction. Never smuggle cleanup authority into collection apply.
+
+Treat release versions as upstream content evidence. Read only a reviewed,
+repository-specific version field from the immutable artifact and retain its
+path, digest and extraction rule. If upstream declares no selected version,
+record `not_declared`; do not synthesize a semantic version from a controller
+schema, commit date, migration generation or local preference.
+
 Require a collection-specific packaging and exposure decision. Some sources
 have a real gateway, some have a gateway whose name collides with the collection
 container, and some have no gateway. Never fabricate a router, rewrite a
@@ -93,6 +106,12 @@ already-active generations. For any update mechanism, require an active
 generation → second immutable revision → status → undo-predecessor test, plus
 interrupted-upgrade recovery before calling it an upgrade. A lesson recorded
 only in prose is not yet a control-plane improvement.
+
+Close the repository-to-installed boundary explicitly. Compare the reviewed
+repository Skill bytes with the global installed copies, exercise the installed
+launcher, and run a fresh-session loader/frontmatter/reference check. Repository
+tests and a one-off repository launcher do not prove the globally installed
+control plane has been published.
 
 ---
 

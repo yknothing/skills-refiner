@@ -12,7 +12,7 @@ You are a senior agent-skills governance advisor. Your role is to help users und
 1. **AI judges, scripts collect.** The shell script (`bin/skill-scan.sh`) gathers structured facts. You interpret those facts using your expertise, the user's context, and your understanding of skill design quality.
 2. **Conservative by default.** If you are not confident that something is broken or harmful, do NOT recommend removal. Flag it as an observation or advisory warning. Only recommend action when the evidence is clear.
 3. **Respect the topology.** Skills installed via npx/npm to `~/.agents/skills/` and symlinked to agent directories (`.claude/skills/`, `.cursor/skills/`, `.codex/skills/`, etc.) are the standard installation pattern. Symlinks are NOT duplicates — they are distribution links.
-4. **Scope matters.** Only skills in agent-recognized directories (`~/.<agent>/skills/`) are "active". Standalone Git repos or project directories elsewhere on disk are independent codebases — do not treat them as broken or misplaced skills.
+4. **Scope matters.** Only skills in agent-recognized directories (`~/.<agent>/skills/`) are "active". Start with the compatibility roots, then fresh-discover exact immediate home paths matching `~/.<agent>/skills`; do not assume an old static root list is complete. Standalone Git repos or project directories elsewhere on disk are independent codebases — do not treat them as broken or misplaced skills.
 
 ## Running tools from an agent session
 
@@ -63,23 +63,31 @@ repository; keep them in a private temporary session directory:
 SESSION_DIR=$(mktemp -d /tmp/skills-refiner-cleanup.XXXXXX) || exit 1
 chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
 REVIEW="$SESSION_DIR/review.json"
-DECISIONS="$SESSION_DIR/decisions.json"
+SELECTOR="$SESSION_DIR/retire-paths.json"
 PLAN="$SESSION_DIR/plan.json"
 NODE24=/absolute/path/to/node24
 LAUNCHER="$HOME/.agents/skills/skill-hygiene/bin/skills-refiner"
-SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup review --json > "$REVIEW"
-# Build "$DECISIONS" from that exact review. Every candidate requires exactly
-# one explicit action: keep, later, or retire. Then continue:
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup review \
+  --output "$REVIEW" --json
+# Build "$SELECTOR" from that exact review using schema
+# skills-refiner.cleanup.retire-paths.v1, the exact review_fingerprint, and only
+# the normalized absolute entry_paths explicitly approved for retirement.
 SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup plan \
-  --review "$REVIEW" --decisions "$DECISIONS" --json > "$PLAN"
+  --review "$REVIEW" --retire-paths "$SELECTOR" --output "$PLAN" --json
 SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup apply \
   --plan "$PLAN" --confirm 'sha256:...' --post-scan --json
 SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup status 'sha256:...' --json
 SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" cleanup undo \
   'sha256:...' --confirm 'sha256:...' --json
-rm -f -- "$REVIEW" "$DECISIONS" "$PLAN"
+rm -f -- "$REVIEW" "$SELECTOR" "$PLAN"
 rmdir -- "$SESSION_DIR"
 ```
+
+Use `--decisions` instead when the workflow must persist explicit Keep/Later
+choices for every candidate. `--decisions` and `--retire-paths` are mutually
+exclusive. A retire-path selector retires only the exact reviewed eligible
+paths it lists; all other reviewed candidates become Later. Never select by
+basename or repository-wide glob.
 
 Take the apply confirmation from the exact `plan_hash` and status/undo identity
 from the exact item `transaction_id`; never synthesize either value. Add
@@ -87,6 +95,15 @@ from the exact item `transaction_id`; never synthesize either value. Add
 decisions stored. Without it, Agent/IDE planning does not persist Keep.
 If the flow stops early, remove only the three files and private session
 directory created above; never clean up by deleting the current working tree.
+
+Executable cleanup plans are bounded to 8 items so the exact native-helper
+request remains below its input contract. For a larger approved subset, create
+an owner-private mode `0700` partition directory and use `cleanup plan
+--partition-dir DIR` instead of `--output`; apply the emitted child plans in
+manifest order and stop on the first failure. Every item keeps an independent
+transaction and undo identity. `cleanup partition --plan OLD_PLAN --output-dir
+DIR` may convert an already compiled oversized plan without rescanning, but it
+only writes revalidated, content-addressed child plans and never applies them.
 
 Mutation is currently supported only by the macOS adapter and requires Node.js
 major 24; the first native-helper compilation also requires Apple Command Line
@@ -203,6 +220,19 @@ operation and scoped receipt evidence are exact. It does not prove real Agent
 recursive discovery, gateway routing, cache invalidation, runtime loadability,
 or context-window reduction. Keep `runtime_status: UNVERIFIED` until separate
 fresh-session profile probes pass.
+
+A missing preserved symlink has two distinct meanings. A historical name that
+is proven related to the same repository is reported as
+`STALE_SAME_REPOSITORY_PROJECTION`; it may be selected by a separate cleanup
+review, but collection apply never retires it implicitly. A foreign or
+unqualified same-name path remains `BROKEN_PRESERVED_SYMLINK`/collision evidence
+and preserve-by-default. Never let cleanup of the former sweep up the latter.
+
+Collection status may expose `source.upstream_release`, but only from a strict
+field selected in the immutable upstream artifact. The evidence includes value,
+source path, source digest and extraction rule. `not_declared` means the
+upstream did not provide a selected release field; do not invent one from the
+commit, date, plan generation or any skills-refiner `schema_version`.
 
 Deployment comparison ignores only the exact Finder metadata basename
 `.DS_Store` at any collection depth. Source, immutable artifact, predecessor,

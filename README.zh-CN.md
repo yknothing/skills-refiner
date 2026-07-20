@@ -188,42 +188,48 @@ bash ~/.agents/skills/skill-hygiene/bin/skills-refiner setup-cli \
 SESSION_DIR=$(mktemp -d /tmp/skills-refiner-cleanup.XXXXXX) || exit 1
 chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
 REVIEW="$SESSION_DIR/review.json"
-DECISIONS="$SESSION_DIR/decisions.json"
+SELECTOR="$SESSION_DIR/retire-paths.json"
 PLAN="$SESSION_DIR/plan.json"
-skills-refiner cleanup review --json > "$REVIEW"
+skills-refiner cleanup review --output "$REVIEW" --json
 ```
 
-不要把这些产物写入当前 project/source repository。在私有会话目录中创建
-`$DECISIONS`，复用精确的 review fingerprint，并为每个 candidate 写一项
-显式决策：
+不要把这些产物写入当前 project/source repository。若只退役一个精确的审核子集，
+在私有会话目录中创建 `$SELECTOR`：
 
 ```json
 {
-  "schema_version": "skills-refiner.cleanup.decisions.v1",
+  "schema_version": "skills-refiner.cleanup.retire-paths.v1",
   "review_fingerprint": "<完整复制 review_fingerprint 的精确值>",
-  "decisions": [
-    {"candidate_id": "<完整复制 candidate_id 的精确值>", "action": "later"}
-  ]
+  "entry_paths": ["<完整复制审核过的规范化绝对 entry_path>"]
 }
 ```
 
 然后编译并执行不可变 plan：
 
 ```bash
-skills-refiner cleanup plan --review "$REVIEW" --decisions "$DECISIONS" --json > "$PLAN"
+skills-refiner cleanup plan --review "$REVIEW" --retire-paths "$SELECTOR" --output "$PLAN" --json
 skills-refiner cleanup apply --plan "$PLAN" --confirm 'sha256:...' --post-scan --json
 skills-refiner cleanup status 'sha256:...' --json
 skills-refiner cleanup undo 'sha256:...' --confirm 'sha256:...' --json
-rm -f -- "$REVIEW" "$DECISIONS" "$PLAN"
+rm -f -- "$REVIEW" "$SELECTOR" "$PLAN"
 rmdir -- "$SESSION_DIR"
 ```
 
 Apply 必须使用 `$PLAN` 中精确的 `plan_hash`，status/undo 必须使用对应 item
 的精确 `transaction_id`。`cleanup plan --persist-keep` 是 Agent/IDE 路径中唯一会
-持久化 Keep 的方式；不加该参数，plan 不会产生 Keep 副作用。每个 candidate 都
-必须显式选择 `keep`、`later` 或 `retire`，遗漏会判为 invalid。`Inspect` 只存在
-于 TTY 展示中，不是第四种 JSON action。如果流程中途停止，只删除上述三个
+持久化 Keep 的方式；不加该参数，plan 不会产生 Keep 副作用。需要为每个 candidate
+显式选择 `keep`、`later` 或 `retire` 时，使用与 `--retire-paths` 互斥的
+`--decisions` 形式；selector 只退役其中列出的已审核 eligible paths，其余全部视为
+Later。`Inspect` 只存在于 TTY 展示中，不是 JSON action。如果流程中途停止，只删除上述三个
 会话文件，再移除对应私有目录；切勿通过删除当前 working tree 来“清理”。
+
+单个可执行 cleanup plan 被刻意限制为 8 项，保证提交给 native helper 的精确请求
+不超过其输入契约。审核子集更大时，先创建 owner-private、mode `0700` 的
+`$SESSION_DIR/parts`，再把 `--output "$PLAN"` 替换为
+`--partition-dir "$SESSION_DIR/parts"`。必须按 manifest 顺序执行生成的 child plans，
+首次失败即停止；每个条目仍保留独立 transaction 与 undo identity。
+`cleanup partition --plan OLD_PLAN --output-dir DIR` 只用于把此前已经编译的超大 plan
+离线转换成新的 content-addressed child plans；它会重新校验旧 plan，但绝不执行 mutation。
 
 TTY 提供 **Keep / Later / Inspect / Retire**。空输入等于 Later，因此默认不会
 选中任何退役动作。Keep 只在观测到的条目标识与拓扑仍匹配时持续生效；Later
@@ -252,6 +258,8 @@ payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent
 | `130` | 交互被中断 |
 
 版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v5` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v5 保留 v4 的保守运行时语义，并为后续处置计划新增精确 active-entry identity、统一兼容视图与已绑定内容的 GitHub 安装凭证证据。`entries` 的顺序契约是 `skills + skill_links + broken_symlinks`。
+
+受管第三方 collection 的版本属于另一命名空间：skills-refiner 只报告 approved immutable upstream artifact 中严格提取的值及其 source path/digest，或明确返回 `not_declared`；不会用这些本地 product/schema 版本推导第三方 release version。
 
 ## 仓库布局
 
