@@ -32,6 +32,7 @@ import {
 } from './collection-contract.mjs';
 import { canonicalJson } from './cleanup-contract.mjs';
 import { computeTreeDigest } from './collection-tree.mjs';
+import { observeUpstreamVersion, upstreamVersionEvidence } from './upstream-version.mjs';
 import {
   createCollectionSymlinkExclusive,
   ensureMacosHelper,
@@ -107,6 +108,7 @@ function controllerIdentity(home) {
     new URL('./collection-tree.mjs', import.meta.url),
     new URL('./collection-cli.mjs', import.meta.url),
     new URL('./collection-contract.mjs', import.meta.url),
+    new URL('./upstream-version.mjs', import.meta.url),
     new URL('./cleanup-macos.mjs', import.meta.url),
     new URL('../native/cleanup-macos-helper.c', import.meta.url),
     new URL('../bin/skills-refiner', import.meta.url),
@@ -233,6 +235,7 @@ export function inspectProdcraftSource({ sourceRoot, revision }) {
   if (remote.status !== 0 || !['https://github.com/yknothing/prodcraft.git', 'git@github.com:yknothing/prodcraft.git'].includes(remote.stdout.trim())) {
     fail('source_origin_mismatch', 'source origin must be the approved yknothing/prodcraft repository');
   }
+  upstreamVersionEvidence(root, { path: 'manifest.yml', format: 'yaml_root_version' });
   return {
     provider: 'github',
     repository_id: RECEIPT_SOURCE,
@@ -1050,6 +1053,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     source: {
       provider: plan.source.provider, repository_id: plan.source.repository_id,
       resolved_revision: plan.source.revision, artifact_digest: plan.source.tree_digest,
+      upstream_release: observeUpstreamVersion(paths.artifactRepo, { path: 'manifest.yml', format: 'yaml_root_version' }),
     },
     lifecycle: {
       receipt_history: {

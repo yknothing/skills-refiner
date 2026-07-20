@@ -16,6 +16,7 @@ import {
   MacosAdapterError, moveCollectionEntryExclusive, unlinkCollectionSymlinkExact,
 } from './cleanup-macos.mjs';
 import { collectionSpec, managedCollectionIds } from './collection-specs.mjs';
+import { observeUpstreamVersion, upstreamVersionEvidence } from './upstream-version.mjs';
 import {
   buildManagedPlan, MANAGED_COLLECTION_SCHEMAS, validateManagedIndex,
   validateManagedOperation, validateManagedPlan,
@@ -123,6 +124,7 @@ function controllerIdentity(home) {
     new URL('./collection-specs.mjs', import.meta.url),
     new URL('./collection-tree.mjs', import.meta.url),
     new URL('./managed-collection-contract.mjs', import.meta.url),
+    new URL('./upstream-version.mjs', import.meta.url),
     new URL('./collection-cli.mjs', import.meta.url),
     new URL('./cleanup-macos.mjs', import.meta.url),
     new URL('../native/cleanup-macos-helper.c', import.meta.url),
@@ -243,6 +245,7 @@ export function inspectManagedSource({ collectionId, sourceRoot, revision }) {
   if (remote.status !== 0 || !approvedGithubOrigin(remote.stdout.trim(), spec)) fail('source_origin_mismatch', `source origin must be ${spec.repositoryId}`);
   const manifestPath = join(root, spec.manifestPath);
   if (!lstatExists(manifestPath) || !lstatSync(manifestPath).isFile()) fail('invalid_manifest', `manifest is missing: ${manifestPath}`);
+  upstreamVersionEvidence(root, spec.upstreamVersion);
   for (const rejected of spec.rejectedMembers) {
     const rejectedRoot = join(root, rejected.sourcePath);
     assertRealDirectory(rejectedRoot, `rejected source member ${rejected.name}`);
@@ -1149,7 +1152,11 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
   const nameCollisions = inspectManagedNameCollisions({ collectionId: plan.collection_id, home: plan.home, excludePaths: collisionExclusions });
   const managementAttention = nameCollisions
     .filter(({ kind, target_status: targetStatus }) => kind === 'symlink' && targetStatus === 'missing')
-    .map(({ path }) => ({ code: 'BROKEN_PRESERVED_SYMLINK', path }));
+    .map(({ name, path, relation }) => ({
+      code: relation === 'same_repository_name' && spec.preservedNames.includes(name)
+        ? 'STALE_SAME_REPOSITORY_PROJECTION' : 'BROKEN_PRESERVED_SYMLINK',
+      path,
+    }));
   if (plan.preserved_collisions !== undefined
       && canonicalJson(nameCollisions) !== canonicalJson(plan.preserved_collisions)) {
     managementAttention.unshift({ code: 'PRESERVED_COLLISION_SET_CHANGED', path: null });
@@ -1163,6 +1170,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     source: {
       provider: plan.source.provider, repository_id: plan.source.repository_id,
       resolved_revision: plan.source.revision, artifact_digest: plan.source.tree_digest,
+      upstream_release: observeUpstreamVersion(paths.artifactRepo, spec.upstreamVersion),
     },
     lifecycle: { receipt_history: plan.receipt.history, plan_created_at: plan.created_at },
     name_collision_status: managementAttention.length > 0 ? 'ATTENTION_REQUIRED' : nameCollisions.length > 0 ? 'OBSERVED' : 'CLEAR',

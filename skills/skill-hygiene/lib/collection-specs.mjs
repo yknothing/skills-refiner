@@ -12,6 +12,7 @@ const definitions = {
     compatibleMemberProfiles: [],
     rejectedMembers: [],
     manifestPath: 'pyproject.toml',
+    upstreamVersion: { path: 'pyproject.toml', format: 'pep621_project_version' },
     exposure: { type: 'gateway', name: 'loopos' },
     preservedNames: [],
     sharedPaths: [],
@@ -32,6 +33,7 @@ const definitions = {
     compatibleMemberProfiles: [],
     rejectedMembers: [],
     manifestPath: 'README.md',
+    upstreamVersion: null,
     exposure: { type: 'gateway', name: 'langcraft' },
     preservedNames: [],
     sharedPaths: [],
@@ -56,6 +58,7 @@ const definitions = {
       reason: 'invalid_portable_yaml',
     }],
     manifestPath: 'skills.json',
+    upstreamVersion: { path: 'skills.json', format: 'json_root_version' },
     exposure: { type: 'collection', name: 'better-skills' },
     preservedNames: [
       'article-illustrate', 'dev-flow', 'first-customer-finder', 'prose-craft',
@@ -74,11 +77,15 @@ const definitions = {
 };
 
 function freezeSpec(collectionId, value) {
+  const validVersionRule = value.upstreamVersion === null
+    || (typeof value.upstreamVersion === 'object'
+      && RELATIVE_PATH.test(value.upstreamVersion.path)
+      && ['json_root_version', 'pep621_project_version', 'yaml_root_version'].includes(value.upstreamVersion.format));
   if (!NAME.test(collectionId) || !NAME.test(value.exposure.name)
       || !['gateway', 'collection'].includes(value.exposure.type)
       || typeof value.repositoryId !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(value.repositoryId)
       || value.sourceUrl.toLowerCase() !== `https://github.com/${value.repositoryId}.git`.toLowerCase()
-      || !RELATIVE_PATH.test(value.manifestPath)) throw new Error(`invalid collection spec: ${collectionId}`);
+      || !RELATIVE_PATH.test(value.manifestPath) || !validVersionRule) throw new Error(`invalid collection spec: ${collectionId}`);
   const members = value.members.map((member) => Object.freeze({ ...member }));
   const compatibleMemberProfiles = value.compatibleMemberProfiles.map((profile) => profile.map((member) => Object.freeze({ ...member })));
   const rejectedMembers = value.rejectedMembers.map((member) => Object.freeze({ ...member }));
@@ -118,6 +125,7 @@ function freezeSpec(collectionId, value) {
       Object.freeze([...members]),
     ]),
     rejectedMembers: Object.freeze(rejectedMembers),
+    upstreamVersion: value.upstreamVersion === null ? null : Object.freeze({ ...value.upstreamVersion }),
     exposure: Object.freeze({ ...value.exposure }),
     preservedNames: Object.freeze(preservedNames),
     sharedPaths: Object.freeze(sharedPaths),

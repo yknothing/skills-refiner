@@ -161,6 +161,10 @@ test('apply publishes the physical collection, index, locator, and bounded proje
   assert.equal(status.status, 'FILESYSTEM_READY');
   assert.equal(status.member_count, 40);
   assert.equal(status.external_receipt_state, 'superseded');
+  assert.equal(status.source.upstream_release.status, 'declared');
+  assert.equal(status.source.upstream_release.value, '1.0.0');
+  assert.equal(status.source.upstream_release.source_path, 'manifest.yml');
+  assert.equal(status.source.upstream_release.extraction, 'yaml_root_version');
 });
 
 test('status ignores only Finder metadata and rejects every other unknown collection entry', (t) => {

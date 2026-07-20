@@ -47,7 +47,7 @@ export function makeSource(root) {
   mkdirSync(join(source, 'workflows'), { recursive: true });
   writeFileSync(join(source, 'skills/_gateway.md'), '# Gateway\n');
   writeFileSync(join(source, 'CLAUDE.md'), '# Prodcraft\n');
-  writeFileSync(join(source, 'manifest.yml'), 'name: prodcraft\n');
+  writeFileSync(join(source, 'manifest.yml'), 'name: prodcraft\nversion: 1.0.0\n');
   const environment = {
     ...process.env,
     GIT_CONFIG_NOSYSTEM: '1',

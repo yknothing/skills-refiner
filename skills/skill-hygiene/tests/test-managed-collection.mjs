@@ -152,6 +152,10 @@ test('apply publishes a real collection, shared resources, catalog anchor, and b
   assert.equal(catalog.collections['better-skills'].source.resolved_revision, plan.source.revision);
   assert.equal(catalog.collections['better-skills'].lifecycle.receipt_history.entry_count, 14);
   assert.equal(status.source.repository_id, 'yknothing/better-skills');
+  assert.deepEqual(status.source.upstream_release, {
+    status: 'declared', value: '0.2.0-dev', source_path: 'skills.json',
+    source_digest: plan.source.manifest_digest, extraction: 'json_root_version',
+  });
   assert.equal(status.lifecycle.current_generation_activated_at !== null, true);
 });
 
@@ -500,6 +504,27 @@ test('status reports same-name flat entries as preserved collisions without clai
   assert.equal(status.name_collision_status, 'ATTENTION_REQUIRED');
   assert.equal(status.management_attention.some(({ code }) => code === 'PRESERVED_COLLISION_SET_CHANGED'), true);
   assert.equal(status.management_attention.some(({ code }) => code === 'BROKEN_PRESERVED_SYMLINK'), true);
+  assert.equal(status.management_attention.some(({ code }) => code === 'STALE_SAME_REPOSITORY_PROJECTION'), true);
+});
+
+test('status reports only versions declared by immutable upstream artifacts', (t) => {
+  for (const [collectionId, expected] of [['loopos', '0.2.1'], ['langcraft', null]]) {
+    const root = makeManagedRoot();
+    t.after(() => removeManagedRoot(root));
+    const sourceRoot = makeManagedSource(root, collectionId);
+    const fixture = makeManagedHome(root, collectionId);
+    const plan = compileManagedPlan({ collectionId, home: fixture.home, sourceRoot, revision: managedRevision(sourceRoot) });
+    applyManagedPlan(plan, plan.plan_hash);
+    const release = statusManagedCollection({ collectionId, home: fixture.home }).source.upstream_release;
+    if (expected === null) {
+      assert.deepEqual(release, { status: 'not_declared', value: null, source_path: null, source_digest: null, extraction: null });
+    } else {
+      assert.equal(release.status, 'declared');
+      assert.equal(release.value, expected);
+      assert.equal(release.source_path, 'pyproject.toml');
+      assert.equal(release.extraction, 'pep621_project_version');
+    }
+  }
 });
 
 test('global mutation lock contention leaves no phantom operation', (t) => {

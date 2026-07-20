@@ -49,8 +49,8 @@ export function makeManagedSource(root, collectionId) {
     write(join(source, 'docs/research/README.md'), '# Research\n');
     write(join(source, 'tools/check-patterns.sh'), '#!/bin/sh\nexit 0\n');
   }
-  if (spec.manifestPath === 'pyproject.toml') write(join(source, spec.manifestPath), '[project]\nname="fixture"\n');
-  else if (spec.manifestPath === 'skills.json') write(join(source, spec.manifestPath), '{"name":"better-skills"}\n');
+  if (spec.manifestPath === 'pyproject.toml') write(join(source, spec.manifestPath), '[project]\nname="fixture"\nversion="0.2.1"\n');
+  else if (spec.manifestPath === 'skills.json') write(join(source, spec.manifestPath), '{"name":"better-skills","version":"0.2.0-dev"}\n');
   else write(join(source, spec.manifestPath), `# ${collectionId}\n`);
   const env = {
     ...process.env,
