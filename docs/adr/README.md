@@ -12,6 +12,7 @@
 | [0004](0004-managed-collection-store-and-transactional-artifact-set-upgrades.md) | 受管 Collection Store 与可恢复 Artifact-Set 升级 | Proposed | 2026-07-20 |
 | [0005](0005-prodcraft-in-root-physical-collection-and-projection.md) | `.agents/skills/prodcraft` 物理 Collection 与 `pc-*` 投影 | Accepted for filesystem scope | 2026-07-20 |
 | [0006](0006-declarative-managed-collections-and-reconciliation-catalog.md) | 声明式 Managed Collections 与可调和管理目录 | Accepted with limitations | 2026-07-20 |
+| [0007](0007-skills-panorama.md) | 技能全景（skills-panorama） | Accepted with limitations | 2026-07-22 |
 
 ## 产物
 
@@ -30,6 +31,8 @@
 - ADR-0004 验收：`docs/verification/2026-07-20-prodcraft-artifact-set-upgrade-acceptance.md`
 - ADR-0006 / Managed Collections V2 评审包：`docs/adversarial-product-pk/2026-07-20-managed-collections-v2/`
 - ADR-0006 / 三组 live migrations 验收：`docs/verification/2026-07-20-managed-collections-v2-and-three-collection-migrations.md`
+- ADR-0007 技能全景评审包：`docs/adversarial-product-pk/2026-07-22-skills-panorama/`
+- ADR-0007 验收：`docs/verification/2026-07-22-skills-panorama-acceptance.md`
 
 ## 约定
 
