@@ -8,15 +8,16 @@
 
 2.x 将判断从「单个 skill」延伸到「已安装的 skills 系统」：拓扑、来源、软链接分发、本地证据与保守式治理。
 
-两套能力、四个 skill：
+两套能力、五个 skill：
 
 **分析与解读** — 判断与理解：
 1. **`skills-refiner`** — 审计、精炼、抽取与整合 skill 仓库、单个 skill、工作流框架或评测集
 2. **`skills-appreciation`** — 以可发表的技术随笔风格，解读 skill 或 skills 体系
 
 **治理与可观测性** — 健康度与可见性：
-3. **`skill-hygiene`** — 评估已安装 skills 的健康与拓扑（**AI 判断，脚本收集事实**）
-4. **`skill-debug`** — 三层轻量可观测：本地发现面诊断、激活探针注入、探针观测面板
+3. **`skills-panorama`** — **技能全景**：只读摊开本机拓扑与八类缺口，分诊到 hygiene（不输出突变命令）
+4. **`skill-hygiene`** — 评估已安装 skills 的健康与拓扑（**AI 判断，脚本收集事实**）
+5. **`skill-debug`** — 三层轻量可观测：本地发现面诊断、激活探针注入、探针观测面板
 
 ## 为什么需要它
 
@@ -28,13 +29,13 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 本仓库同时应对二者：
 
 - `skills-refiner` 与 `skills-appreciation` 处理**分析**问题 — 设计层审计与可传播的解读。
-- `skill-hygiene` 与 `skill-debug` 处理**治理**问题 — 拓扑扫描、版本/来源事实收集、激活探针追踪与观测汇总。
+- `skills-panorama`、`skill-hygiene` 与 `skill-debug` 处理**治理**问题 — 先全景看清，再 hygiene 评估与处置，辅以探针观测。
 
 配合 `skill-creator` 等创建工具，可形成完整生命周期：创建 → 测试 → 设计审计 → 治理 → 可观测性 → 解读。
 
 治理的第一问现在必须更精确：静态证据能否证明存在加载阻断？`skill-scan.sh` 只会把可靠解析到且超过 1024 字符上限的 `description` 标为 `runtime_contract.status: "fail"`。轻量解析器没有观察到的必填字段会进入 `unverified_requirements`，不会被直接宣判为缺失。其余情况是 `"unknown"`、`loadable: null`、`runtime_verified: false`；scanner 不会假装自己执行过 agent 的真实 loader 或完整 YAML validator。
 
-## 四个 skill
+## 五个 skill
 
 ### 1) `skills-refiner` — 设计层审计
 
@@ -56,7 +57,21 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 
 面向解读，**不会**对创意类 skill 强行套用纯工程标尺。
 
-### 3) `skill-hygiene` — 已安装 skill 评估
+### 3) `skills-panorama` — 技能全景（只读地图）
+
+适用于：
+- 第一眼看清本机已部署 Skills：源目录有什么、各 Agent 出现了什么、链接与控制清单是否一致；
+- 按八类缺口分诊（齐全 / 仅源 / 仅 Agent / 断链 / 清单不符 / 撞名 / 部分 Agent 已出现 / 暂无法判定）；
+- 需要中文报告与低打字决策卡，且**不**在此步骤执行删除或重链。
+
+编排现有 `skill-scan` 与 collection/catalog，不新增第二套磁盘遍历。详见 ADR-0007 与 `skills/skills-panorama/SKILL.md`。
+
+```bash
+SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
+  bash ~/.agents/skills/skills-panorama/bin/skill-panorama.sh --yes
+```
+
+### 4) `skill-hygiene` — 已安装 skill 评估
 
 适用于：
 - 跨 agent 目录审计已安装 skills 的健康与质量；
@@ -66,7 +81,7 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 
 遵循 **「AI judges, scripts collect」**：`bin/skill-scan.sh` 收集结构化事实，由 AI 结合上下文解释。尊重常见安装模型：`~/.agents/skills/` 为原始目录，各 agent 目录中的软链接为分发而非重复。
 
-### 4) `skill-debug` — Skill 可观测性
+### 5) `skill-debug` — Skill 可观测性
 
 适用于：了解本地**可能**的发现面、是否观测到探针事件、哪些已安装标识缺少本地探针证据等。三层能力：
 
@@ -270,6 +285,8 @@ payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent
 - `skills/skills-appreciation/references/editorial-checklist.md` — 文章质检清单
 
 **治理与可观测性：**
+- `skills/skills-panorama/SKILL.md` — 技能全景（只读地图与分诊）
+- `skills/skills-panorama/bin/skill-panorama.sh` — 编排 scan/catalog → `latest.json` / `latest.md`
 - `skills/skill-hygiene/SKILL.md` — AI 驱动的评估框架
 - `skills/skill-hygiene/bin/skill-scan.sh` — 拓扑与事实收集
 - `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap 与 cleanup CLI launcher
@@ -319,6 +336,10 @@ Use skills-appreciation on this skill. I want to understand why it is designed t
 ```bash
 # 只读一键快照（probe + dashboard + hygiene 终端报告）
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
+
+# 技能全景（只读；零交互）
+SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
+  bash ~/.agents/skills/skills-panorama/bin/skill-panorama.sh --yes
 
 # 扫描已安装 skills
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
