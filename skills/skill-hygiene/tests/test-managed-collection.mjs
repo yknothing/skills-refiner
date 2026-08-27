@@ -29,7 +29,7 @@ function planned(t, collectionId = 'better-skills') {
 test('declarative source inspection supports folded YAML and pinned member sets', (t) => {
   const root = makeManagedRoot();
   t.after(() => removeManagedRoot(root));
-  for (const [collectionId, count] of [['loopos', 10], ['langcraft', 6], ['better-skills', 8]]) {
+  for (const [collectionId, count] of [['loopos', 10], ['langcraft', 6], ['better-skills', 12]]) {
     const source = makeManagedSource(join(root, collectionId), collectionId);
     const observed = inspectManagedSource({ collectionId, sourceRoot: source, revision: managedRevision(source) });
     assert.equal(observed.members.length, count);
@@ -37,32 +37,30 @@ test('declarative source inspection supports folded YAML and pinned member sets'
   }
 });
 
-test('source inspection rejects a plain frontmatter scalar that is invalid portable YAML', (t) => {
+test('source inspection rejects a current member with invalid portable YAML', (t) => {
   const root = makeManagedRoot();
   t.after(() => removeManagedRoot(root));
   const source = makeManagedSource(root, 'better-skills');
-  const skillPath = join(source, 'skills/bs-dev-flow/SKILL.md');
+  const skillPath = join(source, 'skills/bs-prdefine/SKILL.md');
   writeFileSync(skillPath, readFileSync(skillPath, 'utf8').replace(
-    'description: Use when testing managed collection member bs-dev-flow.',
-    'description: Use when testing managed collection member bs-dev-flow. Portability: invalid.',
+    'description: Use when testing managed collection member bs-prdefine.',
+    'description: Use when testing managed collection member bs-prdefine. Portability: invalid.',
   ));
   const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'invalid portable frontmatter'], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);
   assert.throws(() => inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) }), /not portable YAML/u);
 });
 
-test('source inspection fails when a recorded rejected member becomes portable', (t) => {
+test('source inspection fails when a canonical current member is missing', (t) => {
   const root = makeManagedRoot();
   t.after(() => removeManagedRoot(root));
   const source = makeManagedSource(root, 'better-skills');
-  const rejected = join(source, 'skills/bs-visual-design/SKILL.md');
-  writeFileSync(rejected, readFileSync(rejected, 'utf8').replace(
-    'description: Use when testing a rejected member. Portability: invalid.',
-    'description: "Use when testing a rejected member. Portability: now valid."',
-  ));
-  const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'repair rejected frontmatter'], { encoding: 'utf8' });
+  rmSync(join(source, 'skills/bs-prdefine'), { recursive: true });
+  const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'add', '-A'], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);
-  assert.throws(() => inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) }), /rejected member now passes/u);
+  const commit = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'remove canonical member'], { encoding: 'utf8' });
+  assert.equal(commit.status, 0, commit.stderr);
+  assert.throws(() => inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) }), /source member bs-prdefine/u);
 });
 
 test('managed plan applies from a clean Git linked worktree without hashing its .git pointer', (t) => {
@@ -82,14 +80,23 @@ test('managed plan applies from a clean Git linked worktree without hashing its 
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'FILESYSTEM_READY');
 });
 
+test('status skips a planned exposure after that Agent root is removed', (t) => {
+  const { fixture, plan } = planned(t);
+  applyManagedPlan(plan, plan.plan_hash);
+  rmSync(fixture.agentRoots[0], { recursive: true });
+  const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
+  assert.equal(status.issues.some((issue) => issue.startsWith('AGENT_EXPOSURE_DRIFT:')), false);
+});
+
 test('source and deployed identity apply the same bounded Finder metadata policy', (t) => {
   const root = makeManagedRoot();
   t.after(() => removeManagedRoot(root));
   const source = makeManagedSource(root, 'better-skills');
-  writeFileSync(join(source, 'skills/bs-dev-flow/.DS_Store'), 'source host metadata\n');
+  writeFileSync(join(source, 'skills/bs-prdefine/.DS_Store'), 'source host metadata\n');
   const committed = spawnSync('/usr/bin/git', [
     '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
-    'add', 'skills/bs-dev-flow/.DS_Store',
+    'add', 'skills/bs-prdefine/.DS_Store',
   ], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);
   const commit = spawnSync('/usr/bin/git', [
@@ -103,20 +110,20 @@ test('source and deployed identity apply the same bounded Finder metadata policy
     revision: managedRevision(source), now: '2026-07-20T00:00:00.000Z',
   });
   assert.equal(applyManagedPlan(plan, plan.plan_hash).status, 'FILESYSTEM_READY');
-  assert.equal(existsSync(join(fixture.skillsRoot, 'better-skills/bs-dev-flow/.DS_Store')), true);
+  assert.equal(existsSync(join(fixture.skillsRoot, 'better-skills/bs-prdefine/.DS_Store')), true);
   const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
   assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
 });
 
 test('plan moves only qualified active members and preserves ambiguous historical names', (t) => {
   const { plan } = planned(t);
-  assert.equal(plan.source.members.length, 8);
-  assert.equal(plan.legacy.length, 7);
-  assert.equal(plan.projections.length, 14);
+  assert.equal(plan.source.members.length, 12);
+  assert.equal(plan.legacy.length, 11);
+  assert.equal(plan.projections.length, 22);
   assert.equal(plan.preserved_collisions.length, 14);
   assert.equal(plan.agent_roots.length, 2);
   assert.deepEqual(plan.receipt.history, {
-    entry_count: 14,
+    entry_count: 18,
     first_installed_at: '2026-03-01T00:00:00.000Z',
     last_updated_at: '2026-07-13T00:00:00.000Z',
   });
@@ -138,7 +145,10 @@ test('apply publishes a real collection, shared resources, catalog anchor, and b
   assert.equal(existsSync(join(collection, 'docs/research/README.md')), true);
   assert.equal(existsSync(join(collection, 'tools/check-patterns.sh')), true);
   assert.equal(existsSync(join(collection, 'skills.json')), true);
-  assert.equal(existsSync(join(collection, 'bs-skill-bootstrap/references/tdd-for-skills.md')), true);
+  const relocatedReference = join(collection, 'bs-skill-forge/references/tdd-for-skills.md');
+  assert.equal(existsSync(relocatedReference), true);
+  assert.match(readFileSync(relocatedReference, 'utf8'), /\]\(\.\.\/\.\.\/docs\/patterns\/README\.md\)/u);
+  assert.doesNotMatch(readFileSync(relocatedReference, 'utf8'), /\]\(\.\.\/\.\.\/\.\.\/docs\/patterns\/README\.md\)/u);
   for (const member of fixture.activeMembers) assert.equal(existsSync(join(fixture.skillsRoot, member.name)), false);
   for (const root of fixture.agentRoots) {
     assert.equal(readlinkSync(join(root, 'better-skills')), '../../.agents/skills/better-skills');
@@ -146,11 +156,11 @@ test('apply publishes a real collection, shared resources, catalog anchor, and b
   }
   const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
   assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
-  assert.equal(status.member_count, 8);
+  assert.equal(status.member_count, 12);
   const catalog = JSON.parse(readFileSync(join(fixture.home, 'Library/Application Support/skills-refiner/catalog.json'), 'utf8'));
   assert.equal(catalog.collections['better-skills'].operation_id, applied.operation_id);
   assert.equal(catalog.collections['better-skills'].source.resolved_revision, plan.source.revision);
-  assert.equal(catalog.collections['better-skills'].lifecycle.receipt_history.entry_count, 14);
+  assert.equal(catalog.collections['better-skills'].lifecycle.receipt_history.entry_count, 18);
   assert.equal(status.source.repository_id, 'yknothing/better-skills');
   assert.deepEqual(status.source.upstream_release, {
     status: 'declared', value: '0.2.0-dev', source_path: 'skills.json',
@@ -179,13 +189,13 @@ test('catalog content and materialized view are part of exact READY identity', (
 test('status ignores nested Finder metadata but no other unknown member entry', (t) => {
   const { fixture, plan } = planned(t);
   applyManagedPlan(plan, plan.plan_hash);
-  const member = join(fixture.skillsRoot, 'better-skills/bs-dev-flow');
+  const member = join(fixture.skillsRoot, 'better-skills/bs-prdefine');
   writeFileSync(join(member, '.DS_Store'), 'host metadata\n');
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'FILESYSTEM_READY');
   writeFileSync(join(member, '.unexpected'), 'not host metadata\n');
   const drift = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
   assert.equal(drift.status, 'DRIFTED');
-  assert.equal(drift.issues.includes('MEMBER_DRIFT:bs-dev-flow'), true);
+  assert.equal(drift.issues.includes('MEMBER_DRIFT:bs-prdefine'), true);
 });
 
 test('repair reconstructs a deleted catalog and proves the full post-state', (t) => {
@@ -224,13 +234,13 @@ test('catalog deletion, index, artifact, resource, quarantine, and recovery drif
   writeFileSync(join(collection, 'docs/patterns/README.md'), 'tampered\n');
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).issues.includes('RESOURCE_DRIFT:docs/patterns'), true);
 
-  const quarantineSkill = join(fixture.home, `.agents/skills-quarantine/collections/${applied.operation_id}/skills/bs-dev-flow/tampered.txt`);
-  const recoverySkill = join(fixture.home, `Library/Application Support/skills-refiner/recovery/operations/${applied.operation_id}/pre-state/skills/bs-dev-flow/tampered.txt`);
+  const quarantineSkill = join(fixture.home, `.agents/skills-quarantine/collections/${applied.operation_id}/skills/bs-prdefine/tampered.txt`);
+  const recoverySkill = join(fixture.home, `Library/Application Support/skills-refiner/recovery/operations/${applied.operation_id}/pre-state/skills/bs-prdefine/tampered.txt`);
   writeFileSync(quarantineSkill, 'tampered\n');
   writeFileSync(recoverySkill, 'tampered\n');
   status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
-  assert.equal(status.issues.includes('QUARANTINE_DRIFT:bs-dev-flow'), true);
-  assert.equal(status.issues.includes('RECOVERY_DRIFT:bs-dev-flow'), true);
+  assert.equal(status.issues.includes('QUARANTINE_DRIFT:bs-prdefine'), true);
+  assert.equal(status.issues.includes('RECOVERY_DRIFT:bs-prdefine'), true);
 });
 
 test('gateway locator drift is observable', (t) => {
@@ -301,17 +311,21 @@ test('apply binds preserved collision targets into the immutable plan preconditi
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'UNMANAGED');
 });
 
-test('historical V2 profile remains interpretable and V2 to V3 undo restores the predecessor', (t) => {
+test('historical V2 profile remains interpretable and V2 to V4 undo restores the predecessor', (t) => {
   const { fixture, plan: firstPlan, source } = planned(t);
 
   const historicalProfile = structuredClone(firstPlan);
   historicalProfile.schema_version = MANAGED_COLLECTION_SCHEMAS.legacyPlan;
   delete historicalProfile.preserved_collisions;
-  historicalProfile.source.members.push({
-    name: 'bs-visual-design', source_path: 'skills/bs-visual-design',
-    tree_digest: `sha256:${'f'.repeat(64)}`,
-  });
+  const historicalMembers = collectionSpec('better-skills').memberProfiles.find((profile) => profile.length === 9);
+  historicalProfile.source.members = historicalMembers.map(({ name, sourcePath }, index) => ({
+    name,
+    source_path: sourcePath,
+    tree_digest: `sha256:${String((index % 8) + 1).repeat(64)}`,
+  }));
   historicalProfile.source.resources = historicalProfile.source.resources.slice(0, 1);
+  historicalProfile.legacy = historicalProfile.legacy.filter(({ name }) => name === 'bs-social-card');
+  historicalProfile.projections = historicalProfile.projections.filter(({ name }) => name === 'bs-social-card');
   historicalProfile.plan_hash = computeManagedPlanHash(historicalProfile);
   assert.doesNotThrow(() => validateManagedPlan(historicalProfile));
   assert.equal(historicalProfile.source.members.length, 9);
@@ -323,7 +337,7 @@ test('historical V2 profile remains interpretable and V2 to V3 undo restores the
   firstV2Plan.plan_hash = computeManagedPlanHash(firstV2Plan);
   validateManagedPlan(firstV2Plan);
   const first = applyManagedPlan(firstV2Plan, firstV2Plan.plan_hash);
-  const skillPath = join(source, 'skills/bs-dev-flow/SKILL.md');
+  const skillPath = join(source, 'skills/bs-prdefine/SKILL.md');
   writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\nSecond generation.\n`);
   const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'second generation'], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);
@@ -350,10 +364,70 @@ test('historical V2 profile remains interpretable and V2 to V3 undo restores the
   assert.equal(undoManagedOperation({ home: fixture.home, operationId: first.operation_id, confirmation: first.operation_id }).status, 'RESTORED');
 });
 
+test('upgrade transaction explicitly adopts allowlisted installer metadata and undo restores it', (t) => {
+  const { fixture, plan: firstPlan, source } = planned(t);
+  applyManagedPlan(firstPlan, firstPlan.plan_hash);
+  const metadataPath = join(fixture.skillsRoot, 'better-skills/.better-skills.json');
+  writeFileSync(metadataPath, '{"version":"fixture"}\n');
+
+  const skillPath = join(source, 'skills/bs-prdefine/SKILL.md');
+  writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\nUpgrade candidate.\n`);
+  const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'upgrade candidate'], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+
+  const upgrade = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T03:00:00.000Z',
+  });
+  assert.deepEqual(upgrade.predecessor.accepted_drift, ['UNEXPECTED_COLLECTION_ENTRY:.better-skills.json']);
+  const applied = applyManagedPlan(upgrade, upgrade.plan_hash);
+  assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'FILESYSTEM_READY');
+  assert.equal(existsSync(metadataPath), false);
+
+  assert.equal(undoManagedOperation({
+    home: fixture.home, operationId: applied.operation_id, confirmation: applied.operation_id,
+  }).status, 'RESTORED');
+  assert.equal(readFileSync(metadataPath, 'utf8'), '{"version":"fixture"}\n');
+  const restored = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(restored.status, 'DRIFTED');
+  assert.equal(restored.issues.includes('UNEXPECTED_COLLECTION_ENTRY:.better-skills.json'), true);
+});
+
+test('upgrade still refuses an unrecognized unexpected collection entry', (t) => {
+  const { fixture, plan: firstPlan, source } = planned(t);
+  applyManagedPlan(firstPlan, firstPlan.plan_hash);
+  writeFileSync(join(fixture.skillsRoot, 'better-skills/.unrecognized'), 'do not adopt\n');
+  assert.throws(() => compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T03:10:00.000Z',
+  }), /active generation is not upgradeable/u);
+});
+
+test('upgrade drops an absent Agent root from the new immutable projection profile', (t) => {
+  const { fixture, plan: firstPlan, source } = planned(t);
+  applyManagedPlan(firstPlan, firstPlan.plan_hash);
+  rmSync(fixture.agentRoots[0], { recursive: true });
+
+  const skillPath = join(source, 'skills/bs-prdefine/SKILL.md');
+  writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\nAgent scope refresh.\n`);
+  const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'agent scope refresh'], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+
+  const upgrade = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T03:20:00.000Z',
+  });
+  assert.equal(upgrade.agent_roots.length, 1);
+  assert.equal(upgrade.predecessor.exposures.filter(({ scope }) => scope === 'agent').length, 1);
+  applyManagedPlan(upgrade, upgrade.plan_hash);
+  const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
+});
+
 test('second-generation catalog reconstruction preserves exact durable lifecycle timestamps', (t) => {
   const { fixture, plan: firstPlan, source } = planned(t);
   applyManagedPlan(firstPlan, firstPlan.plan_hash);
-  const skillPath = join(source, 'skills/bs-dev-flow/SKILL.md');
+  const skillPath = join(source, 'skills/bs-prdefine/SKILL.md');
   writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\nLifecycle reconstruction fixture.\n`);
   const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'lifecycle reconstruction fixture'], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);
@@ -381,7 +455,7 @@ for (const phase of ['after_first_legacy_quarantine', 'after_catalog_publish']) 
   test(`interrupted managed upgrade ${phase} discovers the new operation and restores predecessor`, (t) => {
     const { fixture, plan: firstPlan, source, root } = planned(t);
     const first = applyManagedPlan(firstPlan, firstPlan.plan_hash);
-    const skillPath = join(source, 'skills/bs-dev-flow/SKILL.md');
+    const skillPath = join(source, 'skills/bs-prdefine/SKILL.md');
     writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\nUpgrade fault fixture.\n`);
     const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'upgrade fault fixture'], { encoding: 'utf8' });
     assert.equal(committed.status, 0, committed.stderr);
@@ -438,10 +512,10 @@ test('catalog preserves multiple collections and undo removes only its active en
 test('missing member repair and exact undo restore the observed pre-state', (t) => {
   const { fixture, plan } = planned(t);
   const applied = applyManagedPlan(plan, plan.plan_hash);
-  rmSync(join(fixture.skillsRoot, 'better-skills/bs-dev-flow'), { recursive: true });
+  rmSync(join(fixture.skillsRoot, 'better-skills/bs-prdefine'), { recursive: true });
   const drift = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
   assert.equal(drift.status, 'DRIFTED');
-  assert.equal(drift.issues.includes('MISSING_COLLECTION_ENTRY:bs-dev-flow'), true);
+  assert.equal(drift.issues.includes('MISSING_COLLECTION_ENTRY:bs-prdefine'), true);
   const repaired = repairManagedCollection({ collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id });
   assert.equal(repaired.status, 'FILESYSTEM_READY');
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'FILESYSTEM_READY');
@@ -473,10 +547,10 @@ test('status detects scoped receipt drift, competing installs, and orphaned cont
   receipt.skills.unrelated.updatedAt = '2026-07-20T01:00:00.000Z';
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'FILESYSTEM_READY');
-  receipt.skills['bs-dev-flow'].updatedAt = '2026-07-20T02:00:00.000Z';
+  receipt.skills['bs-prdefine'].updatedAt = '2026-07-20T02:00:00.000Z';
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).issues.includes('SCOPED_RECEIPT_DRIFT'), true);
-  receipt.skills['bs-dev-flow'].updatedAt = '2026-07-13T00:00:00.000Z';
+  receipt.skills['bs-prdefine'].updatedAt = '2026-07-13T00:00:00.000Z';
   writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
   mkdirSync(join(fixture.skillsRoot, 'visual-design'));
   writeFileSync(join(fixture.skillsRoot, 'visual-design/SKILL.md'), 'conflict\n');
@@ -496,11 +570,11 @@ test('status reports same-name flat entries as preserved collisions without clai
   symlinkSync('../../.agents/skills/visual-design', join(fixture.agentRoots[0], 'visual-design'));
   const newRoot = join(fixture.home, '.newagent/skills');
   mkdirSync(newRoot, { recursive: true });
-  symlinkSync('../../.agents/skills/bs-dev-flow', join(newRoot, 'bs-dev-flow'));
+  symlinkSync('../../.agents/skills/bs-prdefine', join(newRoot, 'bs-prdefine'));
   const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
   assert.equal(status.status, 'FILESYSTEM_READY');
   assert.equal(status.name_collisions.some(({ agent, name, disposition }) => agent === 'claude' && name === 'visual-design' && disposition === 'preserve'), true);
-  assert.equal(status.name_collisions.some(({ agent, name, disposition }) => agent === 'newagent' && name === 'bs-dev-flow' && disposition === 'preserve'), true);
+  assert.equal(status.name_collisions.some(({ agent, name, disposition }) => agent === 'newagent' && name === 'bs-prdefine' && disposition === 'preserve'), true);
   assert.equal(status.name_collision_status, 'ATTENTION_REQUIRED');
   assert.equal(status.management_attention.some(({ code }) => code === 'PRESERVED_COLLISION_SET_CHANGED'), true);
   assert.equal(status.management_attention.some(({ code }) => code === 'BROKEN_PRESERVED_SYMLINK'), true);
@@ -593,7 +667,7 @@ test('a conflicting non-symlink projection fails plan compilation', (t) => {
   t.after(() => removeManagedRoot(root));
   const source = makeManagedSource(root, 'better-skills');
   const fixture = makeManagedHome(root, 'better-skills');
-  const path = join(fixture.home, '.codex/skills/bs-dev-flow');
+  const path = join(fixture.home, '.codex/skills/bs-prdefine');
   mkdirSync(path, { recursive: true });
   assert.throws(() => compileManagedPlan({ collectionId: 'better-skills', home: fixture.home, sourceRoot: source, revision: managedRevision(source) }), /not a symlink/u);
 });
@@ -603,15 +677,15 @@ test('broken and byte-identical unqualified active projections fail planning', (
   t.after(() => removeManagedRoot(root));
   const source = makeManagedSource(root, 'better-skills');
   const fixture = makeManagedHome(root, 'better-skills');
-  const broken = join(fixture.home, '.claude/skills/bs-dev-flow');
+  const broken = join(fixture.home, '.claude/skills/bs-prdefine');
   unlinkSync(broken);
   symlinkSync('../../.agents/skills/no-such', broken);
   assert.throws(() => compileManagedPlan({ collectionId: 'better-skills', home: fixture.home, sourceRoot: source, revision: managedRevision(source) }), /qualified exact upstream member/u);
   unlinkSync(broken);
-  symlinkSync('../../.agents/skills/bs-dev-flow', broken);
-  const alternate = join(root, 'alternate-bs-prose-craft');
-  cpSync(join(fixture.skillsRoot, 'bs-prose-craft'), alternate, { recursive: true });
-  const divergent = join(fixture.home, '.factory/skills/bs-prose-craft');
+  symlinkSync('../../.agents/skills/bs-prdefine', broken);
+  const alternate = join(root, 'alternate-bs-prose-master');
+  cpSync(join(fixture.skillsRoot, 'bs-prose-master'), alternate, { recursive: true });
+  const divergent = join(fixture.home, '.factory/skills/bs-prose-master');
   unlinkSync(divergent);
   symlinkSync(alternate, divergent);
   assert.throws(() => compileManagedPlan({ collectionId: 'better-skills', home: fixture.home, sourceRoot: source, revision: managedRevision(source) }), /qualified exact upstream member/u);
@@ -621,7 +695,7 @@ test('source inspection rejects references not closed by declared packaging reso
   const root = makeManagedRoot();
   t.after(() => removeManagedRoot(root));
   const source = makeManagedSource(root, 'better-skills');
-  const skillPath = join(source, 'skills/bs-dev-flow/SKILL.md');
+  const skillPath = join(source, 'skills/bs-prdefine/SKILL.md');
   writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\n[Missing](references/not-declared.md)\n`);
   const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'broken reference'], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);

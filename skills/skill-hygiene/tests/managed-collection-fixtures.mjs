@@ -29,7 +29,7 @@ function skill(path, name, { folded = false, brokenSourceLink = false } = {}) {
     ? 'description: >\n  Use when a folded description is required for\n  a managed collection fixture.'
     : `description: Use when testing managed collection member ${name}.`;
   write(join(path, 'SKILL.md'), `---\nname: ${name}\n${description}\n---\n\n# ${name}\n`);
-  if (brokenSourceLink) write(join(path, 'references/tdd-for-skills.md'), '[Patterns](../../docs/patterns/README.md)\n');
+  if (brokenSourceLink) write(join(path, 'references/tdd-for-skills.md'), '[Patterns](../../../docs/patterns/README.md)\n');
 }
 
 export function makeManagedSource(root, collectionId) {
@@ -38,7 +38,7 @@ export function makeManagedSource(root, collectionId) {
   for (const member of spec.members) {
     skill(join(source, member.sourcePath), member.name, {
       folded: collectionId === 'langcraft' && member.name === 'langcraft',
-      brokenSourceLink: collectionId === 'better-skills' && member.name === 'bs-skill-bootstrap',
+      brokenSourceLink: collectionId === 'better-skills' && member.name === 'bs-skill-forge',
     });
   }
   for (const rejected of spec.rejectedMembers) {

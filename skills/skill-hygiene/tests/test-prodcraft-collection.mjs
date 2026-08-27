@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
@@ -165,6 +165,45 @@ test('apply publishes the physical collection, index, locator, and bounded proje
   assert.equal(status.source.upstream_release.value, '1.0.0');
   assert.equal(status.source.upstream_release.source_path, 'manifest.yml');
   assert.equal(status.source.upstream_release.extraction, 'yaml_root_version');
+});
+
+test('status skips a planned Agent projection after that Agent root is removed', (t) => {
+  const { fixture, plan } = plannedFixture(t);
+  applyProdcraftPlan(plan, plan.plan_hash);
+  rmSync(fixture.agentRoots[0], { recursive: true });
+  const status = statusProdcraftCollection({ home: fixture.home });
+  assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
+  assert.equal(status.issues.some((issue) => issue.startsWith('AGENT_GATEWAY_DRIFT:')), false);
+});
+
+test('quarantine status uses stable content and security identity, not inode-bound manifest identity', (t) => {
+  const { root, fixture, plan } = plannedFixture(t);
+  const applied = applyProdcraftPlan(plan, plan.plan_hash);
+  const quarantineRoot = join(fixture.home, `.agents/skills-quarantine/collections/${applied.operation_id}`);
+
+  const quarantinedSkill = join(quarantineRoot, 'skills', plan.legacy[0].name);
+  const replacement = join(root, 'replacement-skill');
+  const beforeSkill = inspectCollectionEntry({ home: fixture.home, path: quarantinedSkill });
+  const copied = spawnSync('/usr/bin/ditto', ['--rsrc', '--extattr', '--acl', quarantinedSkill, replacement], { encoding: 'utf8' });
+  assert.equal(copied.status, 0, copied.stderr);
+  rmSync(quarantinedSkill, { recursive: true });
+  renameSync(replacement, quarantinedSkill);
+  const afterSkill = inspectCollectionEntry({ home: fixture.home, path: quarantinedSkill });
+  assert.notEqual(afterSkill.manifest_hash, beforeSkill.manifest_hash);
+  assert.equal(afterSkill.security_metadata_hash, beforeSkill.security_metadata_hash);
+
+  const link = plan.projections[0];
+  const quarantinedLink = join(quarantineRoot, 'projections', link.agent, link.name);
+  const beforeLink = inspectCollectionEntry({ home: fixture.home, path: quarantinedLink });
+  const rawTarget = readlinkSync(quarantinedLink);
+  unlinkSync(quarantinedLink);
+  symlinkSync(rawTarget, quarantinedLink);
+  const afterLink = inspectCollectionEntry({ home: fixture.home, path: quarantinedLink });
+  assert.notEqual(afterLink.manifest_hash, beforeLink.manifest_hash);
+  assert.equal(afterLink.security_metadata_hash, beforeLink.security_metadata_hash);
+
+  const status = statusProdcraftCollection({ home: fixture.home });
+  assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
 });
 
 test('status ignores only Finder metadata and rejects every other unknown collection entry', (t) => {

@@ -15,7 +15,10 @@ export function makeRoot() {
 
 export function removeRoot(root) {
   if (!roots.has(root)) throw new Error('refusing to remove unknown fixture root');
-  rmSync(root, { recursive: true, force: true });
+  // Newer Git may finish an auto-maintenance bookkeeping write immediately
+  // after the spawning command returns. Let recursive removal retry the narrow
+  // ENOTEMPTY race instead of turning a passing contract test flaky.
+  rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   roots.delete(root);
 }
 

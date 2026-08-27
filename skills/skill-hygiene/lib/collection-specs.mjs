@@ -18,6 +18,7 @@ const definitions = {
     sharedPaths: [],
     compatibleSharedPathProfiles: [],
     referenceExclusions: [],
+    adoptableCollectionEntries: [],
   },
   langcraft: {
     repositoryId: 'yknothing/langcraft',
@@ -39,24 +40,29 @@ const definitions = {
     sharedPaths: [],
     compatibleSharedPathProfiles: [],
     referenceExclusions: [],
+    adoptableCollectionEntries: [],
   },
   'better-skills': {
     repositoryId: 'yknothing/better-skills',
     sourceUrl: 'https://github.com/yknothing/better-skills.git',
     members: [
-      'bs-article-illustrate', 'bs-dev-flow', 'bs-first-customer-finder',
-      'bs-prose-craft', 'bs-requirements-engineering', 'bs-skill-bootstrap',
-      'bs-skill-health', 'bs-social-card',
+      'bs-prdefine', 'bs-insight-product', 'bs-prospect-customer', 'bs-ui-master',
+      'bs-prose-master', 'bs-sw-master', 'bs-reflect-loop', 'bs-skill-auditor',
+      'bs-skill-forge', 'bs-social-card', 'bs-visual-article', 'bs-ppt-master',
     ].map((name) => ({ name, sourcePath: `skills/${name}` })),
-    compatibleMemberProfiles: [[
-      'bs-article-illustrate', 'bs-dev-flow', 'bs-first-customer-finder',
-      'bs-prose-craft', 'bs-requirements-engineering', 'bs-skill-bootstrap',
-      'bs-skill-health', 'bs-social-card', 'bs-visual-design',
-    ].map((name) => ({ name, sourcePath: `skills/${name}` }))],
-    rejectedMembers: [{
-      name: 'bs-visual-design', sourcePath: 'skills/bs-visual-design',
-      reason: 'invalid_portable_yaml',
-    }],
+    compatibleMemberProfiles: [
+      [
+        'bs-article-illustrate', 'bs-dev-flow', 'bs-first-customer-finder',
+        'bs-prose-craft', 'bs-requirements-engineering', 'bs-skill-bootstrap',
+        'bs-skill-health', 'bs-social-card',
+      ].map((name) => ({ name, sourcePath: `skills/${name}` })),
+      [
+        'bs-article-illustrate', 'bs-dev-flow', 'bs-first-customer-finder',
+        'bs-prose-craft', 'bs-requirements-engineering', 'bs-skill-bootstrap',
+        'bs-skill-health', 'bs-social-card', 'bs-visual-design',
+      ].map((name) => ({ name, sourcePath: `skills/${name}` })),
+    ],
+    rejectedMembers: [],
     manifestPath: 'skills.json',
     upstreamVersion: { path: 'skills.json', format: 'json_root_version' },
     exposure: { type: 'collection', name: 'better-skills' },
@@ -73,6 +79,7 @@ const definitions = {
       'docs/patterns/_schema.md',
       'docs/patterns/_template.md',
     ],
+    adoptableCollectionEntries: ['.better-skills.json'],
   },
 };
 
@@ -102,6 +109,7 @@ function freezeSpec(collectionId, value) {
   const sharedPaths = [...value.sharedPaths];
   const compatibleSharedPathProfiles = value.compatibleSharedPathProfiles.map((profile) => [...profile]);
   const referenceExclusions = [...value.referenceExclusions];
+  const adoptableCollectionEntries = [...value.adoptableCollectionEntries];
   if (new Set(preservedNames).size !== preservedNames.length || preservedNames.some((name) => !NAME.test(name) || members.some((member) => member.name === name))
       || new Set(sharedPaths).size !== sharedPaths.length || sharedPaths.some((path) => !RELATIVE_PATH.test(path))
       || sharedPaths.some((path, index) => sharedPaths.some((other, otherIndex) => index !== otherIndex && (path.startsWith(`${other}/`) || other.startsWith(`${path}/`))))
@@ -111,7 +119,9 @@ function freezeSpec(collectionId, value) {
         || profile.some((path, index) => profile.some((other, otherIndex) => index !== otherIndex && (path.startsWith(`${other}/`) || other.startsWith(`${path}/`)))))
       || new Set(referenceExclusions).size !== referenceExclusions.length
       || referenceExclusions.some((path) => !RELATIVE_PATH.test(path)
-        || !sharedPaths.some((sharedPath) => path.startsWith(`${sharedPath}/`)))) {
+        || !sharedPaths.some((sharedPath) => path.startsWith(`${sharedPath}/`)))
+      || new Set(adoptableCollectionEntries).size !== adoptableCollectionEntries.length
+      || adoptableCollectionEntries.some((name) => !/^\.[A-Za-z0-9._-]+$/u.test(name))) {
     throw new Error(`invalid aliases or shared paths: ${collectionId}`);
   }
   if (value.exposure.type === 'gateway' && !members.some(({ name }) => name === value.exposure.name)) throw new Error(`gateway is not a member: ${collectionId}`);
@@ -134,6 +144,7 @@ function freezeSpec(collectionId, value) {
       Object.freeze([...sharedPaths]),
     ]),
     referenceExclusions: Object.freeze(referenceExclusions),
+    adoptableCollectionEntries: Object.freeze(adoptableCollectionEntries),
   });
 }
 

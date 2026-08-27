@@ -206,24 +206,119 @@ function referenceGraph(root, scanRoots, { allowMissing = false, excludedPaths =
   return { edge_count: edges.length, digest: sha256(Buffer.from(canonicalJson(edges))), edges };
 }
 
-function validatePackagingReferences(root, spec, graph) {
-  const virtualRoot = '/skills-refiner-collection';
-  const mappings = [
+function packagingMappings(spec) {
+  return [
     ...spec.members.map(({ name, sourcePath }) => ({ virtualPath: name, sourcePath })),
     ...spec.sharedPaths.map((sourcePath) => ({ virtualPath: sourcePath, sourcePath })),
   ].sort((a, b) => b.virtualPath.length - a.virtualPath.length);
+}
+
+function mappingForSourcePath(mappings, sourcePath) {
+  return mappings.find((mapping) => sourcePath === mapping.sourcePath
+    || sourcePath.startsWith(`${mapping.sourcePath}/`));
+}
+
+function mappingForVirtualPath(mappings, virtualPath) {
+  return mappings.find((mapping) => virtualPath === mapping.virtualPath
+    || virtualPath.startsWith(`${mapping.virtualPath}/`));
+}
+
+/**
+ * Validate every local Markdown edge against both layouts and return the exact
+ * deterministic target rewrite needed by the flattened collection layout.
+ * A source may already use collection-relative targets (legacy profile), in
+ * which case replacement === target and no bytes change.
+ */
+function packagingReferenceActions(root, spec, graph) {
+  const virtualRoot = '/skills-refiner-collection';
+  const mappings = packagingMappings(spec);
+  const actions = [];
   for (const edge of graph.edges) {
     const owner = mappings.find(({ sourcePath }) => edge.from === sourcePath || edge.from.startsWith(`${sourcePath}/`));
     if (!owner) fail('broken_reference', `reference owner is outside declared packaging inputs: ${edge.from}`);
     const ownerRelative = relative(owner.sourcePath, edge.from);
     const virtualFrom = join(virtualRoot, owner.virtualPath, ownerRelative);
+    const sourceDestination = resolve(root, dirname(edge.from), edge.target);
+    const sourceRelative = relative(root, sourceDestination);
+    const sourceMapping = contained(root, sourceDestination)
+      ? mappingForSourcePath(mappings, sourceRelative)
+      : null;
+    if (sourceMapping && lstatExists(sourceDestination)) {
+      if (sourceMapping.sourcePath === owner.sourcePath
+          && sourceMapping.virtualPath === owner.virtualPath) {
+        actions.push({ from: edge.from, target: edge.target, replacement: edge.target });
+        continue;
+      }
+      const virtualDestination = join(
+        virtualRoot,
+        sourceMapping.virtualPath,
+        relative(sourceMapping.sourcePath, sourceRelative),
+      );
+      const replacement = relative(dirname(virtualFrom), virtualDestination) || '.';
+      actions.push({ from: edge.from, target: edge.target, replacement });
+      continue;
+    }
+
+    // Compatibility path: older upstreams sometimes authored the target for
+    // the already-flattened deployment layout, so it is missing in source but
+    // resolves after packaging. Preserve those bytes when the mapped target is
+    // declared and exists in the source authority.
     const virtualDestination = resolve(dirname(virtualFrom), edge.target);
-    if (!contained(virtualRoot, virtualDestination)) fail('broken_reference', `packaged reference escapes collection: ${edge.from} -> ${edge.target}`);
+    if (!contained(virtualRoot, virtualDestination)) {
+      fail('broken_reference', `packaged reference escapes collection: ${edge.from} -> ${edge.target}`);
+    }
     const virtualRelative = relative(virtualRoot, virtualDestination);
-    const mapping = mappings.find(({ virtualPath }) => virtualRelative === virtualPath || virtualRelative.startsWith(`${virtualPath}/`));
-    if (!mapping) fail('broken_reference', `packaged reference has no declared member or resource: ${edge.from} -> ${edge.target}`);
-    const sourceDestination = join(root, mapping.sourcePath, relative(mapping.virtualPath, virtualRelative));
-    if (!lstatExists(sourceDestination)) fail('broken_reference', `packaged reference is unresolved: ${edge.from} -> ${edge.target}`);
+    const virtualMapping = mappingForVirtualPath(mappings, virtualRelative);
+    if (!virtualMapping) {
+      fail('broken_reference', `packaged reference has no declared member or resource: ${edge.from} -> ${edge.target}`);
+    }
+    const mappedSource = join(root, virtualMapping.sourcePath, relative(virtualMapping.virtualPath, virtualRelative));
+    if (!lstatExists(mappedSource)) {
+      fail('broken_reference', `packaged reference is unresolved: ${edge.from} -> ${edge.target}`);
+    }
+    actions.push({ from: edge.from, target: edge.target, replacement: edge.target });
+  }
+  return actions;
+}
+
+function copyPackagingInputs(sourceRoot, target, spec) {
+  mkdirSync(target, { recursive: true, mode: 0o755 });
+  for (const member of spec.members) {
+    cpSync(join(sourceRoot, member.sourcePath), join(target, member.name), {
+      recursive: true, force: false, errorOnExist: true, preserveTimestamps: true,
+    });
+  }
+  for (const sourcePath of spec.sharedPaths) {
+    const destination = join(target, sourcePath);
+    mkdirSync(dirname(destination), { recursive: true, mode: 0o755 });
+    cpSync(join(sourceRoot, sourcePath), destination, {
+      recursive: true, force: false, errorOnExist: true, preserveTimestamps: true,
+    });
+  }
+}
+
+function applyPackagingReferenceActions(sourceRoot, target, spec, actions) {
+  const mappings = packagingMappings(spec);
+  const byFile = new Map();
+  for (const action of actions) {
+    if (action.replacement === action.target) continue;
+    if (!byFile.has(action.from)) byFile.set(action.from, []);
+    byFile.get(action.from).push(action);
+  }
+  for (const [sourceRelative, fileActions] of byFile) {
+    const owner = mappingForSourcePath(mappings, sourceRelative);
+    if (!owner) fail('broken_reference', `cannot relocate undeclared reference owner: ${sourceRelative}`);
+    const deployedPath = join(target, owner.virtualPath, relative(owner.sourcePath, sourceRelative));
+    let body = readFileSync(deployedPath, 'utf8');
+    for (const action of fileActions) {
+      const marker = `](${action.target})`;
+      const replacement = `](${action.replacement})`;
+      if (!body.includes(marker)) {
+        fail('broken_reference', `cannot apply deterministic reference relocation: ${sourceRelative} -> ${action.target}`);
+      }
+      body = body.split(marker).join(replacement);
+    }
+    writeFileSync(deployedPath, body, 'utf8');
   }
 }
 
@@ -260,24 +355,45 @@ export function inspectManagedSource({ collectionId, sourceRoot, revision }) {
     }
     if (!rejectionProven) fail('stale_rejection_profile', `rejected member now passes its recorded gate: ${rejected.name}`);
   }
-  const members = spec.members.map(({ name, sourcePath }) => {
+  const memberMetadata = spec.members.map(({ name, sourcePath }) => {
     const memberRoot = join(root, sourcePath);
     assertRealDirectory(memberRoot, `source member ${name}`);
     const metadata = parseFrontmatter(join(memberRoot, 'SKILL.md'));
     if (metadata.name !== name) fail('invalid_skill', `frontmatter name mismatch for ${name}`);
     if ([...metadata.description].length > 1024) fail('invalid_skill', `frontmatter description too long for ${name}`);
-    return { name, source_path: sourcePath, tree_digest: deployedTreeDigest(memberRoot) };
+    return { name, source_path: sourcePath };
   });
   const references = referenceGraph(root, [
     ...spec.members.map(({ sourcePath }) => join(root, sourcePath)),
     ...spec.sharedPaths.map((sourcePath) => join(root, sourcePath)),
   ], { allowMissing: true, excludedPaths: new Set(spec.referenceExclusions) });
-  validatePackagingReferences(root, spec, references);
-  const resources = spec.sharedPaths.map((sourcePath) => {
+  const actions = packagingReferenceActions(root, spec, references);
+  for (const sourcePath of spec.sharedPaths) {
     const resourceRoot = join(root, sourcePath);
     assertRealResource(resourceRoot, `shared resource ${sourcePath}`);
-    return { source_path: sourcePath, relative_path: sourcePath, tree_digest: resourceDigest(resourceRoot, { deployed: true }) };
-  });
+  }
+  const previewRoot = realpathSync(mkdtempSync(join(tmpdir(), `skills-refiner-${collectionId}-preview-`)));
+  let members;
+  let resources;
+  try {
+    const preview = join(previewRoot, collectionId);
+    copyPackagingInputs(root, preview, spec);
+    applyPackagingReferenceActions(root, preview, spec, actions);
+    referenceGraph(preview, [
+      ...spec.members.map(({ name }) => join(preview, name)),
+      ...spec.sharedPaths.map((sourcePath) => join(preview, sourcePath)),
+    ], { excludedPaths: new Set(spec.referenceExclusions) });
+    members = memberMetadata.map(({ name, source_path }) => ({
+      name, source_path, tree_digest: deployedTreeDigest(join(preview, name)),
+    }));
+    resources = spec.sharedPaths.map((sourcePath) => ({
+      source_path: sourcePath,
+      relative_path: sourcePath,
+      tree_digest: resourceDigest(join(preview, sourcePath), { deployed: true }),
+    }));
+  } finally {
+    rmSync(previewRoot, { recursive: true, force: true });
+  }
   return {
     provider: 'github', repository_id: spec.repositoryId, revision, root,
     tree_digest: treeDigest(root), manifest_digest: sha256(readFileSync(manifestPath)),
@@ -491,7 +607,7 @@ export function observeManagedInstall({
   };
 }
 
-function observeManagedPredecessor({ plan, home, duringUpgrade = false }) {
+function observeManagedPredecessor({ plan, home, duringUpgrade = false, candidate = null }) {
   const paths = operationPaths(plan);
   const catalog = catalogEntry(home, plan.collection_id);
   const status = duringUpgrade
@@ -501,12 +617,26 @@ function observeManagedPredecessor({ plan, home, duringUpgrade = false }) {
     status.issues.push(...catalogIdentityIssues(home, plan, paths, catalog.catalog));
     if (status.issues.length > 0) status.status = 'DRIFTED';
   }
-  if (status.status !== 'FILESYSTEM_READY') fail('predecessor_drift', `active generation is not upgradeable: ${status.issues.join(', ')}`);
+  const spec = collectionSpec(plan.collection_id);
+  const candidateMemberNames = new Set(candidate?.members?.map(({ name }) => name) ?? []);
+  const acceptedDrift = [...new Set(status.issues ?? [])].sort();
+  const safelyAdoptable = status.status === 'DRIFTED'
+    && candidate !== null
+    && acceptedDrift.length > 0
+    && acceptedDrift.every((issue) => {
+      if (!issue.startsWith('UNEXPECTED_COLLECTION_ENTRY:')) return false;
+      const name = issue.slice('UNEXPECTED_COLLECTION_ENTRY:'.length);
+      return candidateMemberNames.has(name) || spec.adoptableCollectionEntries.includes(name);
+    });
+  if (status.status !== 'FILESYSTEM_READY' && !safelyAdoptable) {
+    fail('predecessor_drift', `active generation is not upgradeable: ${status.issues.join(', ')}`);
+  }
   const activeRecord = readJson(paths.activePath, 'invalid_active_generation');
   if (catalog.value === null) fail('predecessor_drift', 'active generation has no catalog entry');
   const native = nativeIdentity(home, plan.target.collection_root);
   const exposures = [];
   for (const root of plan.agent_roots) {
+    if (!lstatExists(root.root)) continue;
     const path = exposurePath(plan, root);
     if (!exactSymlink(path, plan.target.exposure.agent_raw_target)) fail('predecessor_drift', `active exposure changed: ${path}`);
     const identity = nativeIdentity(home, path);
@@ -528,6 +658,7 @@ function observeManagedPredecessor({ plan, home, duringUpgrade = false }) {
   }
   return {
     operation_id: paths.id, plan_hash: plan.plan_hash,
+    accepted_drift: safelyAdoptable ? acceptedDrift : [],
     active_record: activeRecord, catalog_entry: structuredClone(catalog.value),
     collection: {
       path: plan.target.collection_root, tree_digest: treeDigest(plan.target.collection_root),
@@ -541,7 +672,9 @@ export function compileManagedPlan({ collectionId, home, sourceRoot, revision, n
   const spec = collectionSpec(collectionId);
   const source = inspectManagedSource({ collectionId, sourceRoot, revision });
   const activePlan = loadPlanFromControl(home, collectionId);
-  const predecessor = activePlan === null ? null : observeManagedPredecessor({ plan: activePlan, home });
+  const predecessor = activePlan === null
+    ? null
+    : observeManagedPredecessor({ plan: activePlan, home, candidate: source });
   const installed = observeManagedInstall({
     collectionId, home, candidate: source,
     activeCollectionRoot: activePlan?.target.collection_root ?? null,
@@ -569,7 +702,11 @@ export function compileManagedPlan({ collectionId, home, sourceRoot, revision, n
       quarantine_root: join(home, '.agents/skills-quarantine/collections'),
       recovery_root: join(home, 'Library/Application Support/skills-refiner/recovery'),
     },
-    controller: controllerIdentity(home), agent_roots: predecessor === null ? installed.agent_roots : activePlan.agent_roots, created_at: now,
+    controller: controllerIdentity(home),
+    agent_roots: predecessor === null
+      ? installed.agent_roots
+      : activePlan.agent_roots.filter((root) => predecessor.exposures.some((exposure) => exposure.scope === 'agent' && exposure.root === root.root)),
+    created_at: now,
   });
 }
 
@@ -709,7 +846,12 @@ function verifyInstalledAgainstPlan(plan) {
   if (plan.predecessor !== null) {
     const active = loadPlanFromControl(plan.home, plan.collection_id);
     if (active === null || active.plan_hash !== plan.predecessor.plan_hash || operationId(active) !== plan.predecessor.operation_id) fail('predecessor_drift', 'active generation changed after planning');
-    if (canonicalJson(observeManagedPredecessor({ plan: active, home: plan.home, duringUpgrade: true })) !== canonicalJson(plan.predecessor)) fail('predecessor_drift', 'active generation facts changed after planning');
+    if (canonicalJson(observeManagedPredecessor({
+      plan: active,
+      home: plan.home,
+      duringUpgrade: true,
+      candidate: plan.source,
+    })) !== canonicalJson(plan.predecessor)) fail('predecessor_drift', 'active generation facts changed after planning');
   }
   const expected = {
     receipt: installed.receipt,
@@ -794,15 +936,14 @@ function expectedIndex(plan, paths, members = expectedMembers(plan, paths)) {
 function materializeCollection(plan, paths, target = paths.stageCollection) {
   assertSafeManagedPath(plan.home, target);
   if (lstatExists(target)) fail('stage_conflict', `staging target exists: ${target}`);
-  mkdirSync(target, { recursive: true, mode: 0o755 });
-  for (const member of plan.source.members) {
-    cpSync(join(paths.artifactRepo, member.source_path), join(target, member.name), { recursive: true, force: false, errorOnExist: true, preserveTimestamps: true });
-  }
-  for (const resource of plan.source.resources) {
-    const destination = join(target, resource.relative_path);
-    mkdirSync(dirname(destination), { recursive: true, mode: 0o755 });
-    cpSync(join(paths.artifactRepo, resource.source_path), destination, { recursive: true, force: false, errorOnExist: true, preserveTimestamps: true });
-  }
+  const spec = collectionSpec(plan.collection_id);
+  const sourceGraph = referenceGraph(paths.artifactRepo, [
+    ...spec.members.map(({ sourcePath }) => join(paths.artifactRepo, sourcePath)),
+    ...spec.sharedPaths.map((sourcePath) => join(paths.artifactRepo, sourcePath)),
+  ], { allowMissing: true, excludedPaths: new Set(spec.referenceExclusions) });
+  const actions = packagingReferenceActions(paths.artifactRepo, spec, sourceGraph);
+  copyPackagingInputs(paths.artifactRepo, target, spec);
+  applyPackagingReferenceActions(paths.artifactRepo, target, spec, actions);
   if (plan.target.exposure.type === 'gateway') durableJson(join(target, plan.target.exposure.name, locatorFilename(plan)), runtimeLocator(plan, paths));
   const members = plan.source.members.map(({ name }) => ({
     name, relative_path: name, tree_digest: deployedTreeDigest(join(target, name)),
@@ -813,7 +954,7 @@ function materializeCollection(plan, paths, target = paths.stageCollection) {
   referenceGraph(target, [
     ...plan.source.members.map(({ name }) => join(target, name)),
     ...plan.source.resources.map(({ relative_path }) => join(target, relative_path)),
-  ], { excludedPaths: new Set(collectionSpec(plan.collection_id).referenceExclusions) });
+  ], { excludedPaths: new Set(spec.referenceExclusions) });
   return index;
 }
 
@@ -1111,7 +1252,14 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     }
   }
   if (plan.target.exposure.global_projection !== null && !exactSymlink(plan.target.exposure.global_projection, plan.target.exposure.global_raw_target)) issues.push('GLOBAL_EXPOSURE_DRIFT');
-  for (const root of plan.agent_roots) if (!exactSymlink(exposurePath(plan, root), plan.target.exposure.agent_raw_target)) issues.push(`AGENT_EXPOSURE_DRIFT:${root.agent}`);
+  for (const root of plan.agent_roots) {
+    // 宿主被卸载后，其根目录不再是当前暴露面；不要为了满足历史计划
+    // 而把整个 Agent 目录重新创建出来。若根再次出现，status 会重新要求暴露。
+    if (lstatExists(root.root)
+        && !exactSymlink(exposurePath(plan, root), plan.target.exposure.agent_raw_target)) {
+      issues.push(`AGENT_EXPOSURE_DRIFT:${root.agent}`);
+    }
+  }
   const plannedRootPaths = new Set(plan.agent_roots.map(({ root }) => root));
   for (const observedRoot of projectionRoots(plan.home, join(plan.home, '.agents/skills'))) {
     const currentExposure = exposurePath(plan, observedRoot);

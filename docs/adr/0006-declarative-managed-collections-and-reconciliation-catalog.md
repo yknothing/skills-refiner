@@ -10,7 +10,7 @@
 
 ## 1. Decision
 
-skills-refiner 采用 **schema-versioned transaction engine + declarative `CollectionSpec` + source/profile adapters** 管理多组物理 Skills collection。ProdCraft V1 保持原 schema、operation identity、quarantine 与 recovery，不通过重写历史 plan 来伪装升级；LoopOS、LangCraft、Better Skills 使用 managed engine。初始 generation 的 plan.v2 继续可验证/恢复，新计划使用 plan.v3，把 preserved collision snapshot 纳入批准身份。
+skills-refiner 采用 **schema-versioned transaction engine + declarative `CollectionSpec` + source/profile adapters** 管理多组物理 Skills collection。ProdCraft V1 保持原 schema、operation identity、quarantine 与 recovery，不通过重写历史 plan 来伪装升级；LoopOS、LangCraft、Better Skills 使用 managed engine。初始 generation 的 plan.v2 与 plan.v3 继续可验证/恢复；新计划使用 plan.v4，在 preserved collision snapshot 之外显式绑定经审核、可安全接管的 predecessor drift。
 
 四类事实严格分域：
 
@@ -60,7 +60,7 @@ Better Skills 证明了不能合并这些集合：本机 receipt 同时保留旧
 
 Skill 的 qualified identity 至少是 `(repository_id, resolved_revision, source_path, declared_name)`。平面部署名称只是 locator，不是实体主键。两个仓库的同名 Skill 可以分别存在于各自 collection 物理目录；若某个 Agent 只支持平面 locator，管理中心报告冲突并要求用户明确选择投影策略，不能替用户推导 replacement。
 
-Receipt folder hash 被视为 opaque installer evidence，接受已观测到的 40/64 hex 形态；它不是 commit identity。Receipt keyed by basename 只形成 `receipt_claim`，不能单独证明路径所有权。Plan.v3 对每个 preserved collision 绑定 path、kind、raw target、resolved target、target health/digest、receipt claim 与 preserve disposition；apply 在 mutation 前重新观察，集合变化会使批准失效。
+Receipt folder hash 被视为 opaque installer evidence，接受已观测到的 40/64 hex 形态；它不是 commit identity。Receipt keyed by basename 只形成 `receipt_claim`，不能单独证明路径所有权。Plan.v3+ 对每个 preserved collision 绑定 path、kind、raw target、resolved target、target health/digest、receipt claim 与 preserve disposition；apply 在 mutation 前重新观察，集合变化会使批准失效。
 
 ## 4. Physical topology and exposure profiles
 
@@ -85,7 +85,7 @@ Better Skills 没有已证上游总入口，禁止任取一个成员或生成 sy
 ```text
 ~/.agents/skills/better-skills/   # container; no SKILL.md
 ├── INDEX.json
-├── bs-*/SKILL.md                 # eight qualified source-owned members
+├── bs-*/SKILL.md                 # current profile: 12 qualified source-owned members
 ├── docs/{patterns,research}/     # packaging-bound shared resources
 ├── tools/check-patterns.sh
 └── skills.json
@@ -152,7 +152,11 @@ verify source + installed facts + controller
 
 V2 同时支持 generation replacement。第二代 plan 必须绑定 exact predecessor active record、catalog entry、collection digest、exposure identities 和 independent recovery bytes。Apply 先隔离 predecessor exposure/collection，再发布新 generation；rollback/recover 恢复 predecessor selection，undo 将 catalog/active pointer 精确退回上一代。历史 generation 不通过重新解释旧 plan 伪造升级。
 
-Managed plan.v3 还绑定 preserved collision snapshot。Plan.v2 作为 compatibility profile 保持 strict validation；controller 不在旧 JSON 上补字段或重算 hash。成员与共享资源 profile 也采用显式兼容集合，使不合格 candidate 的后续剔除不会破坏旧 generation 的 recovery/undo 解释。
+Managed plan.v3 绑定 preserved collision snapshot；plan.v4 新增有序、哈希绑定的 `predecessor.accepted_drift`。升级只能接管两类 `UNEXPECTED_COLLECTION_ENTRY`：本次 immutable candidate 已声明的成员，或 `CollectionSpec.adoptableCollectionEntries` 精确白名单中的 installer metadata。任一未知文件、修改内容、缺失对象、receipt/source conflict 仍 fail closed。完整 predecessor 会先进入 recovery/quarantine；rollback、recover、undo 必须恢复接管前的原样状态。
+
+Plan.v2 / plan.v3 作为 compatibility profiles 保持 strict validation；controller 不在旧 JSON 上补字段或重算 hash。成员与共享资源 profile 也采用显式兼容集合，使 candidate 集变化不会破坏旧 generation 的 recovery/undo 解释。
+
+上游 repository layout 与 collection layout 不同时，controller 可执行**确定性 packaging reference relocation**，但边界严格限定为：Markdown 本地引用在 source revision 内能解析到已声明 member/shared resource；其 collection 目标也必须留在 collection root；动作必须由 source graph 推导、进入 source/artifact 身份并通过部署后 reference closure。已经按旧 flat layout 编写的兼容引用保持原 bytes。该机制不授权任意内容 patch，也不允许为未声明依赖创建 alias。
 
 全局 collection mutation lock 必须先于 `PLANNED` operation 落盘；锁竞争属于零 mutation 阻塞，不得制造 phantom `RECOVERY_REQUIRED`。Interrupted upgrade 即使 predecessor active pointer 尚未切换，也必须被 pending-operation scan 发现并返回新 operation id。
 
@@ -175,7 +179,7 @@ Cleanup executable plan 固定最多 8 项，并在任何 durable write 前校�
 | ProdCraft | `yknothing/prodcraft@fd05978dbbbf5a064205a695af47c8a550f1b224` | `manifest.yml` root `version` = `1.0.0` | 40 | gateway | exact `pc-*` generation |
 | LoopOS | `yknothing/loopos@f4454019414143e976edac5a250eca58d92ed12d` | `pyproject.toml` `[project].version` = `0.2.1` | 10 | gateway | content upgrade; exact set |
 | LangCraft | `yknothing/langcraft@fa31c4b85a7400c53abee3bd19c278395a0df3fa` | `not_declared`; commit is the only release identity used here | 6 | gateway | adds upstream `prose-craft`; removes local router overlay |
-| Better Skills | `yknothing/better-skills@8e8d2af4c5cb2099e27fdea9c723befe91701593` | `skills.json` root `version` = `0.2.0-dev` | 8 | collection | rejects invalid portable-YAML `bs-visual-design`; packages four shared inputs |
+| Better Skills | `yknothing/better-skills@b5d0005aebb2bd8fcfb7389ab85d1f03f75b915d` | `skills.json` root `version` = `0.2.0-dev` | 12 | collection | replaces the historical 8/9-member profiles with the current 12-member `bs-*` surface; packages four shared inputs and relocates closed Markdown references deterministically |
 
 这些 commit 是本次 reviewed candidates；后续 upstream `main` 变化不会自动更新 active revision。
 
@@ -200,6 +204,8 @@ Live apply 前至少需要：
 15. stale same-repository projection 与 cross-repository collision 分开分类；cleanup 的 retire-path selector 必须绑定 exact review fingerprint。
 16. declared upstream version 的 path/value/digest/extractor，以及无声明时的 `not_declared`，必须从 immutable artifact 重建。
 17. cleanup plan 的 item/input capacity 必须在 durable initialization 前 fail closed；partition manifest、child hash、8-item 上限与首次失败停止语义必须有回归测试。
+18. generation upgrade 只可接管 candidate-owned members / allowlisted installer metadata；unknown extra entry 必须 fail closed，且 undo 精确恢复 predecessor。
+19. source-layout → collection-layout reference relocation 必须有 source closure、deployment closure、action determinism 与旧 profile compatibility 回归。
 
 ## 10. Limitations and non-claims
 

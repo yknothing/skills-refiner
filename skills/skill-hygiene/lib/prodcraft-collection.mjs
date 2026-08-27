@@ -981,7 +981,12 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
   }
   if (!exactManagedSymlink(plan.target.gateway_projection, plan.target.gateway_raw_target)) issues.push('GATEWAY_PROJECTION_DRIFT');
   for (const root of plan.agent_roots) {
-    if (!exactManagedSymlink(join(root.root, 'pc-prodcraft'), plan.target.agent_gateway_raw_target)) issues.push(`AGENT_GATEWAY_DRIFT:${root.agent}`);
+    // Agent 根目录本身可能随宿主卸载而消失。不存在的宿主不再属于当前
+    // runtime surface；只有根仍存在时，才要求它保持受管 gateway。
+    if (lstatExists(root.root)
+        && !exactManagedSymlink(join(root.root, 'pc-prodcraft'), plan.target.agent_gateway_raw_target)) {
+      issues.push(`AGENT_GATEWAY_DRIFT:${root.agent}`);
+    }
   }
   for (const entry of plan.legacy) {
     if (entry.name !== 'prodcraft' && lstatExists(entry.path)) issues.push(`LEGACY_REAPPEARED:${entry.name}`);
@@ -994,7 +999,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     const quarantined = join(paths.quarantineOperationRoot, 'skills', entry.name);
     try {
       if (treeDigest(quarantined) !== entry.tree_digest) issues.push(`QUARANTINE_DRIFT:${entry.name}`);
-      if (nativeManifest(plan.home, quarantined) !== entry.native_manifest) issues.push(`QUARANTINE_METADATA_DRIFT:${entry.name}`);
+      if (nativeIdentity(plan.home, quarantined).security_metadata_hash !== entry.security_metadata_hash) issues.push(`QUARANTINE_METADATA_DRIFT:${entry.name}`);
     } catch { issues.push(`QUARANTINE_MISSING_OR_INVALID:${entry.name}`); }
     const recovered = join(paths.recoveryPreState, 'skills', entry.name);
     try {
@@ -1008,7 +1013,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     if (!exactManagedSymlink(quarantined, link.raw_target)) issues.push(`QUARANTINE_PROJECTION_DRIFT:${link.agent}:${link.name}`);
     else {
       try {
-        if (nativeManifest(plan.home, quarantined) !== link.native_manifest) issues.push(`QUARANTINE_PROJECTION_METADATA_DRIFT:${link.agent}:${link.name}`);
+        if (nativeIdentity(plan.home, quarantined).security_metadata_hash !== link.security_metadata_hash) issues.push(`QUARANTINE_PROJECTION_METADATA_DRIFT:${link.agent}:${link.name}`);
       } catch { issues.push(`QUARANTINE_PROJECTION_METADATA_INVALID:${link.agent}:${link.name}`); }
     }
     const recovered = join(paths.recoveryPreState, 'projections', link.agent, link.name);

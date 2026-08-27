@@ -5,7 +5,8 @@ import { canonicalJson } from './cleanup-contract.mjs';
 import { collectionSpec } from './collection-specs.mjs';
 
 export const MANAGED_COLLECTION_SCHEMAS = Object.freeze({
-  plan: 'skills-refiner.managed-collection.plan.v3',
+  plan: 'skills-refiner.managed-collection.plan.v4',
+  priorPlan: 'skills-refiner.managed-collection.plan.v3',
   legacyPlan: 'skills-refiner.managed-collection.plan.v2',
   index: 'skills-refiner.managed-collection.index.v2',
   operation: 'skills-refiner.managed-collection.operation.v2',
@@ -80,13 +81,14 @@ function preservedCollision(collision, label, home) {
 
 export function validateManagedPlan(plan) {
   const current = plan?.schema_version === MANAGED_COLLECTION_SCHEMAS.plan;
+  const prior = plan?.schema_version === MANAGED_COLLECTION_SCHEMAS.priorPlan;
   const legacy = plan?.schema_version === MANAGED_COLLECTION_SCHEMAS.legacyPlan;
   exactKeys(plan, new Set([
     'schema_version', 'collection_id', 'home', 'source', 'receipt', 'legacy', 'projections',
     'predecessor', 'target', 'control', 'controller', 'agent_roots', 'created_at', 'plan_hash',
-    ...(current ? ['preserved_collisions'] : []),
+    ...(current || prior ? ['preserved_collisions'] : []),
   ]), 'plan');
-  if (!current && !legacy) fail('plan schema is invalid');
+  if (!current && !prior && !legacy) fail('plan schema is invalid');
   const spec = collectionSpec(plan.collection_id);
   absolute(plan.home, 'plan.home');
   timestamp(plan.created_at, 'plan.created_at');
@@ -108,7 +110,7 @@ export function validateManagedPlan(plan) {
     digest(resource.tree_digest, `plan.source.resources[${index}].tree_digest`);
   }
 
-  if (current) {
+  if (current || prior) {
     if (!Array.isArray(plan.preserved_collisions)) fail('plan.preserved_collisions must be an array');
     const paths = new Set();
     for (const [index, collision] of plan.preserved_collisions.entries()) {
@@ -200,7 +202,18 @@ export function validateManagedPlan(plan) {
         && !plan.predecessor.exposures.some((link) => link.root === root.root)) fail(`plan.agent_roots[${index}] has no predecessor exposure`);
   }
   if (plan.predecessor !== null) {
-    exactKeys(plan.predecessor, new Set(['operation_id', 'plan_hash', 'active_record', 'catalog_entry', 'collection', 'exposures']), 'plan.predecessor');
+    exactKeys(plan.predecessor, new Set([
+      'operation_id', 'plan_hash', 'active_record', 'catalog_entry', 'collection', 'exposures',
+      ...(current ? ['accepted_drift'] : []),
+    ]), 'plan.predecessor');
+    if (current) {
+      if (!Array.isArray(plan.predecessor.accepted_drift)
+          || new Set(plan.predecessor.accepted_drift).size !== plan.predecessor.accepted_drift.length
+          || [...plan.predecessor.accepted_drift].sort().some((value, index) => value !== plan.predecessor.accepted_drift[index])
+          || plan.predecessor.accepted_drift.some((value) => !/^UNEXPECTED_COLLECTION_ENTRY:[A-Za-z0-9._-]+$/u.test(value))) {
+        fail('plan.predecessor.accepted_drift is invalid');
+      }
+    }
     if (!operationPattern(plan.collection_id).test(plan.predecessor.operation_id ?? '')) fail('plan.predecessor.operation_id is invalid');
     digest(plan.predecessor.plan_hash, 'plan.predecessor.plan_hash');
     exactKeys(plan.predecessor.active_record, new Set(['schema_version', 'collection_id', 'operation_id', 'plan_hash', 'activated_at']), 'plan.predecessor.active_record');
