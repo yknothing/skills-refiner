@@ -144,6 +144,7 @@ export const SCAN_COLLECTOR = Object.freeze({
 export const COLLECTION_COLLECTOR = Object.freeze({
   listSchema: 'skills-refiner.collection.list.v1',
   catalogSchema: 'skills-refiner.collection-catalog.v1',
+  indexSchemaV1: 'skills-refiner.collection.index.v1',
   indexSchemaV2: 'skills-refiner.managed-collection.index.v2',
   indexFileName: 'INDEX.json',
   membersField: 'members',

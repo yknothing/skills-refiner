@@ -214,6 +214,25 @@ frontmatter_scalar_kind() {
     ' "$file" 2>/dev/null
 }
 
+# Extract only active @file references from prose. Markdown fenced examples and
+# inline-code examples are documentation, not loader directives; treating them
+# as dependencies creates false broken-reference findings (for example a skill
+# explaining why `@missing/example.md` is a bad pattern).
+extract_active_at_refs() {
+    local file="$1"
+    LC_ALL=C awk '
+        /^[[:space:]]*(```|~~~)/ { in_fence = !in_fence; next }
+        !in_fence {
+            line = $0
+            while (match(line, /`[^`]*`/)) {
+                line = substr(line, 1, RSTART - 1) substr(line, RSTART + RLENGTH)
+            }
+            print line
+        }
+    ' "$file" 2>/dev/null |
+        grep -oE '@[a-zA-Z0-9_./-]+\.(md|sh|py|js)' || true
+}
+
 get_metadata_value() {
     local file="$1" key="$2"
     sr_get_metadata_value "$file" "$key"
@@ -715,7 +734,7 @@ scan_directory() {
 
         local broken_refs=()
         local refs
-        refs=$(grep -oE '@[a-zA-Z0-9_./-]+\.(md|sh|py|js)' "$skill_file" 2>/dev/null || true)
+        refs=$(extract_active_at_refs "$skill_file")
         if [ -n "$refs" ]; then
             while IFS= read -r ref; do
                 [ -z "$ref" ] && continue

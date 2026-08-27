@@ -59,6 +59,15 @@ export function redactValue(value, home) {
  */
 export function buildPanoramaDocument(params) {
   const counts = summarizeGaps(params.rows);
+  const riskRows = params.rows.filter((row) => (row.identity?.review_signals?.risk_indicators ?? []).length > 0);
+  const referenceRows = params.rows.filter((row) => (row.identity?.review_signals?.hygiene_flags ?? [])
+    .some((flag) => flag.startsWith('broken_refs:')));
+  const riskIndicatorCounts = {};
+  for (const row of riskRows) {
+    for (const risk of row.identity.review_signals.risk_indicators) {
+      riskIndicatorCounts[risk.id] = (riskIndicatorCounts[risk.id] ?? 0) + 1;
+    }
+  }
   return {
     schema_version: PANORAMA_IDENTITY.schemaVersion,
     title_zh: PANORAMA_IDENTITY.productNameZh,
@@ -71,9 +80,15 @@ export function buildPanoramaDocument(params) {
       commands: params.commands ?? [],
       notes: params.collectorNotes ?? [],
     },
+    managed_collections: params.managedCollections ?? [],
     summary: {
       total: params.rows.length,
       gap_counts: counts,
+      review_signal_counts: {
+        skills_requiring_risk_review: riskRows.length,
+        skills_with_reference_findings: referenceRows.length,
+        risk_indicators: riskIndicatorCounts,
+      },
     },
     entries: params.rows,
     field_glossary_zh: PREDICATE_LABELS_ZH,
@@ -98,6 +113,50 @@ export function renderPanoramaMarkdown(doc) {
   lines.push('');
   lines.push(`条目总数：${doc.summary.total}`);
   lines.push('');
+  const reviewCounts = doc.summary.review_signal_counts ?? {};
+  lines.push(`安全复核：${reviewCounts.skills_requiring_risk_review ?? 0} 条；引用复核：${reviewCounts.skills_with_reference_findings ?? 0} 条。`);
+  lines.push('静态信号只表示需要人工复核，不等于已确认安全问题。');
+  lines.push('');
+  const reviewEntries = doc.entries.filter((entry) => (entry.identity?.review_signals?.risk_indicators ?? []).length > 0
+    || (entry.identity?.review_signals?.hygiene_flags ?? []).some((flag) => flag.startsWith('broken_refs:')));
+  if (reviewEntries.length > 0) {
+    lines.push('### 治理复核信号');
+    lines.push('');
+    lines.push('| Skill | 安全信号 | 引用信号 |');
+    lines.push('|---|---|---|');
+    for (const entry of reviewEntries) {
+      const risks = entry.identity.review_signals.risk_indicators.map((risk) => risk.id).join(', ') || '无';
+      const refs = entry.identity.review_signals.hygiene_flags
+        .filter((flag) => flag.startsWith('broken_refs:'))
+        .join(', ') || '无';
+      lines.push(`| ${entry.identity.name} | ${risks} | ${refs} |`);
+    }
+    lines.push('');
+  }
+  if (Array.isArray(doc.managed_collections) && doc.managed_collections.length > 0) {
+    lines.push('### 受管集合状态');
+    lines.push('');
+    lines.push('| 集合 | 文件系统 | 运行时 | 上游版本 | 问题摘要 |');
+    lines.push('|---|---|---|---|---|');
+    for (const collection of doc.managed_collections) {
+      const groupedIssues = new Map();
+      for (const issue of collection.issues ?? []) {
+        const code = String(issue).split(':', 1)[0];
+        groupedIssues.set(code, (groupedIssues.get(code) ?? 0) + 1);
+      }
+      const issueSummary = [...groupedIssues.entries()]
+        .map(([code, count]) => `${code}${count > 1 ? ` ×${count}` : ''}`)
+        .join('；') || '无';
+      const release = collection.source?.upstream_release;
+      const releaseText = release?.status === 'declared'
+        ? release.value
+        : release?.status === 'not_declared' ? '上游未声明' : '未知';
+      lines.push(`| ${collection.collection_id} | ${collection.status} | ${collection.runtime_status} | ${releaseText} | ${issueSummary} |`);
+    }
+    lines.push('');
+    lines.push('文件系统状态、运行时验证和上游版本是三个独立事实；`UNVERIFIED` 不会被写成通过。');
+    lines.push('');
+  }
   lines.push('| 缺口类 | 数量 |');
   lines.push('|---|---:|');
   for (const gap of GAP_CLASS_PRIORITY) {

@@ -55,6 +55,10 @@ export function isCatalogDrift(row, catalogMode) {
     return false;
   }
   if (active === CATALOG_ACTIVE_VALUES.active) {
+    const observations = row.identity?.catalog_members;
+    if (Array.isArray(observations) && observations.length > 0) {
+      return !observations.some((item) => item?.present === true);
+    }
     return !(row.stored || anyProjection(row.projected));
   }
   if (active === CATALOG_ACTIVE_VALUES.inactive) {

@@ -2,8 +2,8 @@
  * 编排现有收集器：skill-scan + catalog/INDEX（只读），禁止第二套磁盘遍历算法。
  */
 
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -70,6 +70,14 @@ export function collectSkillScan(options) {
   }
   try {
     const scan = JSON.parse(result.stdout);
+    if (scan?.metadata?.schema_version !== SCAN_COLLECTOR.schemaVersion) {
+      return {
+        ok: false,
+        scan: null,
+        error: `skill-scan schema 不兼容: ${scan?.metadata?.schema_version ?? 'missing'}`,
+        command,
+      };
+    }
     return { ok: true, scan, error: null, command };
   } catch (error) {
     return { ok: false, scan: null, error: `skill-scan JSON 解析失败: ${error.message}`, command };
@@ -113,7 +121,16 @@ export function collectCollectionList(options) {
     };
   }
   try {
-    return { ok: true, list: JSON.parse(result.stdout), error: null, command };
+    const list = JSON.parse(result.stdout);
+    if (list?.schema_version !== COLLECTION_COLLECTOR.listSchema) {
+      return {
+        ok: false,
+        list: null,
+        error: `collection list schema 不兼容: ${list?.schema_version ?? 'missing'}`,
+        command,
+      };
+    }
+    return { ok: true, list, error: null, command };
   } catch (error) {
     return { ok: false, list: null, error: `collection list JSON 解析失败: ${error.message}`, command };
   }
@@ -127,12 +144,21 @@ export function collectCollectionList(options) {
 export function loadCatalogArtifact(home) {
   const path = catalogPath(home);
   if (!existsSync(path)) {
-    return { present: false, catalog: null, path };
+    return { present: false, catalog: null, path, error: null };
   }
   try {
-    return { present: true, catalog: JSON.parse(readFileSync(path, 'utf8')), path };
-  } catch {
-    return { present: true, catalog: null, path };
+    const catalog = JSON.parse(readFileSync(path, 'utf8'));
+    if (catalog?.schema_version !== COLLECTION_COLLECTOR.catalogSchema) {
+      return {
+        present: true,
+        catalog: null,
+        path,
+        error: `catalog schema 不兼容: ${catalog?.schema_version ?? 'missing'}`,
+      };
+    }
+    return { present: true, catalog, path, error: null };
+  } catch (error) {
+    return { present: true, catalog: null, path, error: `catalog 无法解析: ${error.message}` };
   }
 }
 
@@ -141,12 +167,14 @@ export function loadCatalogArtifact(home) {
  * 只读单文件 INDEX，不遍历 skills 树。
  * @param {object | null} collectionList
  * @param {object | null} catalog
- * @returns {{ approvedNames: Set<string>, collectionRoots: string[], notes: string[] }}
+ * @returns {{ approvedNames: Set<string>, approvedMembers: Map<string, object[]>, collectionRoots: string[], notes: string[] }}
  */
 export function approvedMembersFromCollectionArtifacts(collectionList, catalog = null) {
   const approvedNames = new Set();
+  const approvedMembers = new Map();
   const collectionRoots = [];
   const notes = [];
+  const ingestedRoots = new Set();
 
   /**
    * @param {string | null | undefined} root
@@ -154,6 +182,8 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
    */
   function ingestRoot(root, label) {
     if (typeof root !== 'string' || root.length === 0) return;
+    if (ingestedRoots.has(root)) return;
+    ingestedRoots.add(root);
     if (!collectionRoots.includes(root)) collectionRoots.push(root);
     const indexPath = join(root, INDEX_FILE_NAME);
     if (!existsSync(indexPath)) {
@@ -162,14 +192,55 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
     }
     try {
       const index = JSON.parse(readFileSync(indexPath, 'utf8'));
+      const acceptedSchemas = new Set([
+        COLLECTION_COLLECTOR.indexSchemaV1,
+        COLLECTION_COLLECTOR.indexSchemaV2,
+      ]);
+      if (!acceptedSchemas.has(index?.schema_version)) {
+        notes.push(`${label} ${INDEX_FILE_NAME} schema 不兼容: ${index?.schema_version ?? 'missing'}`);
+        return;
+      }
       const members = Array.isArray(index?.[INDEX_MEMBERS_FIELD])
         ? index[INDEX_MEMBERS_FIELD]
         : [];
       for (const member of members) {
         const memberName = member?.[INDEX_MEMBER_NAME_FIELD];
-        if (typeof memberName === 'string' && memberName.length > 0) {
-          approvedNames.add(memberName);
+        const memberRelativePath = member?.relative_path;
+        if (typeof memberName !== 'string' || memberName.length === 0) continue;
+        if (typeof memberRelativePath !== 'string' || memberRelativePath.length === 0
+            || isAbsolute(memberRelativePath) || memberRelativePath.split('/').includes('..')) {
+          notes.push(`${label} 成员 ${memberName} 的 relative_path 不安全`);
+          continue;
         }
+        const memberPath = resolve(root, memberRelativePath);
+        const rel = relative(root, memberPath);
+        if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+          notes.push(`${label} 成员 ${memberName} 越出 collection_root`);
+          continue;
+        }
+        let present = false;
+        let absenceReason = null;
+        try {
+          const memberStat = lstatSync(memberPath);
+          const skillStat = lstatSync(join(memberPath, 'SKILL.md'));
+          present = !memberStat.isSymbolicLink() && memberStat.isDirectory()
+            && !skillStat.isSymbolicLink() && skillStat.isFile();
+          if (!present) absenceReason = 'member_or_skill_file_not_real';
+        } catch {
+          absenceReason = 'declared_member_path_missing';
+        }
+        const observation = {
+          collection_id: index.collection_id ?? label,
+          collection_root: root,
+          member_path: memberPath,
+          relative_path: memberRelativePath,
+          tree_digest: member.tree_digest ?? null,
+          present,
+          absence_reason: absenceReason,
+        };
+        approvedNames.add(memberName);
+        if (!approvedMembers.has(memberName)) approvedMembers.set(memberName, []);
+        approvedMembers.get(memberName).push(observation);
       }
     } catch {
       notes.push(`${label} ${INDEX_FILE_NAME} 无法解析`);
@@ -192,7 +263,7 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
     }
   }
 
-  return { approvedNames, collectionRoots, notes };
+  return { approvedNames, approvedMembers, collectionRoots, notes };
 }
 
 /**
@@ -210,6 +281,7 @@ export function collectPanoramaInputs(options) {
       collectionList: null,
       catalog: null,
       approvedNames: new Set(),
+      approvedMembers: new Map(),
       collectorNotes: [],
       commands: [],
     };
@@ -229,6 +301,7 @@ export function collectPanoramaInputs(options) {
       collectionList: null,
       catalog: null,
       approvedNames: new Set(),
+      approvedMembers: new Map(),
       collectorNotes: [],
       commands,
     };
@@ -249,7 +322,7 @@ export function collectPanoramaInputs(options) {
     collectorNotes.push(`collection list 不可用: ${listResult.error}`);
   }
   if (catalogArtifact.present && !catalogArtifact.catalog) {
-    collectorNotes.push('catalog.json 存在但无法解析');
+    collectorNotes.push(catalogArtifact.error ?? 'catalog.json 存在但无法解析');
   }
   return {
     ok: true,
@@ -259,6 +332,7 @@ export function collectPanoramaInputs(options) {
     collectionList: listResult.ok ? listResult.list : null,
     catalog: catalogArtifact,
     approvedNames: memberInfo.approvedNames,
+    approvedMembers: memberInfo.approvedMembers,
     collectionRoots: memberInfo.collectionRoots,
     collectorNotes,
     commands,

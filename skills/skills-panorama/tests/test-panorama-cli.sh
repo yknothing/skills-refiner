@@ -217,6 +217,30 @@ assert_eq "share redacts sandbox home" "no" "$share_has_sandbox"
 STDOUT_JSON=$("$PANORAMA_BIN" --yes --agents claude --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>/dev/null)
 assert_true "stdout-only emits JSON" "$NODE24" -e "JSON.parse(process.argv[1])" "$STDOUT_JSON"
 
+# `all` 必须来自 scanner topology，且不能把权威源目录误当成 Agent。
+ALL_STDOUT_JSON=$("$PANORAMA_BIN" --yes --agents all --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>/dev/null)
+assert_true "--agents all discovers every present Agent root" "$NODE24" -e '
+const d=JSON.parse(process.argv[1]);
+const locations=d.agents.map((agent)=>agent.location);
+for (const expected of [".claude/skills", ".cursor/skills", ".codex/skills", ".gemini/skills"]) {
+  if (!locations.includes(expected)) process.exit(1);
+}
+if (locations.includes(".agents/skills")) process.exit(1);
+' "$ALL_STDOUT_JSON"
+
+# 大型 stdout 必须完整排空。真实全机矩阵会轻易超过 pipe buffer；过去
+# direct-entrypoint 在 write 后立即 process.exit，产生可复现的截断 JSON。
+large_index=1
+while [ "$large_index" -le 260 ]; do
+  write_skill "$SANDBOX/.agents/skills/large-output-$large_index" "large-output-$large_index"
+  large_index=$((large_index + 1))
+done
+LARGE_STDOUT_JSON=$("$PANORAMA_BIN" --yes --agents claude,cursor,codex \
+  --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>/dev/null)
+assert_true "large stdout-only JSON is complete" "$NODE24" -e \
+  "const d=JSON.parse(process.argv[1]); if(d.entries.length < 260) process.exit(1)" \
+  "$LARGE_STDOUT_JSON"
+
 echo ""
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ]

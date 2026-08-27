@@ -39,7 +39,7 @@ function printHelp() {
   ${PANORAMA_IDENTITY.cliName} [选项]
 
 选项:
-  --agents <list>   逗号分隔 Agent id 或 location（零交互）
+  --agents <list>   逗号分隔 Agent id/location，或 all（全部已发现 Agent；零交互）
   --yes             非交互：使用已存配置或默认三件套
   --stdout-only     不落盘，摘要到 stdout（JSON+标记）
   --copy-cwd        额外复制最新报告到 cwd（真名路径；分享请用 --share）
@@ -127,7 +127,7 @@ async function resolveCoverageWithWizard(params) {
   const interactiveAllowed = isTty && !options.yes && !options.agents;
 
   if (options.agents) {
-    const agents = markAgentPresence(home, parseAgentsFlag(options.agents));
+    const agents = markAgentPresence(home, parseAgentsFlag(options.agents, topology));
     notes.push('使用命令行 --agents，未做交互确认');
     return { agents, interactiveConfirmed: false, notes };
   }
@@ -222,6 +222,7 @@ export async function runPanoramaCli(argv = process.argv.slice(2)) {
     scan: collected.scan,
     agents: coverage.agents,
     approvedNames: collected.approvedNames,
+    approvedMembers: collected.approvedMembers,
     catalog: collected.catalog,
     collectionRoots: collected.collectionRoots ?? [],
   });
@@ -234,6 +235,7 @@ export async function runPanoramaCli(argv = process.argv.slice(2)) {
     notes: [...coverage.notes, ...collected.collectorNotes],
     commands: collected.commands,
     collectorNotes: collected.collectorNotes,
+    managedCollections: collected.collectionList?.collections ?? [],
   });
 
   const written = writePanoramaOutputs({
@@ -267,5 +269,11 @@ const invokedDirectly = process.argv[1]
   && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (invokedDirectly) {
-  runPanoramaCli().then((code) => process.exit(code));
+  // Do not force process.exit() after writing a potentially large panorama.
+  // stdout may be a pipe and process.stdout.write() is asynchronous there;
+  // natural event-loop shutdown is what guarantees the complete JSON reaches
+  // the consumer before the requested exit status is observed.
+  runPanoramaCli().then((code) => {
+    process.exitCode = code;
+  });
 }

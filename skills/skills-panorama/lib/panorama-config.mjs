@@ -73,11 +73,32 @@ export function saveCoverageConfig(home, agents) {
 }
 
 /**
- * 解析 --agents 参数：逗号分隔 id（claude,cursor,codex）或 location。
- * @param {string} raw
+ * 将 topology 中实际发现的 Agent skill 根转换为覆盖项。
+ * `.agents/skills` 是权威源目录，不是 Agent 投影根，必须排除。
+ *
+ * @param {Record<string, unknown>} topology skill-scan topology
  * @returns {Array<{ id: string, label_zh: string, location: string }>}
  */
-export function parseAgentsFlag(raw) {
+export function agentsFromTopology(topology) {
+  const byLoc = new Map(DEFAULT_AGENT_COVERAGE.map((item) => [item.location, item]));
+  return Object.keys(topology ?? {})
+    .filter((location) => location !== SOURCE_STORE_LOCATION)
+    .filter((location) => location.endsWith('/skills') || location.includes('/skills'))
+    .sort()
+    .map((location) => {
+      if (byLoc.has(location)) return { ...byLoc.get(location) };
+      const id = location.replace(/^\./, '').replace(/\/skills$/, '').replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
+      return { id, label_zh: location, location };
+    });
+}
+
+/**
+ * 解析 --agents 参数：逗号分隔 id（claude,cursor,codex）、location，或 all。
+ * @param {string} raw
+ * @param {Record<string, unknown>} topology skill-scan topology
+ * @returns {Array<{ id: string, label_zh: string, location: string }>}
+ */
+export function parseAgentsFlag(raw, topology = {}) {
   const tokens = String(raw)
     .split(',')
     .map((part) => part.trim())
@@ -87,12 +108,28 @@ export function parseAgentsFlag(raw) {
   }
   const byId = new Map(DEFAULT_AGENT_COVERAGE.map((item) => [item.id, item]));
   const byLoc = new Map(DEFAULT_AGENT_COVERAGE.map((item) => [item.location, item]));
-  return tokens.map((token) => {
-    if (byId.has(token)) return { ...byId.get(token) };
-    if (byLoc.has(token)) return { ...byLoc.get(token) };
+  const expanded = [];
+  for (const token of tokens) {
+    if (token === 'all') {
+      const discovered = agentsFromTopology(topology);
+      if (discovered.length === 0) {
+        throw new Error('--agents all 未从 skill-scan topology 检测到任何 Agent 根');
+      }
+      expanded.push(...discovered);
+      continue;
+    }
+    if (byId.has(token)) {
+      expanded.push({ ...byId.get(token) });
+      continue;
+    }
+    if (byLoc.has(token)) {
+      expanded.push({ ...byLoc.get(token) });
+      continue;
+    }
     const id = token.replace(/^\./, '').replace(/\/skills$/, '').replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
-    return { id, label_zh: token, location: token.startsWith('.') ? token : `.${token}` };
-  });
+    expanded.push({ id, label_zh: token, location: token.startsWith('.') ? token : `.${token}` });
+  }
+  return [...new Map(expanded.map((item) => [item.location, item])).values()];
 }
 
 /**
