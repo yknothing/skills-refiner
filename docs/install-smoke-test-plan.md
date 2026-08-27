@@ -35,7 +35,7 @@
 
 验收：
 
-- 四个 skill 可分别选择安装；`skill-debug` 与 `skill-hygiene` 的
+- 五个 skill 可分别选择安装；`skill-debug` 与 `skill-hygiene` 的
   `lib/common.sh` 字节一致，且安装根不存在共享 `skills/lib` 依赖。
 - `skill-hygiene` 单独安装时包含可执行 `bin/skills-refiner`、
   `native/cleanup-macos-helper.c` 和精确五个 `lib/cleanup-*.mjs`。

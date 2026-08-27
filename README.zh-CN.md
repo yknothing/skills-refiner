@@ -93,7 +93,7 @@ SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
 
 ## 设计原则
 
-四个 skill 共通：
+五个 skill 共通：
 
 - **AI judges, scripts collect.** 脚本收集结构化数据、不做裁决；AI 结合专业与上下文解释。脚本不得架空 AI 的判断空间。
 - **先可加载，再谈优雅。** 不能满足运行时加载契约的 skill 是阻断问题，即使文档和工作流写得再完整也一样。
@@ -118,10 +118,10 @@ SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
 
 ## 安装
 
-使用 [skills CLI](https://github.com/vercel-labs/skills) 全局安装四个 skill：
+使用 [skills CLI](https://github.com/vercel-labs/skills) 全局安装五个 skill：
 
 ```bash
-npx skills add yknothing/skills-refiner --skill skills-refiner --skill skills-appreciation --skill skill-hygiene --skill skill-debug -g
+npx skills add yknothing/skills-refiner --skill skills-refiner --skill skills-appreciation --skill skills-panorama --skill skill-hygiene --skill skill-debug -g
 ```
 
 适用于 Claude Code、Cursor、Codex、OpenCode 及 [多种 agent](https://github.com/vercel-labs/skills#supported-agents)。
@@ -134,7 +134,7 @@ mutation 会 fail closed。Windows Git Bash 仍只支持既有的有界只读与
 也未实现。精确边界见
 [平台支持契约](docs/platform-support.md)。
 
-四个 skill 均可独立选择安装。例如：
+五个 skill 均可独立选择安装。例如：
 
 ```bash
 # 只安装设计审计能力（不依赖其他 skill 的运行时文件）
@@ -310,7 +310,7 @@ payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent
 - `skills/{skill-debug,skill-hygiene}/lib/common.sh` — 镜像的运行时 helper；两个可执行治理 skill 各自携带一份，保证选择性安装自包含（installed-layout 测试强制校验字节一致）
 - `bin/skills-refiner-doctor.sh` — 贡献者包装脚本，转发至 `skills/skill-debug/bin/skills-refiner-doctor.sh`
 - `docs/platform-support.md` — macOS、Windows WSL 2、Git Bash 与原生 PowerShell 的明确支持边界
-- `examples/` — 四个 skill 的用法示例
+- `examples/` — 五个 skill 的用法示例
 - `evals/` — 评测量表与锚点评析（9 cases，2 rubrics）
 
 ## 快速示例

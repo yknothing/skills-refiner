@@ -44,14 +44,16 @@ mkdir -p "$REPO_SURFACE_SANDBOX/.agents/skills"
 cp -R "$REPO_ROOT/skills/skill-debug" "$REPO_SURFACE_SANDBOX/.agents/skills/"
 cp -R "$REPO_ROOT/skills/skill-hygiene" "$REPO_SURFACE_SANDBOX/.agents/skills/"
 cp -R "$REPO_ROOT/skills/skills-appreciation" "$REPO_SURFACE_SANDBOX/.agents/skills/"
+cp -R "$REPO_ROOT/skills/skills-panorama" "$REPO_SURFACE_SANDBOX/.agents/skills/"
 cp -R "$REPO_ROOT/skills/skills-refiner" "$REPO_SURFACE_SANDBOX/.agents/skills/"
 REPO_SCAN=$(HOME="$REPO_SURFACE_SANDBOX" bash "$REPO_ROOT/skills/skill-hygiene/bin/skill-scan.sh" --json)
-for skill_name in skill-debug skill-hygiene skills-appreciation skills-refiner; do
+for skill_name in skill-debug skill-hygiene skills-appreciation skills-panorama skills-refiner; do
     echo "$REPO_SCAN" | jq -e --arg n "$skill_name" '.skills[] | select(.name == $n and .runtime_contract.status == "unknown" and .runtime_contract.loadable == null and .runtime_contract.runtime_verified == false and (.runtime_contract.load_blockers | length == 0))' >/dev/null
 done
 echo "$REPO_SCAN" | jq -e '[.skills[] | select(.runtime_contract.description_length > 1024)] | length == 0' >/dev/null
 [ -f "$REPO_ROOT/skills/skills-appreciation/references/editorial-checklist.md" ]
 [ -f "$REPO_ROOT/skills/skills-refiner/references/skill-creator-collaboration.md" ]
+[ -x "$REPO_ROOT/skills/skills-panorama/bin/skill-panorama.sh" ]
 
 JSON=$(bash "$DOCTOR" --json --cwd "$REPO_ROOT" --days 7)
 echo "$JSON" | jq -e '.schema == "skills-refiner.doctor.v2"' >/dev/null

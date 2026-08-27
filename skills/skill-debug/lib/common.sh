@@ -86,7 +86,9 @@ sr_require_sha256() {
 }
 
 sr_agent_skill_dirs() {
-    cat <<'EOF'
+    local home_dir="${1:-}"
+    {
+        cat <<'EOF'
 .warp/skills
 .agents/skills
 .claude/skills
@@ -99,6 +101,14 @@ sr_agent_skill_dirs() {
 .github/skills
 .opencode/skills
 EOF
+        if [ -n "$home_dir" ] && [ -d "$home_dir" ]; then
+            local root
+            for root in "$home_dir"/.[!.]*/skills; do
+                [ -d "$root" ] || continue
+                printf '%s\n' "${root#"$home_dir"/}"
+            done
+        fi
+    } | awk '!seen[$0]++'
 }
 
 sr_detect_home_dir() {

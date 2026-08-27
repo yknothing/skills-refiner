@@ -8,15 +8,16 @@ Version 1.0 focused on design judgment after skill creation: whether a single sk
 
 Version 2.0 extends that judgment from individual skills to installed skill systems: topology, provenance, symlink distribution, local evidence, and conservative governance.
 
-Four skills across two layers:
+Five skills across two layers:
 
 **Analysis & Interpretation** — judgment and understanding:
 1. **`skills-refiner`** — audit, refine, extract, and integrate a skill repository, single skill, or workflow framework
 2. **`skills-appreciation`** — interpret and explain a skill or skills system in a deep, teaching-grade style
 
 **Governance & Observability** — health and visibility:
-3. **`skill-hygiene`** — evaluate health, quality, and topology of installed skills (AI judges; shell scripts collect facts)
-4. **`skill-debug`** — three-layer observability: local discovery diagnostics, activation canary tracing, canary observation dashboards
+3. **`skills-panorama`** — read-only topology map and eight-class governance triage
+4. **`skill-hygiene`** — evaluate health, quality, and topology of installed skills (AI judges; shell scripts collect facts)
+5. **`skill-debug`** — three-layer observability: local discovery diagnostics, activation canary tracing, canary observation dashboards
 
 ## Why this exists
 
@@ -28,13 +29,13 @@ Agent skills grow fast and degrade silently. Most skill ecosystems face two inte
 This repository addresses both:
 
 - `skills-refiner` and `skills-appreciation` handle the **analysis** problem — deep design audit and publishable interpretation.
-- `skill-hygiene` and `skill-debug` handle the **governance** problem — topology scanning, version/provenance fact collection, activation canary tracing, and observation analytics.
+- `skills-panorama`, `skill-hygiene`, and `skill-debug` handle the **governance** problem — first map the topology, then evaluate and triage it, with activation evidence as a separate observation layer.
 
 Together with a skill-creation tool such as `skill-creator`, they form a complete skill lifecycle: creation → testing → design audit → governance → observability → interpretation.
 
 The first governance question is now deliberately blunt: can static evidence prove a load blocker? `skill-scan.sh` reports a reliably parsed description longer than the 1024-character limit as `runtime_contract.status: "fail"`. A required field that the lightweight parser does not observe is recorded under `unverified_requirements`, not declared missing. Otherwise status is `"unknown"`, `loadable` is `null`, and `runtime_verified` is `false`—the scanner does not pretend it executed an agent's real loader or a complete YAML validator.
 
-## The four skills
+## The five skills
 
 ### 1) `skills-refiner` — design-level audit
 
@@ -56,7 +57,16 @@ Use when the main job is to:
 
 This skill is interpretation-oriented. It does **not** force engineering-style criteria onto every target — a creative skill is judged differently from an infrastructure skill.
 
-### 3) `skill-hygiene` — installed skill evaluation
+### 3) `skills-panorama` — read-only skills map
+
+Use when you need a first-look inventory of canonical storage, per-Agent exposure, link health, catalog intent, collisions, and eight mutually exclusive topology gap classes. It orchestrates the existing scanner and collection/catalog facts; it does not delete, relink, or mutate the catalog.
+
+```bash
+SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
+  bash ~/.agents/skills/skills-panorama/bin/skill-panorama.sh --yes --agents all
+```
+
+### 4) `skill-hygiene` — installed skill evaluation
 
 Use when you need to:
 - audit the health and quality of installed skills across all agent directories;
@@ -66,7 +76,7 @@ Use when you need to:
 
 This skill follows the "AI judges, scripts collect" philosophy. The shell script (`bin/skill-scan.sh`) gathers structured facts; the AI applies expert judgment. It respects the standard skill installation model: skills installed to `~/.agents/skills/` and symlinked to agent directories are distribution links, not duplicates.
 
-### 4) `skill-debug` — skill observability
+### 5) `skill-debug` — skill observability
 
 Use when you need local evidence about likely skill discovery surfaces, observed canary events, and installed skill identities with no local canary evidence. Three layers:
 
@@ -78,7 +88,7 @@ Combine with `skill-hygiene` for a full governance workflow: probe discovery →
 
 ## Design principles
 
-Across all four skills:
+Across all five skills:
 
 - **AI judges, scripts collect.** Shell scripts gather structured data without making decisions. The AI interprets evidence using expertise and context. Scripts must not strip AI's judgment capability.
 - **Loadability before elegance.** A skill that cannot satisfy the runtime loader contract is a blocker, no matter how polished its docs or workflow are.
@@ -108,10 +118,10 @@ Across all four skills:
 
 ## Installation
 
-Install all four skills globally with the [skills CLI](https://github.com/vercel-labs/skills):
+Install all five skills globally with the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
-npx skills add yknothing/skills-refiner --skill skills-refiner --skill skills-appreciation --skill skill-hygiene --skill skill-debug -g
+npx skills add yknothing/skills-refiner --skill skills-refiner --skill skills-appreciation --skill skills-panorama --skill skill-hygiene --skill skill-debug -g
 ```
 
 Works with Claude Code, Cursor, Codex, OpenCode, and [many other agents](https://github.com/vercel-labs/skills#supported-agents).
@@ -287,6 +297,8 @@ Managed third-party collection versions are a separate namespace: skills-refiner
 - `skills/skills-appreciation/references/editorial-checklist.md` — article quality checklist
 
 **Governance & Observability:**
+- `skills/skills-panorama/SKILL.md` — read-only topology map and triage
+- `skills/skills-panorama/bin/skill-panorama.sh` — scan/catalog orchestration → `latest.json` / `latest.md`
 - `skills/skill-hygiene/SKILL.md` — AI-driven skill evaluation framework
 - `skills/skill-hygiene/bin/skill-scan.sh` — topology and fact collector
 - `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap and cleanup CLI launcher
@@ -310,7 +322,7 @@ Managed third-party collection versions are a separate namespace: skills-refiner
 - `skills/{skill-debug,skill-hygiene}/lib/common.sh` — mirrored runtime helpers; each executable governance skill ships its own copy so selective installs remain self-contained (the installed-layout test enforces byte equality)
 - `bin/skills-refiner-doctor.sh` — contributor wrapper → `skills/skill-debug/bin/skills-refiner-doctor.sh`
 - `docs/platform-support.md` — explicit macOS, Windows WSL 2, Git Bash, and native PowerShell support boundaries
-- `examples/` — usage examples for all four skills
+- `examples/` — usage examples for all five skills
 - `evals/` — evaluation rubrics, cases, and anchor judgments (9 cases, 2 rubrics)
 
 ## Quick usage examples

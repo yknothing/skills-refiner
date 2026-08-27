@@ -203,7 +203,7 @@ run_tests() {
     assert_eq "Shared helper ships inside skill-hygiene" "yes" "$([ -f "$tools_root/skill-hygiene/lib/common.sh" ] && echo yes || echo no)"
     assert_eq "Per-skill helper mirrors stay byte-identical" "yes" "$(cmp -s "$tools_root/skill-debug/lib/common.sh" "$tools_root/skill-hygiene/lib/common.sh" && echo yes || echo no)"
     assert_eq "No loose skills/lib is present" "no" "$([ -d "$tools_root/lib" ] && echo yes || echo no)"
-    assert_eq "Four repo skills installed" "4" "$(find "$tools_root" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l | tr -d ' ')"
+    assert_eq "Five repo skills installed" "5" "$(find "$tools_root" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l | tr -d ' ')"
     echo ""
 
     echo -e "${BOLD}── T2 Script Runtime ──${NC}"
@@ -358,7 +358,7 @@ EOF
     echo ""
 
     echo -e "${BOLD}── T7 Selective Install Contract ──${NC}"
-    local selective_root selective_work hygiene_home debug_home refiner_home appreciation_home
+    local selective_root selective_work hygiene_home debug_home refiner_home appreciation_home panorama_home
     local hygiene_only_json hygiene_only_stderr hygiene_only_rc
     local hygiene_launcher hygiene_help_json hygiene_help_text hygiene_help_rc hygiene_review_json hygiene_review_rc
     local debug_probe_json debug_probe_rc debug_dash_json debug_dash_rc debug_trace_status debug_trace_rc
@@ -370,11 +370,13 @@ EOF
     debug_home="$selective_root/debug"
     refiner_home="$selective_root/refiner"
     appreciation_home="$selective_root/appreciation"
-    mkdir -p "$selective_work" "$hygiene_home/.agents/skills" "$debug_home/.agents/skills" "$refiner_home/.agents/skills" "$appreciation_home/.agents/skills"
+    panorama_home="$selective_root/panorama"
+    mkdir -p "$selective_work" "$hygiene_home/.agents/skills" "$debug_home/.agents/skills" "$refiner_home/.agents/skills" "$appreciation_home/.agents/skills" "$panorama_home/.agents/skills"
     cp -R "$REPO_ROOT/skills/skill-hygiene" "$hygiene_home/.agents/skills/"
     cp -R "$REPO_ROOT/skills/skill-debug" "$debug_home/.agents/skills/"
     cp -R "$REPO_ROOT/skills/skills-refiner" "$refiner_home/.agents/skills/"
     cp -R "$REPO_ROOT/skills/skills-appreciation" "$appreciation_home/.agents/skills/"
+    cp -R "$REPO_ROOT/skills/skills-panorama" "$panorama_home/.agents/skills/"
 
     hygiene_launcher="$hygiene_home/.agents/skills/skill-hygiene/bin/skills-refiner"
     assert_eq "skill-hygiene selective install ships CLI launcher" "yes" \
@@ -462,6 +464,7 @@ EOF
 
     assert_eq "skills-refiner standalone reference is packaged" "yes" "$([ -f "$refiner_home/.agents/skills/skills-refiner/references/skill-creator-collaboration.md" ] && echo yes || echo no)"
     assert_eq "skills-appreciation standalone reference is packaged" "yes" "$([ -f "$appreciation_home/.agents/skills/skills-appreciation/references/editorial-checklist.md" ] && echo yes || echo no)"
+    assert_eq "skills-panorama standalone launcher is packaged" "yes" "$([ -x "$panorama_home/.agents/skills/skills-panorama/bin/skill-panorama.sh" ] && echo yes || echo no)"
     assert_contains "README documents official selective install flag" "$(cat "$REPO_ROOT/README.md")" "--skill skill-debug --skill skill-hygiene -g"
     echo ""
 
