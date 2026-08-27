@@ -1,3 +1,5 @@
+
+
 # skills-refiner
 
 **Languages:** English | [简体中文](README.zh-CN.md)
@@ -162,7 +164,7 @@ bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
 # Chinese terminal report:
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --lang zh
-# From a git checkout (wrapper):
+# From a git checkout (wrapper; run from the repository root):
 bash bin/skills-refiner-doctor.sh --help
 ```
 
