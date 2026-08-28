@@ -227,6 +227,21 @@ Panorama v2 以 repository-qualified identity 对齐 scanner、controller、runt
 
 因此本机制**消费但不复用它作为唯一权威**：receipt 被内容摘要绑定后参与来源审计；当前状态仍由 upstream revision、controller、实际树和 runtime probe 交叉验证。这样可以利用安装来源信息，同时避免 lock file 自己漂移后继续授予错误结论。
 
+`skill-scan.v7` 将这条边界固化为独立 claim：只有 owner-private、非 symlink 的 `.skill-lock.json` v3
+记录，其 `skillFolderHash` 与当前目录 Git tree 完全一致，且 `source` / public GitHub `sourceUrl` /
+安全 `skillPath` 冗余字段彼此一致时，才输出 `installer_receipt_claim` / `receipt_bound`。该 claim：
+
+- 保留实际 `git_root`，因此不会把 authoring/worktree 误升级为可清理 installed copy；
+- 必须同时具有 `installed_copy/direct/content_bound_installer_receipt` mutation evidence；
+- cleanup plan 在 mutation 前从 identity-bound receipt 原文重新规范化 source 并 exact compare；
+- 不向 symlink/cache alias 传播，也不在跳过/截断 tree validation 时产生；
+- `resolved_revision` 始终为 `null`，因为 npx skills v3 receipt 没有记录 immutable Git revision。
+
+最后一点是有意的 fail-closed limitation：本次安装来自已推送的仓库提交，且可在本次发布流程中做 payload
+比对，但不能把运行时已知 commit 反向伪装成安装器收据本身记录的字段。后续若要让任意 npx/npm 安装都具备
+可重建的 immutable revision，必须由 skills-refiner 包装 discover/resolve/install 流程并写入独立、操作绑定的
+controller record；不能修改或“补全”第三方 lock 来制造来源权威。
+
 ## 11. 失败与回滚语义
 
 | 场景 | 行为 |
@@ -274,6 +289,9 @@ Panorama v2 以 repository-qualified identity 对齐 scanner、controller、runt
   首次使用当前 helper source 的单集合检查为 5.82 秒。单次本机样本不等于 p95 保证；若规模或 p95 超出
   可接受范围，应新增 bounded no-follow batch inspect，不能通过跳过 recovery evidence 换取速度。
 - 事务安全依赖 macOS native helper 与 Node 24；其他平台保持 fail closed。
+- 外部 `npx skills` v3 receipt 能绑定 repository/path/tree 与安装时间，但没有 immutable revision；未经过
+  skills-refiner candidate-resolution/controller 流程的 bootstrap 安装只能报告 `receipt_bound`，不能报告
+  upstream-qualified。
 
 ## 14. 非目标
 

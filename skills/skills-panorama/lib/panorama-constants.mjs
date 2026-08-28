@@ -133,7 +133,7 @@ export const FORBIDDEN_COLLAPSED_FIELDS = Object.freeze(['installed', 'ready']);
 
 /** 扫描收集器相关。 */
 export const SCAN_COLLECTOR = Object.freeze({
-  schemaVersion: 'skill-scan.v6',
+  schemaVersion: 'skill-scan.v7',
   relativeBinFromHygiene: join('bin', 'skill-scan.sh'),
   hygieneSkillDirName: 'skill-hygiene',
   jsonFlag: '--json',

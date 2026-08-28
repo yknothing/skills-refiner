@@ -239,15 +239,28 @@ test.before(() => {
     version: 3,
     skills: {
       'Installed Skill 空 格': {
-        source: 'fixture',
+        source: 'example/skills',
         sourceType: 'github',
-        sourceUrl: 'https://example.invalid/fixture.git',
-        skillPath: 'skills/installed',
+        sourceUrl: 'https://github.com/example/skills.git',
+        skillPath: 'skills/installed/SKILL.md',
         skillFolderHash: tree,
       },
     },
   })}\n`, { mode: 0o600 });
   installedCandidateValue = installedCandidate(installed, installedRoot, sha256File(receiptPath), tree);
+  installedCandidateValue.source = {
+    kind: 'canonical_global',
+    canonical_target: installed,
+    git_root: null,
+    git_branch: null,
+    confidence: 'receipt_bound',
+    source_url: 'https://github.com/example/skills.git',
+    source_provider: 'github',
+    repository_id: 'example/skills',
+    source_path: 'skills/installed',
+    resolved_revision: null,
+    claim_kind: 'installer_receipt_claim',
+  };
 });
 
 test.after(() => {
@@ -615,6 +628,35 @@ test('receipt-backed installed directory binds tree, security metadata, and inte
   assert.equal(first.receipt_sha256, installedCandidateValue.evidence.mutation_provenance.evidence.receipt_sha256);
   assert.equal(first.installed_tree_sha1, installedCandidateValue.evidence.mutation_provenance.evidence.installed_tree_sha1);
   assert.equal(first.raw_link_target_base64, null);
+
+  const forgedSource = structuredClone(installedCandidateValue);
+  forgedSource.source.repository_id = 'other/skills';
+  forgedSource.source.source_url = 'https://github.com/other/skills.git';
+  await assert.rejects(
+    adapter.inspectForPlan(installed, installedRoot, forgedSource),
+    expectAdapterError('blocked', 'receipt_source_drift'),
+  );
+  const forgedPath = structuredClone(installedCandidateValue);
+  forgedPath.source.source_path = 'skills/other';
+  await assert.rejects(
+    adapter.inspectForPlan(installed, installedRoot, forgedPath),
+    expectAdapterError('blocked', 'receipt_source_drift'),
+  );
+
+  const receiptPath = join(home, '.agents/.skill-lock.json');
+  const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  receipt.skills['Installed Skill 空 格'].source = 'example/skills\nSECRET_SOURCE';
+  receipt.skills['Installed Skill 空 格'].sourceUrl = 'https://github.com/example/skills\nSECRET_SOURCE.git';
+  writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+  const controlCandidate = structuredClone(installedCandidateValue);
+  controlCandidate.evidence.mutation_provenance.evidence.receipt_sha256 = sha256File(receiptPath);
+  await assert.rejects(
+    adapter.inspectForPlan(installed, installedRoot, controlCandidate),
+    expectAdapterError('blocked', 'receipt_source_invalid'),
+  );
+  receipt.skills['Installed Skill 空 格'].source = 'example/skills';
+  receipt.skills['Installed Skill 空 格'].sourceUrl = 'https://github.com/example/skills.git';
+  writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
 
   writeFileSync(join(home, 'outside-target'), 'first outside content');
   const outsideFirst = await adapter.inspectForPlan(installed, installedRoot, installedCandidateValue);

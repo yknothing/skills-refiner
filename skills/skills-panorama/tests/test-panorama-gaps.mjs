@@ -617,7 +617,7 @@ test('skill-scan 即使错误返回零，runtime-load blocker 仍使收集不完
     const bin = join(hygieneRoot, 'bin');
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, 'skill-scan.sh'), `#!/usr/bin/env bash
-printf '%s\\n' '{"metadata":{"schema_version":"skill-scan.v6"},"skills":[],"skill_links":[],"broken_symlinks":[],"collection_index_blockers":[],"runtime_load_blockers":[{"name":"bad","reason":"description_too_long"}]}'
+printf '%s\\n' '{"metadata":{"schema_version":"skill-scan.v7"},"skills":[],"skill_links":[],"broken_symlinks":[],"collection_index_blockers":[],"runtime_load_blockers":[{"name":"bad","reason":"description_too_long"}]}'
 exit 0
 `, { mode: 0o700 });
     const observed = collectSkillScan({ home, hygieneRoot });
@@ -737,7 +737,7 @@ test('scan 非零但 JSON 可解析时保留 blocker、输出 DEGRADED 且 CLI �
     const bin = join(hygieneRoot, 'bin');
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, 'skill-scan.sh'), `#!/usr/bin/env bash
-printf '%s\\n' '{"metadata":{"schema_version":"skill-scan.v6"},"topology":{},"skills":[],"skill_links":[],"broken_symlinks":[],"name_collisions":[],"runtime_load_blockers":[],"collection_index_blockers":[{"collection_id":"demo","error_code":"unsafe_index","diagnostic":"blocked","index_path":"/srv/private/INDEX.json"}]}'
+printf '%s\\n' '{"metadata":{"schema_version":"skill-scan.v7"},"topology":{},"skills":[],"skill_links":[],"broken_symlinks":[],"name_collisions":[],"runtime_load_blockers":[],"collection_index_blockers":[{"collection_id":"demo","error_code":"unsafe_index","diagnostic":"blocked","index_path":"/srv/private/INDEX.json"}]}'
 exit 9
 `);
     writeFileSync(join(bin, 'skills-refiner'), `#!/usr/bin/env bash

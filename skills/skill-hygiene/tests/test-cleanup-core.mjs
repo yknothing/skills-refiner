@@ -765,7 +765,7 @@ test('post-apply scan reconciliation exposes exact conservative Agent truth', ()
   assert.equal(mismatched.error_code, 'observation_race');
 }));
 
-test('scan v6 provenance binds semantic, review, and candidate authorization', () => withSandbox((root) => {
+test('scan v6/v7 provenance binds semantic, review, and candidate authorization', () => withSandbox((root) => {
   const asV6 = (scan) => {
     const result = structuredClone(scan);
     result.metadata.schema_version = 'skill-scan.v6';
@@ -863,6 +863,72 @@ test('scan v6 provenance binds semantic, review, and candidate authorization', (
   assert.notEqual(semanticIdentityHashForEntry(indexed), indexedBaseline);
   indexed.provenance.resolved_revision = 'not-a-revision';
   assert.throws(() => semanticIdentityHashForEntry(indexed), /semantic identity/i);
+
+  const receiptClaim = structuredClone(scan.entries[3]);
+  receiptClaim.provenance = {
+    ...receiptClaim.provenance,
+    source_url: 'https://github.com/example/skills.git',
+    source_provider: 'github',
+    repository_id: 'example/skills',
+    source_path: 'skills/installed-copy',
+    resolved_revision: null,
+    claim_kind: 'installer_receipt_claim',
+    git_root: '',
+    git_branch: '',
+    confidence: 'receipt_bound',
+  };
+  assert.doesNotThrow(() => semanticIdentityHashForEntry(receiptClaim));
+  assert.doesNotThrow(() => semanticIdentityHashForEntry(
+    receiptClaim,
+    { scannerSchema: 'skill-scan.v7' },
+  ));
+  assert.throws(
+    () => semanticIdentityHashForEntry(receiptClaim, { scannerSchema: 'skill-scan.v6' }),
+    /semantic identity/i,
+  );
+  const inventedReceiptRevision = structuredClone(receiptClaim);
+  inventedReceiptRevision.provenance.resolved_revision = 'f'.repeat(40);
+  assert.throws(() => semanticIdentityHashForEntry(inventedReceiptRevision), /semantic identity/i);
+  const falseDirectReceipt = structuredClone(receiptClaim);
+  falseDirectReceipt.provenance.confidence = 'direct';
+  assert.throws(() => semanticIdentityHashForEntry(falseDirectReceipt), /semantic identity/i);
+  const unboundReceiptClaim = structuredClone(receiptClaim);
+  unboundReceiptClaim.mutation_provenance = { kind: 'unknown', confidence: 'none', evidence: null };
+  assert.throws(() => semanticIdentityHashForEntry(unboundReceiptClaim), /semantic identity/i);
+
+  const receiptScan = structuredClone(scan);
+  receiptScan.metadata.schema_version = 'skill-scan.v7';
+  receiptScan.entries[3] = receiptClaim;
+  receiptScan.skills = receiptScan.entries.filter((candidate) => candidate.entry_kind === 'directory');
+  const receiptReview = compileReview(receiptScan);
+  const receiptCandidate = receiptReview.candidates.find(({ name }) => name === 'installed-copy');
+  assert.equal(receiptCandidate.mutation_eligibility, 'eligible');
+  assert.ok(receiptCandidate.uncertainty.includes('source_not_directly_proven'));
+  assert.equal(
+    receiptReview.candidates.filter(({ mutation_eligibility: value }) => value === 'eligible').length,
+    compileReview(scan).candidates
+      .filter(({ mutation_eligibility: value }) => value === 'eligible').length,
+  );
+  const mislabeledReceiptScan = structuredClone(receiptScan);
+  mislabeledReceiptScan.metadata.schema_version = 'skill-scan.v6';
+  assert.throws(() => compileReview(mislabeledReceiptScan), /semantic identity/i);
+
+  const authoringReceiptScan = structuredClone(receiptScan);
+  authoringReceiptScan.entries[3].provenance.git_root = receiptClaim.canonical_dir;
+  authoringReceiptScan.entries[3].provenance.git_branch = 'main';
+  authoringReceiptScan.skills = authoringReceiptScan.entries
+    .filter((candidate) => candidate.entry_kind === 'directory');
+  const authoringReceipt = compileReview(authoringReceiptScan).candidates
+    .find(({ name }) => name === 'installed-copy');
+  assert.equal(authoringReceipt.mutation_eligibility, 'review_only');
+  assert.equal(authoringReceipt.review_only_reason, 'authoring_source');
+
+  for (const repositoryId of ['../repo', 'owner/..', 'owner/repo.git']) {
+    const ambiguous = structuredClone(receiptClaim);
+    ambiguous.provenance.repository_id = repositoryId;
+    ambiguous.provenance.source_url = `https://github.com/${repositoryId}.git`;
+    assert.throws(() => semanticIdentityHashForEntry(ambiguous), /semantic identity/i);
+  }
 
   const downgradedV6 = structuredClone(scan);
   const downgradedEntry = downgradedV6.entries.find(({ entry_path: path }) => path === entry.entry_path);

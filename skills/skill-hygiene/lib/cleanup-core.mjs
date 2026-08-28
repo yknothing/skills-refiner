@@ -53,13 +53,13 @@ function requireExactKeys(value, allowed, message) {
   }
 }
 
-const SUPPORTED_SCAN_SCHEMAS = new Set(['skill-scan.v5', 'skill-scan.v6']);
+const SUPPORTED_SCAN_SCHEMAS = new Set(['skill-scan.v5', 'skill-scan.v6', 'skill-scan.v7']);
 
 function validateScan(scan) {
   requireObject(scan, 'scan must be an object');
   if (!SUPPORTED_SCAN_SCHEMAS.has(scan.metadata?.schema_version) || !Array.isArray(scan.entries)
       || !scan.topology || typeof scan.topology !== 'object' || Array.isArray(scan.topology)) {
-    fail('invalid_schema', 'expected a supported skill-scan.v5/v6 document');
+    fail('invalid_schema', 'expected a supported skill-scan.v5/v6/v7 document');
   }
   return scan;
 }
@@ -117,6 +117,14 @@ function repositoryIdForPublicGitUrl(sourceUrl) {
     : null;
 }
 
+function validGithubRepositoryId(repositoryId) {
+  if (typeof repositoryId !== 'string' || !GITHUB_REPOSITORY_ID.test(repositoryId)) return false;
+  const [owner, repository] = repositoryId.split('/');
+  return !['.', '..'].includes(owner)
+    && !['.', '..'].includes(repository)
+    && !repository.endsWith('.git');
+}
+
 function normalizedScanProvenance(provenance, {
   allowMissing = false,
   expectedSchema = null,
@@ -137,10 +145,10 @@ function normalizedScanProvenance(provenance, {
     };
   }
   const isV5 = hasExactKeys(provenance, SCAN_V5_PROVENANCE_KEYS);
-  const isV6 = hasExactKeys(provenance, SCAN_V6_PROVENANCE_KEYS);
-  if (!isV5 && !isV6) semanticIdentityUnavailable();
+  const isStructured = hasExactKeys(provenance, SCAN_V6_PROVENANCE_KEYS);
+  if (!isV5 && !isStructured) semanticIdentityUnavailable();
   if ((expectedSchema === 'skill-scan.v5' && !isV5)
-      || (expectedSchema === 'skill-scan.v6' && !isV6)
+      || (['skill-scan.v6', 'skill-scan.v7'].includes(expectedSchema) && !isStructured)
       || (expectedSchema !== null && !SUPPORTED_SCAN_SCHEMAS.has(expectedSchema))) {
     semanticIdentityUnavailable();
   }
@@ -177,12 +185,14 @@ function normalizedScanProvenance(provenance, {
           || (sourcePath !== '.'
             && sourcePath.split('/').some((segment) => segment === '' || segment === '.' || segment === '..'))))
       || (resolvedRevision !== null && !REVISION.test(resolvedRevision))
-      || (claimKind !== null && claimKind !== 'index_claim')) {
+      || (claimKind !== null
+        && !['index_claim', 'installer_receipt_claim'].includes(claimKind))) {
     semanticIdentityUnavailable();
   }
   if (sourceProvider === null) {
     if (common.source_url !== '' || repositoryId !== null || resolvedRevision !== null
-        || claimKind !== null || ['direct', 'controller_unverified'].includes(common.confidence)) {
+        || claimKind !== null
+        || ['direct', 'controller_unverified', 'receipt_bound'].includes(common.confidence)) {
       semanticIdentityUnavailable();
     }
   } else if (sourceProvider === 'git') {
@@ -193,18 +203,31 @@ function normalizedScanProvenance(provenance, {
       semanticIdentityUnavailable();
     }
   } else if (sourceProvider === 'github') {
-    if (repositoryId === null || !GITHUB_REPOSITORY_ID.test(repositoryId)
-        || sourcePath === null || resolvedRevision === null || claimKind !== 'index_claim'
-        || common.confidence !== 'controller_unverified'
+    const indexClaim = claimKind === 'index_claim'
+      && resolvedRevision !== null
+      && common.confidence === 'controller_unverified';
+    const installerReceiptClaim = claimKind === 'installer_receipt_claim'
+      && resolvedRevision === null
+      && common.confidence === 'receipt_bound';
+    const receiptStorageGitState = (common.git_root === '' && common.git_branch === '')
+      || isAbsolute(common.git_root);
+    if (!validGithubRepositoryId(repositoryId)
+        || sourcePath === null || (!indexClaim && !installerReceiptClaim)
+        || (installerReceiptClaim && expectedSchema !== null
+          && expectedSchema !== 'skill-scan.v7')
+        || (indexClaim && (common.git_root !== '' || common.git_branch !== ''))
+        || (installerReceiptClaim && !receiptStorageGitState)
         || common.source_url !== `https://github.com/${repositoryId}.git`
-        || common.git_root !== '' || common.git_branch !== '') {
+    ) {
       semanticIdentityUnavailable();
     }
   } else {
     semanticIdentityUnavailable();
   }
   return {
-    format: 'scan-v6',
+    format: expectedSchema === 'skill-scan.v7' || claimKind === 'installer_receipt_claim'
+      ? 'scan-v7'
+      : 'scan-v6',
     ...common,
     source_provider: sourceProvider,
     repository_id: repositoryId,
@@ -282,7 +305,14 @@ function semanticIdentity(entry, { scannerSchema = null } = {}) {
     allowMissing: entryKind === 'broken_symlink',
     expectedSchema: scannerSchema,
   });
-  const normalizedProvenance = source.format === 'scan-v6'
+  const mutationProvenance = normalizedMutationProvenance(entry.mutation_provenance);
+  if (source.claim_kind === 'installer_receipt_claim'
+      && (mutationProvenance.kind !== 'installed_copy'
+        || mutationProvenance.confidence !== 'direct'
+        || mutationProvenance.evidence?.kind !== 'content_bound_installer_receipt')) {
+    semanticIdentityUnavailable();
+  }
+  const normalizedProvenance = ['scan-v6', 'scan-v7'].includes(source.format)
     ? {
       kind: source.kind,
       source_url: source.source_url,
@@ -307,7 +337,7 @@ function semanticIdentity(entry, { scannerSchema = null } = {}) {
     raw_link_target_base64: rawTarget,
     canonical_target: canonicalTarget,
     provenance: normalizedProvenance,
-    mutation_provenance: normalizedMutationProvenance(entry.mutation_provenance),
+    mutation_provenance: mutationProvenance,
     normalized_content_sha256: contentHash,
   };
 }
@@ -634,7 +664,7 @@ function sourceEvidence(entry, scannerSchema) {
     git_branch: source.git_branch || null,
     confidence: source.confidence,
   };
-  if (source.format === 'scan-v6') {
+  if (['scan-v6', 'scan-v7'].includes(source.format)) {
     evidence.source_url = source.source_url || null;
     evidence.source_provider = source.source_provider;
     evidence.repository_id = source.repository_id;

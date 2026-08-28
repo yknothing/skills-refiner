@@ -442,7 +442,7 @@ run_tests() {
     echo -e "${BOLD}── JSON Shape ──${NC}"
     echo "$json_output" | jq . >/dev/null 2>&1
     assert_eq "JSON output is valid" "0" "$?"
-    assert_eq "Scanner schema" "skill-scan.v6" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
+    assert_eq "Scanner schema" "skill-scan.v7" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
     assert_eq "JSON declares static preflight validation mode" "static-preflight" "$(echo "$json_output" | jq -r '.metadata.runtime_validation_mode')"
     assert_eq "JSON has topology key" "true" "$(echo "$json_output" | jq 'has("topology")')"
     assert_eq "JSON has skills key" "true" "$(echo "$json_output" | jq 'has("skills")')"
@@ -458,6 +458,12 @@ run_tests() {
     assert_eq "Receipt-backed copy provenance" "installed_copy:direct" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | [.mutation_provenance.kind, .mutation_provenance.confidence] | join(":")')"
     assert_eq "Receipt evidence has sha256" "true" "$(echo "$json_output" | jq '.entries[] | select(.dir_name == "receipt-backed") | (.mutation_provenance.evidence.receipt_sha256 | test("^[0-9a-f]{64}$"))')"
     assert_eq "Receipt evidence binds installed tree" "true" "$(echo "$json_output" | jq '.entries[] | select(.dir_name == "receipt-backed") | (.mutation_provenance.evidence.installed_tree_sha1 | test("^[0-9a-f]{40}$"))')"
+    assert_eq "Content-bound receipt exposes a bounded installer source claim" \
+        "https://github.com/example/skills.git:example/skills:skills/receipt-backed:installer_receipt_claim:receipt_bound" \
+        "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | [.provenance.source_url, .provenance.repository_id, .provenance.source_path, .provenance.claim_kind, .provenance.confidence] | join(":")')"
+    assert_eq "Installer receipt never invents an immutable revision or ambient Git root" \
+        "true" \
+        "$(echo "$json_output" | jq '.entries[] | select(.dir_name == "receipt-backed") | .provenance.resolved_revision == null and .provenance.git_root == "" and .provenance.git_branch == ""')"
     assert_eq "Unproven real directory provenance" "unknown" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .mutation_provenance.kind')"
     assert_eq "JSON has runtime_load_blockers key" "true" "$(echo "$json_output" | jq 'has("runtime_load_blockers")')"
     assert_eq "JSON has collection_index_blockers key" "true" "$(echo "$json_output" | jq 'has("collection_index_blockers")')"
@@ -478,36 +484,115 @@ run_tests() {
     cp "$SANDBOX/.agents/.skill-lock.json" "$receipt_file"
     cp "$receipt_file" "$receipt_backup"
 
+    mkdir -p "$safety_home/.claude/skills"
+    ln -s ../../.agents/skills/receipt-backed "$safety_home/.claude/skills/receipt-backed"
+    git -C "$safety_home/.agents/skills" init -q
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Receipt source claim preserves ambient Git authoring evidence" \
+        "$safety_home/.agents/skills:installer_receipt_claim" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | [.provenance.git_root, .provenance.claim_kind] | join(":")')"
+    assert_eq "Cached projection cannot inherit a direct-entry receipt claim" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".claude/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+
     cp "$safety_home/.agents/skills/receipt-backed/SKILL.md" "$skill_backup"
     printf '\nmanual replacement\n' >> "$safety_home/.agents/skills/receipt-backed/SKILL.md"
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "Receipt does not authorize replaced content" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Receipt does not authorize replaced content" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
     cp "$skill_backup" "$safety_home/.agents/skills/receipt-backed/SKILL.md"
+
+    jq '.skills["receipt-backed"].sourceUrl = "https://token@github.com/example/skills.git"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Credential-bearing receipt URL is not promoted" "null:" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | [(.provenance.claim_kind // "null"), .provenance.source_url] | join(":")')"
+    assert_eq "Unsafe receipt source text is never emitted" "0" \
+        "$(echo "$safety_json" | jq '[.. | strings | select(contains("token@"))] | length')"
+
+    jq '.skills["receipt-backed"].source = "owner/repo\nSECRET_SOURCE" | .skills["receipt-backed"].sourceUrl = "https://github.com/owner/repo\nSECRET_SOURCE.git"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Control characters in receipt source are not promoted" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+    assert_eq "Control characters in receipt source never leak payload text" "0" \
+        "$(echo "$safety_json" | jq '[.. | strings | select(contains("SECRET_SOURCE"))] | length')"
+
+    jq '.skills["receipt-backed"].sourceUrl = "https://github.com/example/skills.git\nSECRET_URL"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Control characters in receipt source URL are not promoted" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+    assert_eq "Control characters in receipt source URL never leak payload text" "0" \
+        "$(echo "$safety_json" | jq '[.. | strings | select(contains("SECRET_URL"))] | length')"
+
+    jq '.skills["receipt-backed"].skillPath = "skills/receipt-backed\nSECRET_PATH/SKILL.md"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Control characters in receipt skill path are not promoted" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+    assert_eq "Control characters in receipt skill path never leak payload text" "0" \
+        "$(echo "$safety_json" | jq '[.. | strings | select(contains("SECRET_PATH"))] | length')"
+
+    local nul_stderr="$safety_home/nul-receipt.stderr"
+    jq '.skills["receipt-backed"].source = "owner/repo\u0000SECRET_NUL" | .skills["receipt-backed"].sourceUrl = "https://github.com/owner/repo\u0000SECRET_NUL.git"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>"$nul_stderr")
+    assert_eq "NUL in receipt source is rejected before shell extraction" "null:" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | [(.provenance.claim_kind // "null"), .provenance.source_url] | join(":")')"
+    assert_eq "NUL receipt source produces no shell substitution diagnostic" "" "$(cat "$nul_stderr")"
+
+    jq '.skills["receipt-backed"].sourceUrl = "https://github.com/other/skills.git"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Mismatched receipt source fields are not promoted" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+
+    jq '.skills["receipt-backed"].skillPath = "../receipt-backed/SKILL.md"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Traversal receipt source path is not promoted" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+
+    jq '.skills["receipt-backed"].source = "owner/.." | .skills["receipt-backed"].sourceUrl = "https://github.com/owner/...git"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Ambiguous GitHub repository segment is not promoted" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+
+    jq '.skills["receipt-backed"].source = "owner/repo.git" | .skills["receipt-backed"].sourceUrl = "https://github.com/owner/repo.git.git"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Repository .git suffix is not promoted as an identity" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+
+    cp "$receipt_backup" "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json --skip-provenance-tree 2>/dev/null)
+    assert_eq "Skipped provenance tree cannot promote receipt source" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
 
     jq '.version = 2' "$receipt_backup" > "$receipt_file"
     invalid_receipt_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "Wrong receipt schema does not authorize mutation" "unknown" "$(echo "$invalid_receipt_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Wrong receipt schema does not authorize mutation" "unknown" "$(echo "$invalid_receipt_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
 
     printf '{malformed\n' > "$receipt_file"
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "Malformed receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Malformed receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
 
     jq 'del(.skills["receipt-backed"].sourceUrl)' "$receipt_backup" > "$receipt_file"
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "Incomplete receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Incomplete receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
 
     jq '.skills = {"stale-name": .skills["receipt-backed"]}' "$receipt_backup" > "$receipt_file"
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "Stale-name receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Stale-name receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
 
     cp "$receipt_backup" "$receipt_file"
     chmod 666 "$receipt_file"
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "World-writable receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "World-writable receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
 
     dd if=/dev/zero of="$receipt_file" bs=1048577 count=1 2>/dev/null
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "Oversize receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Oversize receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
 
     rm "$receipt_file"
     cp "$receipt_backup" "$receipt_file"
@@ -526,12 +611,12 @@ exec "$real_stat" "\$@"
 EOF
     chmod +x "$fake_bin/stat"
     safety_json=$(PATH="$fake_bin:$PATH" HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "Foreign-owner receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Foreign-owner receipt does not authorize mutation" "unknown" "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
 
     rm "$receipt_file"
     ln -s "$receipt_backup" "$receipt_file"
     symlink_receipt_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
-    assert_eq "Symlink receipt does not authorize mutation" "unknown" "$(echo "$symlink_receipt_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
+    assert_eq "Symlink receipt does not authorize mutation" "unknown" "$(echo "$symlink_receipt_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .mutation_provenance.kind')"
     rm "$receipt_file"
     cp "$receipt_backup" "$receipt_file"
     echo ""
@@ -584,6 +669,9 @@ EOF
     assert_eq "GNU stat receipt evidence survives /dev/fd no-dereference" \
         "true:true" \
         "$(echo "$gnu_stat_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | (.mutation_provenance.evidence // {}) as $e | [($e.receipt_sha256 // "" | test("^[0-9a-f]{64}$")), ($e.installed_tree_sha1 // "" | test("^[0-9a-f]{40}$"))] | map(tostring) | join(":")')"
+    assert_eq "GNU stat receipt source claim remains content-bound" \
+        "installer_receipt_claim:receipt_bound" \
+        "$(echo "$gnu_stat_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | [.provenance.claim_kind, .provenance.confidence] | join(":")')"
     echo ""
 
     echo -e "${BOLD}── Provenance and Version Facts ──${NC}"

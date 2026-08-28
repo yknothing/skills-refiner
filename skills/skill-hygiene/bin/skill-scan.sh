@@ -40,6 +40,7 @@ PROVENANCE_GIT_TMP=""
 PROVENANCE_RECEIPT_TMP=""
 GIT_TREE_HASH_RESULT=""
 MUTATION_PROVENANCE_JSON=""
+INSTALLER_SOURCE_CLAIM_JSON="null"
 SCAN_CONTENT_CACHE_DIR=""
 SCAN_CONTENT_CACHE_HITS_FILE=""
 
@@ -607,6 +608,70 @@ repository_id_for_source_url() {
     printf '%s\n' "$identity"
 }
 
+installer_source_claim_from_receipt() {
+    local entry_name="$1" receipt_snapshot="$2"
+    local source source_owner source_repository source_url skill_path source_path
+    INSTALLER_SOURCE_CLAIM_JSON="null"
+
+    [ -n "$entry_name" ] && [ -f "$receipt_snapshot" ] || return
+    # Validate the original JSON strings before command substitution so even
+    # NUL bytes cannot be silently discarded by Bash before this gate.
+    jq -e --arg skill "$entry_name" '
+        [.skills[$skill].source,
+         .skills[$skill].sourceUrl,
+         .skills[$skill].skillPath]
+        | all(type == "string"
+              and (explode | all(. >= 32 and . != 127)))
+    ' "$receipt_snapshot" >/dev/null 2>&1 || return
+    source=$(jq -r --arg skill "$entry_name" '.skills[$skill].source // ""' \
+        "$receipt_snapshot" 2>/dev/null || true)
+    source_url=$(jq -r --arg skill "$entry_name" '.skills[$skill].sourceUrl // ""' \
+        "$receipt_snapshot" 2>/dev/null || true)
+    skill_path=$(jq -r --arg skill "$entry_name" '.skills[$skill].skillPath // ""' \
+        "$receipt_snapshot" 2>/dev/null || true)
+
+    # Installer receipts are claims, not upstream attestations. Promote only a
+    # bounded, credential-free GitHub identity whose redundant fields agree.
+    # The immutable revision intentionally remains null because skills v3
+    # receipts do not record one.
+    [ "${#source}" -le 1024 ] \
+        && printf '%s' "$source" | LC_ALL=C grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' \
+        || return
+    source_owner="${source%%/*}"
+    source_repository="${source#*/}"
+    case "$source_owner" in .|..) return ;; esac
+    case "$source_repository" in .|..|*.git) return ;; esac
+    case "$source_url" in
+        "https://github.com/${source}"|"https://github.com/${source}.git") ;;
+        *) return ;;
+    esac
+    [ "${#skill_path}" -le 2048 ] || return
+    case "$skill_path" in
+        SKILL.md) source_path="." ;;
+        */SKILL.md) source_path="${skill_path%/SKILL.md}" ;;
+        *) return ;;
+    esac
+    if [ "$source_path" != "." ]; then
+        printf '%s' "$source_path" | LC_ALL=C \
+            grep -Eq '^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$' || return
+        case "/$source_path/" in *'/../'*|*'/./'*|*'//'*) return ;; esac
+    fi
+
+    INSTALLER_SOURCE_CLAIM_JSON=$(jq -n \
+        --arg source_url "https://github.com/${source}.git" \
+        --arg repository_id "$source" \
+        --arg source_path "$source_path" \
+        '{source_url:$source_url,
+          source_provider:"github",
+          repository_id:$repository_id,
+          source_path:$source_path,
+          resolved_revision:null,
+          claim_kind:"installer_receipt_claim",
+          git_root:"",
+          git_branch:"",
+          confidence:"receipt_bound"}')
+}
+
 git_source_path_for_dir() {
     local root="$1" dir="$2"
     [ -n "$root" ] || return 0
@@ -967,6 +1032,7 @@ mutation_provenance_for_entry() {
     local location="$1" entry_type="$2" entry_name="$3" entry_path="$4" receipt_snapshot="$5"
     local unknown='{"kind":"unknown","confidence":"none","evidence":null}'
     MUTATION_PROVENANCE_JSON="$unknown"
+    INSTALLER_SOURCE_CLAIM_JSON="null"
 
     if [ "$location" != ".agents/skills" ] || [ "$entry_type" != "directory" ]; then
         return
@@ -1037,6 +1103,7 @@ mutation_provenance_for_entry() {
                             receipt_file:$receipt_file,
                             receipt_sha256:$receipt_sha256,
                             installed_tree_sha1:$installed_tree_sha1}}')
+            installer_source_claim_from_receipt "$entry_name" "$receipt_snapshot"
             return
         fi
     else
@@ -1149,9 +1216,10 @@ scan_directory() {
             continue
         fi
 
-        local mutation_provenance_json
+        local mutation_provenance_json installer_source_claim_json
         mutation_provenance_for_entry "$dir_label" "$entry_type" "$entry_name" "$entry_path" "$install_receipt_snapshot"
         mutation_provenance_json="$MUTATION_PROVENANCE_JSON"
+        installer_source_claim_json="$INSTALLER_SOURCE_CLAIM_JSON"
 
         if [ "$entry_type" = "broken_symlink" ]; then
             local entry_json
@@ -1202,6 +1270,11 @@ scan_directory() {
         # roots. Reuse content-derived facts, but always rebuild entry identity,
         # installer evidence, and provenance for the current discovery surface.
         local scan_cache_file
+        local installer_storage_git_root="" installer_storage_git_branch=""
+        if [ "$installer_source_claim_json" != "null" ]; then
+            installer_storage_git_root=$(git_root_for_dir "$canonical_dir")
+            installer_storage_git_branch=$(git_branch_for_root "$installer_storage_git_root")
+        fi
         scan_cache_file=$(scan_content_cache_file "$canonical_skill_file" 2>/dev/null || true)
         if [ -n "$scan_cache_file" ] && [ -f "$scan_cache_file" ] && [ ! -L "$scan_cache_file" ]; then
             local cached_source_kind cached_is_backup=false entry_json
@@ -1222,6 +1295,9 @@ scan_directory() {
                 --arg raw_link_target "$link_target" \
                 --arg raw_link_target_base64 "$raw_link_target_base64" \
                 --argjson mutation_provenance "$mutation_provenance_json" \
+                --argjson installer_source_claim "$installer_source_claim_json" \
+                --arg installer_storage_git_root "$installer_storage_git_root" \
+                --arg installer_storage_git_branch "$installer_storage_git_branch" \
                 --arg source_skill_file "$source_skill_file" \
                 --arg source_kind "$cached_source_kind" \
                 --argjson is_backup "$cached_is_backup" '
@@ -1259,8 +1335,27 @@ scan_directory() {
                         git_root: "",
                         git_branch: "",
                         confidence: "controller_unverified"
-                    } elif $cached_contract == null then
-                        ($cached.provenance | .kind = $source_kind | .claim_kind = null)
+                    } elif $installer_source_claim != null then
+                        ($installer_source_claim + {
+                            kind: $source_kind,
+                            git_root: $installer_storage_git_root,
+                            git_branch: $installer_storage_git_branch
+                        })
+                    elif $cached_contract == null then
+                        if $cached.provenance.claim_kind == "installer_receipt_claim" then {
+                            kind: $source_kind,
+                            source_url: "",
+                            source_provider: null,
+                            repository_id: null,
+                            source_path: null,
+                            resolved_revision: null,
+                            claim_kind: null,
+                            git_root: "",
+                            git_branch: "",
+                            confidence: "heuristic"
+                        } else
+                            ($cached.provenance | .kind = $source_kind | .claim_kind = null)
+                        end
                     else {
                         kind: $source_kind,
                         source_url: "",
@@ -1399,6 +1494,14 @@ scan_directory() {
             else
                 git_remote=""
             fi
+        elif [ "$installer_source_claim_json" != "null" ]; then
+            git_remote=$(printf '%s' "$installer_source_claim_json" | jq -r '.source_url')
+            source_provider=$(printf '%s' "$installer_source_claim_json" | jq -r '.source_provider')
+            repository_id=$(printf '%s' "$installer_source_claim_json" | jq -r '.repository_id')
+            provenance_source_path=$(printf '%s' "$installer_source_claim_json" | jq -r '.source_path')
+            resolved_revision=""
+            provenance_claim_kind="installer_receipt_claim"
+            provenance_confidence="receipt_bound"
         else
             repository_id=$(repository_id_for_source_url "$git_remote")
             provenance_source_path=$(git_source_path_for_dir "$git_root" "$canonical_dir")
@@ -1654,7 +1757,7 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v6", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories-plus-validated-managed-collection-members", hash_normalization:"strip-canary-crlf-bom.v1", runtime_validation_mode:"static-preflight", runtime_status_semantics:"pass=runtime validator confirmed; fail=proven blocker; unknown=runtime loader not executed", collection_index_validation:"controller-contract-and-deployed-tree-digest"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], entries:[], runtime_load_blockers:[], collection_index_blockers:[], name_collisions:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v7", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories-plus-validated-managed-collection-members", hash_normalization:"strip-canary-crlf-bom.v1", runtime_validation_mode:"static-preflight", runtime_status_semantics:"pass=runtime validator confirmed; fail=proven blocker; unknown=runtime loader not executed", collection_index_validation:"controller-contract-and-deployed-tree-digest"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], entries:[], runtime_load_blockers:[], collection_index_blockers:[], name_collisions:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue

@@ -33,6 +33,7 @@ const COMMAND_LINE_TOOLS_DEVELOPER_DIR = '/Library/Developer/CommandLineTools';
 const MAX_HELPER_OUTPUT = 2 * 1024 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const TREE_SHA1 = /^[0-9a-f]{40}$/u;
+const GITHUB_REPOSITORY_ID = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const SHA256_IDENTIFIER = /^sha256:[0-9a-f]{64}$/u;
 const STATIC_ACTIVE_ROOTS = new Set([
@@ -676,7 +677,7 @@ function directReceiptEvidence(candidate) {
   return evidence;
 }
 
-function receiptTreeForEntry(response, entryPath) {
+function receiptRecordForEntry(response, entryPath) {
   if (typeof response.receipt_base64 !== 'string' || response.receipt_base64.length === 0) {
     fail('blocked', 'receipt_mapping_invalid');
   }
@@ -705,7 +706,58 @@ function receiptTreeForEntry(response, entryPath) {
       || !TREE_SHA1.test(record.skillFolderHash ?? '')) {
     fail('blocked', 'receipt_mapping_invalid');
   }
-  return record.skillFolderHash;
+  return record;
+}
+
+function installerSourceClaimForReceiptRecord(record) {
+  if ([record.source, record.sourceUrl, record.skillPath]
+    .some((value) => CONTROL_CHARACTERS.test(value))) {
+    fail('blocked', 'receipt_source_invalid');
+  }
+  const repositoryId = record.source;
+  if (repositoryId.length > 1024 || !GITHUB_REPOSITORY_ID.test(repositoryId)) {
+    fail('blocked', 'receipt_source_invalid');
+  }
+  const [owner, repository] = repositoryId.split('/');
+  if (['.', '..'].includes(owner) || ['.', '..'].includes(repository)
+      || repository.endsWith('.git')) fail('blocked', 'receipt_source_invalid');
+  if (record.sourceUrl !== `https://github.com/${repositoryId}`
+      && record.sourceUrl !== `https://github.com/${repositoryId}.git`) {
+    fail('blocked', 'receipt_source_invalid');
+  }
+  if (record.skillPath.length > 2048) fail('blocked', 'receipt_source_invalid');
+  let sourcePath;
+  if (record.skillPath === 'SKILL.md') {
+    sourcePath = '.';
+  } else if (record.skillPath.endsWith('/SKILL.md')) {
+    sourcePath = record.skillPath.slice(0, -'/SKILL.md'.length);
+  } else {
+    fail('blocked', 'receipt_source_invalid');
+  }
+  if (sourcePath !== '.') {
+    const segments = sourcePath.split('/');
+    if (segments.some((segment) => segment.length === 0 || ['.', '..'].includes(segment)
+        || !/^[A-Za-z0-9_.-]+$/u.test(segment))) {
+      fail('blocked', 'receipt_source_invalid');
+    }
+  }
+  return {
+    source_url: `https://github.com/${repositoryId}.git`,
+    source_provider: 'github',
+    repository_id: repositoryId,
+    source_path: sourcePath,
+    resolved_revision: null,
+    claim_kind: 'installer_receipt_claim',
+    confidence: 'receipt_bound',
+  };
+}
+
+function validateReceiptSourceClaim(candidate, record) {
+  if (candidate?.source?.claim_kind !== 'installer_receipt_claim') return;
+  const expected = installerSourceClaimForReceiptRecord(record);
+  for (const [key, value] of Object.entries(expected)) {
+    if (candidate.source[key] !== value) fail('blocked', 'receipt_source_drift');
+  }
 }
 
 function helperIdentity(helper) {
@@ -802,7 +854,9 @@ export function createMacosAdapter({ home = process.env.HOME, forceCompile = fal
             || receipt.receipt_sha256 !== receiptEvidence.receipt_sha256) {
           fail('blocked', 'receipt_drift');
         }
-        const receiptTreeSha1 = receiptTreeForEntry(receipt, entryPath);
+        const receiptRecord = receiptRecordForEntry(receipt, entryPath);
+        validateReceiptSourceClaim(candidate, receiptRecord);
+        const receiptTreeSha1 = receiptRecord.skillFolderHash;
         if (receiptTreeSha1 !== receiptEvidence.installed_tree_sha1) {
           fail('blocked', 'receipt_mapping_drift');
         }

@@ -324,7 +324,7 @@ rmdir -- "$SESSION_DIR"
 | `21` | restore/transaction 冲突 |
 | `130` | 交互被中断 |
 
-版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v6` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v6 保留 v5 的保守运行时语义与 `skills + skill_links + broken_symlinks` 顺序契约，并新增有界 `INDEX.json` collection member inventory、identity-bound canonical-content cache 与经过脱敏、内容绑定的风险证据。仅来自 INDEX 的 repository/revision 仍是未验证声明。Cleanup 同时接受历史 v5 与当前 v6 evidence。
+版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v7` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v6 在保留 v5 保守运行时语义与 `skills + skill_links + broken_symlinks` 顺序契约的同时，引入有界 `INDEX.json` collection member inventory、identity-bound canonical-content cache 与脱敏风险证据。Scan v7 新增内容绑定的 `installer_receipt_claim`，但不会猜造不可变 revision；仅来自 INDEX 的 repository/revision 仍是未验证声明。Cleanup 同时接受历史 v5/v6 与当前 v7 evidence。
 
 受管第三方 collection 的版本属于另一命名空间：skills-refiner 只报告 approved immutable upstream artifact 中严格提取的值及其 source path/digest，或明确返回 `not_declared`；不会用这些本地 product/schema 版本推导第三方 release version。
 

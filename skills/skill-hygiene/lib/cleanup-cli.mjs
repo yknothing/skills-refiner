@@ -307,10 +307,11 @@ function readJsonFile(path) {
 
 function validateScan(scan) {
   if (!scan || typeof scan !== 'object' || Array.isArray(scan)) {
-    invalid('invalid_schema', '[ERROR] Expected a supported skill-scan.v5/v6 document.');
+    invalid('invalid_schema', '[ERROR] Expected a supported skill-scan.v5/v6/v7 document.');
   }
-  if (!['skill-scan.v5', 'skill-scan.v6'].includes(scan.metadata?.schema_version) || !Array.isArray(scan.entries)) {
-    invalid('invalid_schema', '[ERROR] Expected a supported skill-scan.v5/v6 document.');
+  if (!['skill-scan.v5', 'skill-scan.v6', 'skill-scan.v7'].includes(scan.metadata?.schema_version)
+      || !Array.isArray(scan.entries)) {
+    invalid('invalid_schema', '[ERROR] Expected a supported skill-scan.v5/v6/v7 document.');
   }
   return scan;
 }
