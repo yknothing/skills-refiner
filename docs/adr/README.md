@@ -13,7 +13,7 @@
 | [0005](0005-prodcraft-in-root-physical-collection-and-projection.md) | `.agents/skills/prodcraft` 物理 Collection 与 `pc-*` 投影 | Accepted for filesystem scope | 2026-07-20 |
 | [0006](0006-declarative-managed-collections-and-reconciliation-catalog.md) | 声明式 Managed Collections 与可调和管理目录 | Accepted with limitations | 2026-07-20 |
 | [0007](0007-skills-panorama.md) | 技能全景（skills-panorama） | Accepted with limitations | 2026-07-22 |
-| [0008](0008-runtime-aware-global-skills-management.md) | 运行时感知的全局 Agent Skills 管理 | Proposed | 2026-08-28 |
+| [0008](0008-runtime-aware-global-skills-management.md) | 运行时感知的全局 Agent Skills 管理 | Proposed — Owner decision required | 2026-08-28 |
 
 ## 产物
 
@@ -34,9 +34,13 @@
 - ADR-0006 / 三组 live migrations 验收：`docs/verification/2026-07-20-managed-collections-v2-and-three-collection-migrations.md`
 - ADR-0007 技能全景评审包：`docs/adversarial-product-pk/2026-07-22-skills-panorama/`
 - ADR-0007 验收：`docs/verification/2026-07-22-skills-panorama-acceptance.md`
+- ADR-0008 评审包：`docs/adversarial-product-pk/2026-08-28-runtime-aware-global-skills/`
+- ADR-0008 验收：`docs/verification/2026-08-28-runtime-aware-global-skills.md`
+- ADR-0008 复盘：`docs/retrospectives/2026-08-28-runtime-aware-global-skills-management.md`
 
 ## 约定
 
-1. ADR 编号单调递增；状态使用：`Proposed` / `Accepted` / `Accepted with limitations` / `Superseded` / `Rejected`。
+1. ADR 编号单调递增；基础状态使用：`Proposed` / `Accepted` / `Accepted with limitations` / `Superseded` / `Rejected`。
+   `Proposed — Owner decision required` 是 `Proposed` 的治理 qualifier，不是新增生命周期状态。
 2. 仓库持有公共 architecture/schema/validator authority；机器侧 control root 持有 Owner-approved deployment intent；直接观测持有 runtime reality。任何冲突必须按 authority domain 调和，不能让私人机器实例静默覆盖公共架构，也不能让仓库 catalog 冒充本机实况。
 3. 本目录不替代平台厂商文档；引用外部能力时必须标注版本/门禁假设。

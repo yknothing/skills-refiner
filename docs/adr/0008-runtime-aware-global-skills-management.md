@@ -1,11 +1,12 @@
 # ADR-0008：运行时感知的全局 Agent Skills 管理
 
-- **Status:** Proposed（实现与实机验收完成后转 Accepted with limitations）
+- **Status:** Proposed — Owner decision required
 - **Date:** 2026-08-28
 - **Deciders:** Product owner（host machine）+ skills-refiner maintainers
 - **Supersedes:** ADR-0002 的 S1/S2 实现方案；ADR-0002 仍保留为问题定义与历史决策
 - **Depends on:** ADR-0001、ADR-0003、ADR-0004、ADR-0005、ADR-0006、ADR-0007
-- **Scope:** `/Users/whatsup/.agents/skills` 及其受管 collection、Agent 发现面、skills-refiner 本机控制面
+- **Scope:** `$HOME/.agents/skills` 的全量观察面；四个显式 collection 的 source-qualified 控制面；Agent 发现面与 skills-refiner 本机控制面
+- **Promotion scope:** 本机单用户信任边界内的 69 个 source-qualified collection members；其余 identity 只保留 inventory/path/receipt 证据等级
 
 ## 1. 结论
 
@@ -17,7 +18,9 @@ skills-refiner 采用“**上游不可变制品 + 已批准 active generation + 
 4. 磁盘、Agent 原生 catalog、body access、gateway route 与 context pressure 分层观测；任何一层不得替另一层报绿。
 5. 物理 collection 解决组织、升级与溯源问题；**仅嵌套目录不会自动节省 context**。真正减少 description 路由税必须由宿主原生 profile/config 或可验证投影控制实现。
 6. 同名不同仓库是合法状态。默认 `preserve + collision`，除非 Owner 明确批准替换；不得以名字相同自动清退。
-7. 所有安装、升级、迁移和 exposure 变更采用 plan/confirm/apply/status/undo/recover 流程，并在锁内重验 precondition。
+7. 所有由 skills-refiner 发起或显式接管的安装、升级、迁移和 exposure 变更采用
+   plan/confirm/apply/status/undo/recover 流程，并在锁内重验 precondition。外部 `npx`/`npm` installer
+   在被显式 adoption 前只作为可审计输入，不伪装成已受控制面事务管理。
 
 本 ADR 不选择一个可漂移的 `skill-lock.json` 或数据库快照作为“万能唯一事实源”。唯一事实按职责分层；任何摘要文件都必须能由更权威事实重新验证，不能靠自身声称正确。
 
@@ -55,10 +58,16 @@ provider
 
 每个受管 collection 的 active controller record 选择一个已批准 generation，并与 plan、operation、INDEX 和必要的 catalog entry 绑定。
 
-- ProdCraft v1 controller 使用其 v1 active/plan/operation 契约。
-- Better Skills、LoopOS、LangCraft 使用 managed-collection v2 active/plan/operation 与 canonical catalog。
-- v1/v2 是控制协议差异，不是上游 release version。
+- ProdCraft 当前写入 `collection.plan.v3`、`collection.active.v2`、`collection.operation.v1`；为读取历史 generation，兼容 `plan.v1/v2/v3` 与 `active.v1/v2`。
+- Better Skills、LoopOS、LangCraft 当前写入 `managed-collection.plan.v5`、`collection.active.v2`、`managed-collection.operation.v2`；为读取历史 generation，兼容 `plan.v2/v3/v4/v5`。
+- managed collection repair 使用 operation-bound `collection.repair-attempt.v1` ledger record：先 exclusive create，
+  后续状态以 identity/content CAS 更新，并绑定 pre-state quarantine、stage/published identity 与 plan hash。它是独立
+  repair attempt 的可恢复 current view，不是 append-only WAL，也不覆盖原 operation 的身份。
+- 这些 schema 数字是控制协议代次，不是第三方 release version。
 - reconstructable catalog view 不是独立权威；必须与 canonical catalog 一致。
+
+ProdCraft 的历史兼容是显式 allowlist：当前 `plan.v3` 必须具备完整 recovery evidence；只有精确的历史
+`plan.v1/v2` 格式可接受其当时尚不存在的字段。未来 schema 不会自动继承该放宽规则。
 
 ### 3.3 实际状态
 
@@ -148,6 +157,23 @@ discover candidate
 
 修复必须回到 controller 的 repair/upgrade 流程，runtime evidence 层不得猜造或回填控制面事实。
 
+### 5.4 Drifted predecessor 的升级
+
+successor plan 不得把“将被新版本替换”当作忽略 active drift 的理由。若 active generation 已漂移，直接升级必须
+以 `predecessor_drift` 在 mutation 前失败；否则 successor quarantine 会把未审阅的漂移混同为正常 predecessor。
+
+标准流程是两阶段：
+
+1. 从 active immutable artifact 重建 desired old generation，把实际 drifted pre-state 放入独立、identity-bound
+   repair quarantine；
+2. repair status 回到 `FILESYSTEM_READY` 后，再针对新的 immutable candidate 编译 successor plan；
+3. successor 继续保留 repaired predecessor，repair quarantine 也不被隐式删除。
+
+本轮 Better Skills 从 12-member 旧 generation 升级到 13-member latest candidate 时真实走通该流程。它还暴露出一个
+重要不变式：受管 member 内容随 successor 合法变化时，指向该 member 根的 preserved symlink 目标摘要也会变化。
+只有在 symlink 其他 identity 字段完全一致、目标精确为当前已验证 member 根、INDEX/member/tree 均通过时，摘要
+变化才可视为 generation-derived；retarget、外部目标、member descendant 或 member drift 仍必须告警。
+
 ## 6. Runtime profile
 
 ### 6.1 Default profile
@@ -157,7 +183,7 @@ discover candidate
 | Collection | Codex | Claude | Cursor |
 |---|---|---|---|
 | ProdCraft | gateway `pc-prodcraft` | gateway `pc-prodcraft` | observe-only |
-| Better Skills | 12 个批准成员 | 12 个批准成员 | observe-only |
+| Better Skills | 13 个批准成员 | 13 个批准成员 | observe-only |
 | LoopOS | gateway `loopos` | gateway `loopos` | observe-only |
 | LangCraft | gateway `langcraft` | gateway `langcraft` | observe-only |
 
@@ -189,9 +215,10 @@ profile apply 只证明磁盘 deployment；运行中的 Agent 可能缓存旧 ca
 4. runtime profile 的 operation journal 是 append-only WAL，记录合法状态迁移与 digest chain；其
    `operation.json` 只是可校验的 current view。
 5. runtime profile undo 先写 `UNDOING` WAL；SIGKILL 后 recover 继续完成 undo，而不是误作 apply rollback。
-6. 现有 ProdCraft v1 与 managed-collection v2 controller 保持兼容 current-view 协议：lock 与 operation
+6. 现有 ProdCraft specialized controller 与 managed-collection controller 保持兼容 current-view 协议：lock 与 operation
    使用 native exclusive/no-follow，更新使用 identity/content CAS，并把释放或 stale lock 移入绑定身份的
-   audit；首版不声称它们已有逐状态 append-only WAL。
+   audit；managed collection 的每次 repair 另有 operation-bound attempt ledger，但同样不是逐状态 append-only WAL。
+   首版不声称 collection operation 或 repair 已具有 runtime profile WAL 的历史完整性。
 7. lock 释放/隔离使用 inode/device/manifest 绑定移动，不裸 `unlink`。
 8. 任一结果不确定时返回 `RECOVERY_REQUIRED`；不得重试为看似成功。
 9. 输出、evidence 与 share 文件必须拒绝 symlink/非普通文件，owner-private、原子写。
@@ -215,7 +242,9 @@ profile apply 只证明磁盘 deployment；运行中的 Agent 可能缓存旧 ca
 
 ## 9. Panorama v2
 
-Panorama v2 以 repository-qualified identity 对齐 scanner、controller、runtime profile 与 evidence，并输出：
+Panorama v2 使用当前证据可支持的最强 identity 对齐 scanner、controller、runtime profile 与 evidence：有
+repository/source/revision 证据时为 `source_qualified`；证据不足时显式降级为 `path_qualified` 或
+`ambiguous_name`。后两类只用于观察与分诊，绝不授予跨仓 cleanup/migration authority。Panorama 并输出：
 
 - `collector_status` 与 `completeness`；
 - per-variant catalog conformance；
@@ -258,6 +287,7 @@ controller record；不能修改或“补全”第三方 lock 来制造来源权
 |---|---|
 | 上游候选校验失败 | 不生成可应用计划 |
 | plan 后状态变化 | stale，零 mutation 或进入明确 recovery |
+| active member 已 drift 时请求升级 | successor plan fail closed；先独立 repair/quarantine，再重新规划 upgrade |
 | 同名外部实体 | preserve/block，等待 Owner 决策 |
 | apply 中断 | identity-bound rollback；不确定则 `RECOVERY_REQUIRED` |
 | undo 中断 | 从 `UNDOING` journal 恢复至 pre-state |
@@ -274,9 +304,11 @@ controller record；不能修改或“补全”第三方 lock 来制造来源权
 3. runtime evidence v2 exact schema、v1 compatibility、execution/decoding 分类与脱敏、control generation binding、config symlink、stale/future、foreign identity 测试通过。
 4. Panorama v2 的 partial/degraded、per-variant、runtime matrix、redaction 与 safe output 测试通过。
 5. 五个仓库 Skills 完成 frontmatter、description budget、引用文件与 installed-layout gates。
-6. 在真实 HOME 只生成并人工审核 exact plan hash 后 apply；fresh Codex/Claude/Cursor probe 不得复用旧会话。
+6. 在真实 HOME 只应用 CLI exact-hash confirmation 通过的 plan；promotion packet 还必须把 exact hash、operation、
+   reviewer、review time 与 decision 绑定。机器接受 hash 不自动证明 Owner 已人审该 hash。
 7. 全局重新扫描证明受管 collection 与 installed skills 无未解释 drift；任何 `UNVERIFIED`/`BLOCKED` 保留原样。
-8. 独立架构 Challenger 关闭全部 P0/P1，或将无法关闭项明确列为 Owner 接受的 limitation。
+8. Agent-separated 架构 Challenger 关闭全部 P0/P1，或将无法关闭项明确列为 Owner 接受的 limitation；只有
+   L3/L4 fresh-context、multi-model 或外部评审完成后才可使用 independent/external wording。
 
 ## 13. Consequences
 
@@ -294,14 +326,27 @@ controller record；不能修改或“补全”第三方 lock 来制造来源权
 - Cursor 仍是 observe-only。
 - ProdCraft v1 与 managed-collection v2 controller 已获得 native no-follow/exclusive 与 CAS 加固，但仍使用
   兼容 current-view operation 协议；逐状态 append-only WAL 首版只覆盖 runtime profile。
-- `collection list/status --fresh` 首版没有状态缓存，始终执行完整 current + recovery 观察；`--fresh` 是兼容且
-  面向未来 cache 的显式意图标记。真实 585 projections / 46 legacy 拓扑的暖缓存完整列表基准为 3.74 秒，
-  首次使用当前 helper source 的单集合检查为 5.82 秒。单次本机样本不等于 p95 保证；若规模或 p95 超出
-  可接受范围，应新增 bounded no-follow batch inspect，不能通过跳过 recovery evidence 换取速度。
+- `collection list/status --fresh` 首版没有状态缓存，始终执行完整 current + recovery 观察；本轮当前本机单次
+  `collection list --fresh` 样本为 1.19 秒。单次样本不是 p95/SLO 或跨机保证；若规模继续上升，应新增 bounded
+  no-follow batch inspect，不能通过跳过 recovery evidence 换取速度。
 - 事务安全依赖 macOS native helper 与 Node 24；其他平台保持 fail closed。
 - 外部 `npx skills` v3 receipt 能绑定 repository/path/tree 与安装时间，但没有 immutable revision；未经过
   skills-refiner candidate-resolution/controller 流程的 bootstrap 安装只能报告 `receipt_bound`，不能报告
   upstream-qualified。
+- 通用 `npx`/`npm` wrapper 与 adoption transaction 尚未实现；外部 installer 的 mutation 当前只能事后审计，
+  不具备 skills-refiner plan/undo/recover 保证。只有未来经显式接管的 generation 才能获得该保证。
+- receipt 中的 `installedAt` / `updatedAt` 是 installer-declared timestamp；当前只校验结构、时间格式与内容绑定，
+  不把它们表述为独立验证过的真实安装事件。
+- local origin-tracking containment 证明 candidate revision 属于已配置 remote-tracking refs；它不是本轮在线查询
+  上游、签名验证或远端实时状态证明。
+- collection controller 是 current-view + recovery evidence，不是 append-only WAL；整棵 active collection 与其
+  物理副本同时被删除时，fresh status 会 fail closed，但首版不会自动从上游重建。
+- active successor status 验证当前 active、predecessor 与 undo/recovery evidence；它不遍历所有历史 predecessor
+  的 repair quarantine。历史修复证据的 bounded audit 是后续增强项。
+- Panorama 详细 collection rows 保留 `management_attention`，但当前顶层 summary 尚未聚合该字段；运维分诊不能
+  只读取 summary。
+- Better Skills 当前保留 13 个 collision/projection 观察实体，证明默认 preserve，不证明 name-only runtime 能
+  在同名 divergent body 之间选中正确来源。
 
 ## 14. 非目标
 
@@ -310,3 +355,27 @@ controller record；不能修改或“补全”第三方 lock 来制造来源权
 - 不扫描整个 HOME 猜测所有 Skill。
 - 不把运行次数或“未观察到”当作质量/价值结论。
 - 不声称能抵抗已完全控制同一用户账户的恶意 evidence 伪造。
+
+## 15. 采纳记录
+
+2026-08-28，经实现、全局安装面复验、Better 最新 successor 实际升级、真实 Codex/Claude/Cursor probe 与
+L2 Agent-separated 对抗性评审，本 ADR 形成 promotion candidate。实现基线为 `0d2b853..e680b8d`；权威验收与
+残余限制记录在：
+
+- `docs/adversarial-product-pk/2026-08-28-runtime-aware-global-skills/`
+- `docs/verification/2026-08-28-runtime-aware-global-skills.md`
+- `docs/retrospectives/2026-08-28-runtime-aware-global-skills-management.md`
+
+当前状态为 **Owner decision required**：四个 collection active plan 与一个 runtime profile active plan 已通过 CLI
+exact-hash confirmation 并 committed，
+但现有 operation schema 没有持久化 hash-specific human review record。Owner 明确确认 promotion packet 的五个
+exact hash 后，状态可转为 **Accepted with limitations**；在此之前不得宣称 Gate 6 的人审部分通过。
+
+本次真实升级还验证了一个不能由静态评审替代的交错场景：Better active generation 先出现 member drift，上游 main
+同时前进到 13-member revision；系统先拒绝 direct successor，再 repair old generation，最后应用 reviewed latest
+candidate。升级后发现的 preserved-collision 代际摘要误报已在 `e680b8d` 修复，85/85 managed suite 与 live status
+共同关闭该 P1。
+
+无论 Owner 是否采纳，以下边界不改变：Codex/Claude 目前只到 `CATALOG_ONLY`，Cursor probe 为 `BLOCKED`；
+body、route、context pressure 均未被宿主证据证明；外部 `npx skills` v3 receipt 仍不含 immutable revision；
+cleanup review 没有具体清理授权；物理嵌套节省 context 仍未验证。
