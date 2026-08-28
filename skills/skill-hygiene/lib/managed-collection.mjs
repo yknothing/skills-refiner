@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
   mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync,
-  renameSync, rmSync, statSync, unlinkSync, writeFileSync,
+  renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -30,10 +30,20 @@ const OPERATION_STATES = Object.freeze({
   rollingBack: 'ROLLING_BACK', rolledBack: 'ROLLED_BACK', repairing: 'REPAIRING',
   restoring: 'RESTORING', restored: 'RESTORED', recoveryRequired: 'RECOVERY_REQUIRED',
 });
+const REPAIR_STATES = Object.freeze({
+  prepared: 'PREPARED', quarantined: 'QUARANTINED', published: 'PUBLISHED',
+  committed: 'COMMITTED', rolledBack: 'ROLLED_BACK', recoveryRequired: 'RECOVERY_REQUIRED',
+});
+const TERMINAL_REPAIR_STATES = new Set([REPAIR_STATES.committed, REPAIR_STATES.rolledBack]);
+const REPAIR_SCHEMA = 'skills-refiner.collection.repair-attempt.v1';
 export const MANAGED_APPLY_FAULT_PHASES = Object.freeze([
   'after_prepared', 'after_first_projection_quarantine', 'after_projection_quarantine',
   'after_first_legacy_quarantine', 'after_legacy_quarantine',
   'after_collection_publish', 'after_projection_publish', 'after_catalog_publish',
+]);
+export const MANAGED_REPAIR_FAULT_PHASES = Object.freeze([
+  'after_repair_prepared', 'after_repair_quarantine', 'before_repair_publish',
+  'after_repair_publish', 'before_repair_commit', 'after_repair_cleanup',
 ]);
 const IGNORED_COLLECTION_METADATA = new Set(['.DS_Store']);
 const CATALOG_SCHEMA = 'skills-refiner.collection-catalog.v1';
@@ -797,6 +807,225 @@ function writeOperation(paths, plan, state, { mutationOccurred = false, errorCod
     });
   }
   return record;
+}
+
+function repairAttemptPaths(paths, repairId) {
+  const root = join(paths.operationRoot, 'repairs', repairId);
+  return { root, record: join(root, 'repair.json') };
+}
+
+function canonicalTimestamp(value) {
+  return typeof value === 'string' && !Number.isNaN(Date.parse(value))
+    && new Date(value).toISOString() === value;
+}
+
+function validateRepairAttempt(record, plan, paths) {
+  const expectedKeys = [
+    'schema_version', 'repair_id', 'collection_id', 'operation_id', 'plan_hash',
+    'state', 'issues', 'artifact_digest', 'desired_tree_digest', 'desired_identity',
+    'stage_path', 'stage_identity', 'published_identity', 'pre_state',
+    'created_at', 'updated_at', 'mutation_occurred', 'error_code',
+  ].sort();
+  if (canonicalJson(Object.keys(record ?? {}).sort()) !== canonicalJson(expectedKeys)
+      || record.schema_version !== REPAIR_SCHEMA
+      || !/^repair-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(record.repair_id ?? '')
+      || record.collection_id !== plan.collection_id || record.operation_id !== paths.id
+      || record.plan_hash !== plan.plan_hash || !Object.values(REPAIR_STATES).includes(record.state)
+      || !Array.isArray(record.issues) || record.issues.length === 0
+      || record.issues.some((issue) => typeof issue !== 'string' || issue.length === 0)
+      || new Set(record.issues).size !== record.issues.length
+      || record.artifact_digest !== plan.source.tree_digest
+      || !/^sha256:[0-9a-f]{64}$/u.test(record.desired_tree_digest ?? '')
+      || !canonicalTimestamp(record.created_at) || !canonicalTimestamp(record.updated_at)
+      || typeof record.mutation_occurred !== 'boolean'
+      || (record.error_code !== null && (typeof record.error_code !== 'string' || record.error_code.length === 0))) {
+    fail('invalid_repair_attempt', `repair attempt is invalid for ${plan.collection_id}`, 'recovery_required');
+  }
+  const desiredIdentityKeys = ['entry_kind', 'security_metadata_hash'].sort();
+  if (canonicalJson(Object.keys(record.desired_identity ?? {}).sort()) !== canonicalJson(desiredIdentityKeys)
+      || record.desired_identity.entry_kind !== 'directory'
+      || !/^sha256:[0-9a-f]{64}$/u.test(record.desired_identity.security_metadata_hash ?? '')) {
+    fail('invalid_repair_attempt', 'repair desired identity is invalid', 'recovery_required');
+  }
+  const expectedStagePath = join(
+    plan.home, '.agents/.skills-refiner-repair', paths.id, record.repair_id, plan.collection_id,
+  );
+  if (record.stage_path !== expectedStagePath) {
+    fail('invalid_repair_attempt', 'repair stage path is not operation-bound', 'recovery_required');
+  }
+  const publishedIdentityKeys = [
+    'entry_kind', 'device', 'inode', 'manifest_hash', 'security_metadata_hash',
+  ].sort();
+  if (canonicalJson(Object.keys(record.stage_identity ?? {}).sort()) !== canonicalJson(publishedIdentityKeys)
+      || record.stage_identity.entry_kind !== 'directory'
+      || !/^\d+$/u.test(record.stage_identity.device ?? '')
+      || !/^\d+$/u.test(record.stage_identity.inode ?? '')
+      || !/^sha256:[0-9a-f]{64}$/u.test(record.stage_identity.manifest_hash ?? '')
+      || !/^sha256:[0-9a-f]{64}$/u.test(record.stage_identity.security_metadata_hash ?? '')) {
+    fail('invalid_repair_attempt', 'repair stage identity is invalid', 'recovery_required');
+  }
+  if (record.published_identity !== null
+      && (canonicalJson(Object.keys(record.published_identity ?? {}).sort()) !== canonicalJson(publishedIdentityKeys)
+        || record.published_identity.entry_kind !== 'directory'
+        || !/^\d+$/u.test(record.published_identity.device ?? '')
+        || !/^\d+$/u.test(record.published_identity.inode ?? '')
+        || !/^sha256:[0-9a-f]{64}$/u.test(record.published_identity.manifest_hash ?? '')
+        || !/^sha256:[0-9a-f]{64}$/u.test(record.published_identity.security_metadata_hash ?? ''))) {
+    fail('invalid_repair_attempt', 'repair published identity is invalid', 'recovery_required');
+  }
+  if ([REPAIR_STATES.published, REPAIR_STATES.committed].includes(record.state)
+      && record.published_identity === null) {
+    fail('invalid_repair_attempt', 'published repair state requires native identity', 'recovery_required');
+  }
+  const preStateKeys = [
+    'present', 'entry_kind', 'device', 'inode', 'manifest_hash',
+    'security_metadata_hash', 'quarantine_path',
+  ].sort();
+  const pre = record.pre_state;
+  if (canonicalJson(Object.keys(pre ?? {}).sort()) !== canonicalJson(preStateKeys)
+      || typeof pre.present !== 'boolean') {
+    fail('invalid_repair_attempt', 'repair pre-state envelope is invalid', 'recovery_required');
+  }
+  const expectedQuarantine = join(
+    paths.quarantineOperationRoot, 'repairs', record.repair_id, 'pre-state', plan.collection_id,
+  );
+  if (pre.present) {
+    if (!['directory', 'file', 'symlink', 'other'].includes(pre.entry_kind)
+        || !/^\d+$/u.test(pre.device ?? '') || !/^\d+$/u.test(pre.inode ?? '')
+        || !/^sha256:[0-9a-f]{64}$/u.test(pre.manifest_hash ?? '')
+        || !/^sha256:[0-9a-f]{64}$/u.test(pre.security_metadata_hash ?? '')
+        || pre.quarantine_path !== expectedQuarantine) {
+      fail('invalid_repair_attempt', 'repair pre-state identity is invalid', 'recovery_required');
+    }
+  } else if ([
+    pre.entry_kind, pre.device, pre.inode, pre.manifest_hash,
+    pre.security_metadata_hash, pre.quarantine_path,
+  ].some((value) => value !== null)) {
+    fail('invalid_repair_attempt', 'missing repair pre-state must not claim identity', 'recovery_required');
+  }
+  return record;
+}
+
+function createRepairAttempt(plan, paths, {
+  repairId, issues, desiredTreeDigest, desiredIdentity, stagePath, stageIdentity, preState,
+}) {
+  const attemptPaths = repairAttemptPaths(paths, repairId);
+  assertSafeManagedPath(plan.home, attemptPaths.record);
+  if (lstatExists(attemptPaths.root)) fail('repair_attempt_conflict', `repair attempt exists: ${attemptPaths.root}`);
+  mkdirSync(dirname(attemptPaths.root), { recursive: true, mode: 0o700 });
+  mkdirSync(attemptPaths.root, { recursive: false, mode: 0o700 });
+  const now = new Date().toISOString();
+  const quarantinePath = preState === null ? null : join(
+    paths.quarantineOperationRoot, 'repairs', repairId, 'pre-state', plan.collection_id,
+  );
+  const record = validateRepairAttempt({
+    schema_version: REPAIR_SCHEMA, repair_id: repairId, collection_id: plan.collection_id,
+    operation_id: paths.id, plan_hash: plan.plan_hash, state: REPAIR_STATES.prepared,
+    issues: [...new Set(issues)].sort(), artifact_digest: plan.source.tree_digest,
+    desired_tree_digest: desiredTreeDigest,
+    desired_identity: {
+      entry_kind: desiredIdentity.entry_kind,
+      security_metadata_hash: desiredIdentity.security_metadata_hash,
+    },
+    stage_path: stagePath,
+    stage_identity: {
+      entry_kind: stageIdentity.entry_kind, device: stageIdentity.device,
+      inode: stageIdentity.inode, manifest_hash: stageIdentity.manifest_hash,
+      security_metadata_hash: stageIdentity.security_metadata_hash,
+    },
+    published_identity: null,
+    pre_state: preState === null ? {
+      present: false, entry_kind: null, device: null, inode: null, manifest_hash: null,
+      security_metadata_hash: null, quarantine_path: null,
+    } : {
+      present: true, entry_kind: preState.entry_kind, device: preState.device,
+      inode: preState.inode, manifest_hash: preState.manifest_hash,
+      security_metadata_hash: preState.security_metadata_hash, quarantine_path: quarantinePath,
+    },
+    created_at: now, updated_at: now, mutation_occurred: false, error_code: null,
+  }, plan, paths);
+  const bytes = jsonBytes(record);
+  try {
+    createCollectionFileExclusive({
+      home: plan.home, path: attemptPaths.record, targetDigest: sha256(bytes), bytes,
+    });
+  } catch (error) {
+    if (lstatExists(attemptPaths.root)) rmSync(attemptPaths.root, { recursive: true, force: true });
+    throw error;
+  }
+  return record;
+}
+
+function updateRepairAttempt(plan, paths, attempt, state, {
+  mutationOccurred = attempt.mutation_occurred, errorCode = null,
+  publishedIdentity = attempt.published_identity,
+} = {}) {
+  const attemptPaths = repairAttemptPaths(paths, attempt.repair_id);
+  const current = readPrivateJson(plan.home, attemptPaths.record, 'invalid_repair_attempt');
+  validateRepairAttempt(current.value, plan, paths);
+  if (canonicalJson(current.value) !== canonicalJson(attempt)) {
+    fail('repair_attempt_changed', 'repair attempt changed during reconciliation', 'recovery_required');
+  }
+  const next = validateRepairAttempt({
+    ...attempt, state,
+    published_identity: publishedIdentity === null ? null : {
+      entry_kind: publishedIdentity.entry_kind, device: publishedIdentity.device,
+      inode: publishedIdentity.inode, manifest_hash: publishedIdentity.manifest_hash,
+      security_metadata_hash: publishedIdentity.security_metadata_hash,
+    },
+    updated_at: new Date().toISOString(),
+    mutation_occurred: mutationOccurred, error_code: errorCode,
+  }, plan, paths);
+  const bytes = jsonBytes(next);
+  replaceCollectionFileCas({
+    home: plan.home, path: attemptPaths.record, expectedDigest: current.digest,
+    targetDigest: sha256(bytes), bytes,
+  });
+  return next;
+}
+
+function inspectRepairLedger(plan, paths) {
+  const root = join(paths.operationRoot, 'repairs');
+  const pending = [];
+  const issues = [];
+  const records = [];
+  const knownRepairIds = new Set();
+  if (lstatExists(root)) {
+    for (const entry of readdirSync(root, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name, 'en'))) {
+      if (!entry.isDirectory() || !entry.name.startsWith('repair-')) {
+        fail('invalid_repair_attempt', `unexpected repair ledger entry: ${entry.name}`, 'recovery_required');
+      }
+      const record = readPrivateJson(plan.home, repairAttemptPaths(paths, entry.name).record, 'invalid_repair_attempt').value;
+      validateRepairAttempt(record, plan, paths);
+      if (record.repair_id !== entry.name) {
+        fail('invalid_repair_attempt', `repair ledger directory does not match ${record.repair_id}`, 'recovery_required');
+      }
+      knownRepairIds.add(record.repair_id);
+      records.push(record);
+      if (record.state === REPAIR_STATES.committed && record.pre_state.present
+          && !repairIdentityMatches(plan.home, record.pre_state.quarantine_path, record.pre_state)) {
+        issues.push(`REPAIR_QUARANTINE_MISSING_OR_DRIFT:${record.repair_id}`);
+      }
+      if (TERMINAL_REPAIR_STATES.has(record.state)
+          && (lstatExists(record.stage_path) || lstatExists(dirname(record.stage_path)))) {
+        issues.push(`REPAIR_STAGE_RESIDUE:${record.repair_id}`);
+      }
+      if (!TERMINAL_REPAIR_STATES.has(record.state)) pending.push(record);
+    }
+  }
+  const stageRoot = join(plan.home, '.agents/.skills-refiner-repair', paths.id);
+  if (lstatExists(stageRoot)) {
+    for (const entry of readdirSync(stageRoot, { withFileTypes: true })) {
+      if (/^repair-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(entry.name)
+          && !knownRepairIds.has(entry.name)) issues.push(`ORPHAN_REPAIR_STAGE:${entry.name}`);
+    }
+  }
+  if (pending.length > 1) fail('ambiguous_repairs', `multiple pending repairs exist for ${plan.collection_id}`, 'recovery_required');
+  return { pending: pending[0] ?? null, issues, records };
+}
+
+function pendingRepairAttempt(plan, paths) {
+  return inspectRepairLedger(plan, paths).pending;
 }
 
 function acquireLock(paths, plan) {
@@ -1576,6 +1805,12 @@ export function statusManagedCollection({ collectionId, home }) {
     first_activated_at: catalog.value?.lifecycle?.first_activated_at ?? null,
     current_generation_activated_at: catalog.value?.lifecycle?.current_generation_activated_at ?? null,
   };
+  const repairLedger = inspectRepairLedger(plan, operationPaths(plan));
+  result.issues.push(...repairLedger.issues);
+  if (repairLedger.pending !== null) {
+    result.issues.push(`REPAIR_ATTEMPT_PENDING:${repairLedger.pending.repair_id}:${repairLedger.pending.state}`);
+    result.status = 'RECOVERY_REQUIRED';
+  }
   if (result.issues.length > 0 && result.status === 'FILESYSTEM_READY') result.status = 'DRIFTED';
   if (result.issues.some((issue) => issue.startsWith('OPERATION_NOT_COMMITTED:'))) result.status = 'RECOVERY_REQUIRED';
   return result;
@@ -1628,53 +1863,407 @@ export function recoverManagedOperation({ home, operationId: requestedId, confir
   const plan = loadOperation(home, requestedId);
   const paths = operationPaths(plan);
   if (confirmation !== paths.id) fail('confirmation_mismatch', 'recover confirmation must equal operation id');
-  const existingOperation = readPrivateJson(home, paths.operationPath, 'invalid_operation').value;
-  validateManagedOperation(existingOperation);
-  if (existingOperation.state === OPERATION_STATES.rolledBack) {
-    const current = statusManagedCollection({ collectionId: plan.collection_id, home });
-    const exact = plan.predecessor === null
-      ? current.status === 'UNMANAGED'
-      : current.status === 'FILESYSTEM_READY' && current.operation_id === plan.predecessor.operation_id;
-    if (!exact) fail('recover_retry_conflict', 'rolled-back operation no longer matches its restored pre-state', 'recovery_required');
-    return { schema_version: 'skills-refiner.collection.recover.v2', collection_id: plan.collection_id, status: 'RESTORED_PRESTATE', operation_id: paths.id, mutation_occurred: false, recreated_from_independent_recovery: false };
+  const pendingRepair = pendingRepairAttempt(plan, paths);
+  if (pendingRepair !== null) {
+    fail(
+      'pending_repair_requires_repair',
+      `operation ${paths.id} has pending ${pendingRepair.repair_id}; rerun collection repair ${plan.collection_id}`,
+      'recovery_required',
+    );
   }
   isolateStaleLock(plan, paths);
   const lock = acquireLock(paths, plan);
+  let rollbackStarted = false;
   try {
+    const existingOperation = readPrivateJson(home, paths.operationPath, 'invalid_operation').value;
+    validateManagedOperation(existingOperation);
+    const lockedPendingRepair = pendingRepairAttempt(plan, paths);
+    if (lockedPendingRepair !== null) {
+      fail(
+        'pending_repair_requires_repair',
+        `operation ${paths.id} has pending ${lockedPendingRepair.repair_id}; rerun collection repair ${plan.collection_id}`,
+        'recovery_required',
+      );
+    }
+    if ([OPERATION_STATES.rolledBack, OPERATION_STATES.restored].includes(existingOperation.state)) {
+      const current = statusManagedCollection({ collectionId: plan.collection_id, home });
+      const exact = plan.predecessor === null
+        ? current.status === 'UNMANAGED'
+        : current.status === 'FILESYSTEM_READY' && current.operation_id === plan.predecessor.operation_id;
+      if (!exact) fail('recover_retry_conflict', 'terminal operation no longer matches its restored pre-state', 'recovery_required');
+      return { schema_version: 'skills-refiner.collection.recover.v2', collection_id: plan.collection_id, status: 'RESTORED_PRESTATE', operation_id: paths.id, mutation_occurred: false, recreated_from_independent_recovery: false };
+    }
+    if (existingOperation.state === OPERATION_STATES.committed) {
+      const active = loadPlanFromControl(home, plan.collection_id);
+      if (active === null || active.plan_hash !== plan.plan_hash || operationId(active) !== paths.id) {
+        fail('foreign_or_superseded_operation', 'recover refuses a committed generation that is not active');
+      }
+      const current = statusManagedCollection({ collectionId: plan.collection_id, home });
+      if (current.status !== 'FILESYSTEM_READY' || current.operation_id !== paths.id) {
+        fail('committed_operation_drift', `recover refuses drifted committed state: ${current.issues.join(', ')}`);
+      }
+      return { schema_version: 'skills-refiner.collection.recover.v2', collection_id: plan.collection_id, status: 'FILESYSTEM_READY', operation_id: paths.id, mutation_occurred: false, recreated_from_independent_recovery: false };
+    }
+    if (existingOperation.state === OPERATION_STATES.repairing) {
+      fail('legacy_repair_requires_review', 'legacy REPAIRING state cannot use installation recovery', 'recovery_required');
+    }
+    rollbackStarted = true;
     const result = rollback(plan, paths);
     if (lstatExists(paths.stageRoot)) rmSync(paths.stageRoot, { recursive: true, force: true });
     return { schema_version: 'skills-refiner.collection.recover.v2', collection_id: plan.collection_id, status: 'RESTORED_PRESTATE', operation_id: paths.id, mutation_occurred: true, recreated_from_independent_recovery: result.recreated };
   } catch (error) {
-    try { writeOperation(paths, plan, OPERATION_STATES.recoveryRequired, { mutationOccurred: true, errorCode: error.code ?? 'recover_failed' }); } catch {}
+    if (rollbackStarted) {
+      try { writeOperation(paths, plan, OPERATION_STATES.recoveryRequired, { mutationOccurred: true, errorCode: error.code ?? 'recover_failed' }); } catch {}
+    }
     throw error;
   } finally { releaseLock(paths, lock); }
 }
 
-export function repairManagedCollection({ collectionId, home, confirmation }) {
+function repairStatusAgainstPlan(plan, paths, { ownedRepairStageId = null } = {}) {
+  const catalog = catalogEntry(plan.home, plan.collection_id);
+  const result = statusAgainstPlan(plan, paths, { orphanedCatalog: catalog.value === null });
+  if (catalog.value !== null) result.issues.push(...catalogIdentityIssues(plan.home, plan, paths, catalog.catalog));
+  result.issues.push(...inspectRepairLedger(plan, paths).issues.filter(
+    (issue) => issue !== `ORPHAN_REPAIR_STAGE:${ownedRepairStageId}`,
+  ));
+  if (result.issues.length > 0 && result.status === 'FILESYSTEM_READY') result.status = 'DRIFTED';
+  return result;
+}
+
+function deployedCollectionRepairIssue(issue) {
+  return [
+    'COLLECTION_ROOT_MISSING', 'COLLECTION_ROOT_NOT_REAL_DIRECTORY', 'COLLECTION_ROOT_MODE_DRIFT',
+    'COLLECTION_ROOT_HAS_SKILL_MD', 'INDEX_MISSING_OR_INVALID', 'INDEX_IDENTITY_DRIFT',
+    'LOCATOR_MISSING_OR_INVALID', 'LOCATOR_DRIFT',
+  ].includes(issue)
+    || issue.startsWith('MISSING_COLLECTION_ENTRY:')
+    || issue.startsWith('UNEXPECTED_COLLECTION_ENTRY:') || issue.startsWith('MEMBER_INVALID:')
+    || issue.startsWith('MEMBER_DRIFT:') || issue.startsWith('MEMBER_ROOT_MODE_DRIFT:')
+    || issue.startsWith('RESOURCE_MISSING_OR_INVALID:') || issue.startsWith('RESOURCE_DRIFT:')
+    || issue.startsWith('RESOURCE_ROOT_MODE_DRIFT:');
+}
+
+function assessRepairStatus(status) {
+  const replaceCollection = status.issues.some(deployedCollectionRepairIssue);
+  const allowed = status.issues.every((issue) => issue.startsWith('MISSING_COLLECTION_ENTRY:')
+    || issue.startsWith('AGENT_EXPOSURE_DRIFT:') || issue === 'GLOBAL_EXPOSURE_DRIFT'
+    || issue.startsWith('REPAIR_STAGE_RESIDUE:')
+    || ['ORPHANED_CATALOG', 'CATALOG_VIEW_MISSING', 'CATALOG_VIEW_DRIFT', 'CATALOG_VIEW_INVALID'].includes(issue)
+    || (replaceCollection && deployedCollectionRepairIssue(issue)));
+  return {
+    replaceCollection, allowed,
+    missingEntries: status.issues.filter((issue) => issue.startsWith('MISSING_COLLECTION_ENTRY:')),
+  };
+}
+
+function assertTrustedRepairArtifact(plan, paths) {
+  try {
+    const stat = lstatSync(paths.artifactRepo);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || (stat.mode & 0o500) !== 0o500
+        || (stat.mode & 0o022) !== 0 || realpathSync(paths.artifactRepo) !== paths.artifactRepo
+        || lstatExists(join(paths.artifactRepo, '.git'))
+        || treeDigest(paths.artifactRepo) !== plan.source.tree_digest) {
+      fail('repair_artifact_untrusted', 'repair artifact identity is not exact', 'recovery_required');
+    }
+  } catch (error) {
+    if (error instanceof ManagedCollectionError) throw error;
+    fail('repair_artifact_untrusted', `cannot verify repair artifact: ${error.message}`, 'recovery_required');
+  }
+}
+
+function repairIdentityMatches(home, path, expected) {
+  if (!lstatExists(path)) return false;
+  try {
+    const observed = inspectCollectionEntry({ home, path });
+    return observed.entry_kind === expected.entry_kind && observed.device === expected.device
+      && observed.inode === expected.inode && observed.manifest_hash === expected.manifest_hash
+      && observed.security_metadata_hash === expected.security_metadata_hash;
+  } catch { return false; }
+}
+
+function desiredCollectionIdentity(plan, attempt) {
+  try {
+    const stat = lstatSync(plan.target.collection_root);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || (stat.mode & 0o777) !== 0o755
+        || deployedTreeDigest(plan.target.collection_root) !== attempt.desired_tree_digest) return null;
+    const identity = inspectCollectionEntry({ home: plan.home, path: plan.target.collection_root });
+    if (identity.entry_kind !== attempt.desired_identity.entry_kind
+        || identity.security_metadata_hash !== attempt.desired_identity.security_metadata_hash) return null;
+    const expectedNative = attempt.published_identity ?? attempt.stage_identity;
+    if (identity.device !== expectedNative.device || identity.inode !== expectedNative.inode
+        || identity.manifest_hash !== expectedNative.manifest_hash
+        || identity.security_metadata_hash !== expectedNative.security_metadata_hash) return null;
+    return identity;
+  } catch { return null; }
+}
+
+function moveRepairEntryExact(plan, source, destination, identity) {
+  moveCollectionEntryExclusive({
+    home: plan.home, source, destination, expectedManifest: identity.manifest_hash,
+    expectedDevice: identity.device, expectedInode: identity.inode,
+  });
+}
+
+function stableRepairStageIdentity(plan, stageCollection, attempt) {
+  const before = inspectCollectionEntry({ home: plan.home, path: stageCollection });
+  const tree = deployedTreeDigest(stageCollection);
+  const after = inspectCollectionEntry({ home: plan.home, path: stageCollection });
+  if (tree !== attempt.desired_tree_digest
+      || before.entry_kind !== attempt.desired_identity.entry_kind
+      || before.security_metadata_hash !== attempt.desired_identity.security_metadata_hash
+      || before.device !== attempt.stage_identity.device || before.inode !== attempt.stage_identity.inode
+      || before.manifest_hash !== attempt.stage_identity.manifest_hash
+      || before.security_metadata_hash !== attempt.stage_identity.security_metadata_hash
+      || after.entry_kind !== before.entry_kind || after.device !== before.device
+      || after.inode !== before.inode || after.manifest_hash !== before.manifest_hash
+      || after.security_metadata_hash !== before.security_metadata_hash) {
+    fail('repair_stage_drift', 'repair stage changed before native publication', 'recovery_required');
+  }
+  return after;
+}
+
+function cleanupRepairInvocation({
+  plan, attempt, invocationRoot, stageCollection, stageOwned, finalize = false,
+}) {
+  if (invocationRoot === null) return;
+  if (attempt === null) {
+    if (stageOwned && lstatExists(invocationRoot)) rmSync(invocationRoot, { recursive: true, force: true });
+    return;
+  }
+  if (!TERMINAL_REPAIR_STATES.has(attempt.state) && !finalize) return;
+  if (lstatExists(stageCollection)) {
+    if (!repairIdentityMatches(plan.home, stageCollection, attempt.stage_identity)) return;
+    rmSync(stageCollection, { recursive: true, force: true });
+  }
+  try { rmdirSync(invocationRoot); } catch (error) {
+    if (!['ENOENT', 'ENOTEMPTY'].includes(error.code)) throw error;
+  }
+}
+
+function cleanupTerminalRepairResidues(plan, paths) {
+  const cleaned = [];
+  for (const record of inspectRepairLedger(plan, paths).records) {
+    if (!TERMINAL_REPAIR_STATES.has(record.state)
+        || (!lstatExists(record.stage_path) && !lstatExists(dirname(record.stage_path)))) continue;
+    cleanupRepairInvocation({
+      plan, attempt: record, invocationRoot: dirname(record.stage_path),
+      stageCollection: record.stage_path, stageOwned: false,
+    });
+    if (lstatExists(record.stage_path) || lstatExists(dirname(record.stage_path))) {
+      fail('repair_stage_residue_conflict', `repair stage residue is not exact: ${record.repair_id}`, 'recovery_required');
+    }
+    cleaned.push(record.repair_id);
+  }
+  return cleaned;
+}
+
+function reconcileCollectionReplacement({ plan, paths, attempt, stageCollection, faultPhase, killPhase }) {
+  const pre = attempt.pre_state;
+  const quarantine = pre.quarantine_path;
+  let targetIdentity = desiredCollectionIdentity(plan, attempt);
+  let targetDesired = targetIdentity !== null;
+  let quarantineExact = pre.present && repairIdentityMatches(plan.home, quarantine, pre);
+
+  if (targetDesired) {
+    if (pre.present && !quarantineExact) {
+      fail('repair_prestate_missing', 'desired collection is active but the bound pre-state is not quarantined', 'recovery_required');
+    }
+    if (attempt.state !== REPAIR_STATES.published) {
+      attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.published, {
+        mutationOccurred: true, publishedIdentity: targetIdentity,
+      });
+    }
+    return attempt;
+  }
+
+  stableRepairStageIdentity(plan, stageCollection, attempt);
+
+  if (attempt.state === REPAIR_STATES.published) {
+    fail('repair_poststate_drift', 'published repair collection changed before commit', 'recovery_required');
+  }
+
+  if (pre.present) {
+    const targetExact = repairIdentityMatches(plan.home, plan.target.collection_root, pre);
+    if (quarantineExact) {
+      if (lstatExists(plan.target.collection_root)) {
+        fail('repair_destination_conflict', 'repair target appeared after pre-state quarantine', 'recovery_required');
+      }
+    } else {
+      if (!targetExact) {
+        fail('repair_prestate_changed', 'active collection changed after repair observation', 'recovery_required');
+      }
+      try {
+        moveRepairEntryExact(plan, plan.target.collection_root, quarantine, pre);
+      } catch (error) {
+        quarantineExact = repairIdentityMatches(plan.home, quarantine, pre);
+        if (!quarantineExact || lstatExists(plan.target.collection_root)) throw error;
+      }
+      attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.quarantined, { mutationOccurred: true });
+      injectFault('after_repair_quarantine', faultPhase, killPhase);
+    }
+  } else {
+    if (lstatExists(plan.target.collection_root)) {
+      fail('repair_destination_conflict', 'repair target appeared after missing pre-state observation', 'recovery_required');
+    }
+    if (attempt.state !== REPAIR_STATES.quarantined) {
+      attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.quarantined);
+      injectFault('after_repair_quarantine', faultPhase, killPhase);
+    }
+  }
+
+  assertTrustedRepairArtifact(plan, paths);
+  const stagedIdentity = stableRepairStageIdentity(plan, stageCollection, attempt);
+  try {
+    injectFault('before_repair_publish', faultPhase, killPhase);
+    moveRepairEntryExact(plan, stageCollection, plan.target.collection_root, stagedIdentity);
+  } catch (error) {
+    targetIdentity = desiredCollectionIdentity(plan, attempt);
+    targetDesired = targetIdentity !== null;
+    if (!targetDesired) {
+      if (pre.present && !lstatExists(plan.target.collection_root)
+          && repairIdentityMatches(plan.home, quarantine, pre)) {
+        try {
+          moveRepairEntryExact(plan, quarantine, plan.target.collection_root, pre);
+          attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.rolledBack, {
+            mutationOccurred: true, errorCode: error.code ?? 'repair_publish_failed',
+          });
+        } catch (restoreError) {
+          try {
+            attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.recoveryRequired, {
+              mutationOccurred: true, errorCode: restoreError.code ?? 'repair_compensation_failed',
+            });
+          } catch {}
+          throw restoreError;
+        }
+      } else {
+        try {
+          attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.recoveryRequired, {
+            mutationOccurred: true, errorCode: error.code ?? 'repair_publish_failed',
+          });
+        } catch {}
+      }
+      throw error;
+    }
+  }
+  const publishedIdentity = inspectCollectionEntry({ home: plan.home, path: plan.target.collection_root });
+  if (publishedIdentity.device !== stagedIdentity.device || publishedIdentity.inode !== stagedIdentity.inode
+      || publishedIdentity.manifest_hash !== stagedIdentity.manifest_hash
+      || publishedIdentity.security_metadata_hash !== stagedIdentity.security_metadata_hash) {
+    fail('repair_publish_identity_changed', 'published collection is not the staged native object', 'recovery_required');
+  }
+  attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.published, {
+    mutationOccurred: true, publishedIdentity,
+  });
+  injectFault('after_repair_publish', faultPhase, killPhase);
+  return attempt;
+}
+
+export function repairManagedCollection({
+  collectionId, home, confirmation, faultPhase = null, killPhase = null,
+}) {
   const plan = loadPlanFromControl(home, collectionId);
   if (plan === null) fail('no_active_generation', `no active ${collectionId} generation exists`);
   const paths = operationPaths(plan);
   if (confirmation !== paths.id) fail('confirmation_mismatch', 'repair confirmation must equal operation id');
-  const before = statusManagedCollection({ collectionId, home });
-  if (before.status === 'FILESYSTEM_READY') return { schema_version: 'skills-refiner.collection.repair.v2', collection_id: collectionId, status: 'FILESYSTEM_READY', operation_id: paths.id, mutation_occurred: false, repaired: [] };
-  const missingResource = before.issues.some((issue) => issue.startsWith('RESOURCE_MISSING_OR_INVALID:'));
-  const replaceCollection = before.issues.includes('COLLECTION_ROOT_MISSING')
-    || before.issues.includes('INDEX_MISSING_OR_INVALID') || before.issues.includes('LOCATOR_MISSING_OR_INVALID')
-    || before.issues.includes('COLLECTION_ROOT_MODE_DRIFT')
-    || before.issues.some((issue) => issue.startsWith('MEMBER_ROOT_MODE_DRIFT:')
-      || issue.startsWith('RESOURCE_ROOT_MODE_DRIFT:'))
-    || missingResource;
-  const allowed = before.issues.every((issue) => issue.startsWith('MISSING_COLLECTION_ENTRY:')
-    || issue.startsWith('AGENT_EXPOSURE_DRIFT:') || issue === 'GLOBAL_EXPOSURE_DRIFT'
-    || ['ORPHANED_CATALOG', 'CATALOG_VIEW_MISSING', 'CATALOG_VIEW_DRIFT', 'CATALOG_VIEW_INVALID'].includes(issue)
-    || (replaceCollection && (['COLLECTION_ROOT_MISSING', 'COLLECTION_ROOT_MODE_DRIFT', 'INDEX_MISSING_OR_INVALID', 'INDEX_IDENTITY_DRIFT', 'LOCATOR_MISSING_OR_INVALID', 'LOCATOR_DRIFT'].includes(issue)
-      || issue.startsWith('RESOURCE_MISSING_OR_INVALID:') || issue.startsWith('MEMBER_ROOT_MODE_DRIFT:')
-      || issue.startsWith('RESOURCE_ROOT_MODE_DRIFT:'))));
-  if (!allowed) fail('repair_conflict', `repair refuses non-missing drift: ${before.issues.join(', ')}`);
+  isolateStaleLock(plan, paths);
   const lock = acquireLock(paths, plan);
-  const repairRoot = join(plan.home, '.agents/.skills-refiner-repair', paths.id);
+  let invocationRoot = null;
+  let stageCollection = null;
+  let stageOwned = false;
+  let attempt = null;
   const repaired = [];
   try {
+    const active = loadPlanFromControl(home, collectionId);
+    if (active === null || active.plan_hash !== plan.plan_hash || operationId(active) !== paths.id) {
+      fail('active_generation_changed', 'active generation changed before repair', 'recovery_required');
+    }
+    attempt = pendingRepairAttempt(plan, paths);
+    let before = repairStatusAgainstPlan(plan, paths);
+    let assessment = assessRepairStatus(before);
+    if (attempt === null && before.status === 'FILESYSTEM_READY') {
+      return {
+        schema_version: 'skills-refiner.collection.repair.v3', collection_id: collectionId,
+        status: 'FILESYSTEM_READY', operation_id: paths.id, mutation_occurred: false,
+        repaired: [], repair_id: null, quarantined_pre_state: null,
+        pre_state_manifest: null, post_state_manifest: null,
+        artifact_digest: plan.source.tree_digest,
+      };
+    }
+    if (!assessment.allowed) fail('repair_conflict', `repair refuses untrusted drift: ${before.issues.join(', ')}`);
+    assertTrustedRepairArtifact(plan, paths);
+    if (before.issues.some((issue) => issue.startsWith('REPAIR_STAGE_RESIDUE:'))) {
+      for (const repairId of cleanupTerminalRepairResidues(plan, paths)) repaired.push(`repair_stage:${repairId}`);
+      before = repairStatusAgainstPlan(plan, paths);
+      assessment = assessRepairStatus(before);
+      if (!assessment.allowed) fail('repair_conflict', `repair stage cleanup exposed untrusted drift: ${before.issues.join(', ')}`);
+    }
+
+    const needsStage = assessment.replaceCollection || assessment.missingEntries.length > 0;
+    let repairId = null;
+    if (attempt !== null) {
+      stageCollection = attempt.stage_path;
+      invocationRoot = dirname(stageCollection);
+    } else if (needsStage) {
+      repairId = assessment.replaceCollection ? `repair-${randomUUID()}` : null;
+      invocationRoot = join(
+        plan.home, '.agents/.skills-refiner-repair', paths.id,
+        repairId ?? `invocation-${randomUUID()}`,
+      );
+      stageCollection = join(invocationRoot, plan.collection_id);
+      assertSafeManagedPath(plan.home, stageCollection);
+      if (lstatExists(invocationRoot)) fail('repair_stage_conflict', `repair invocation exists: ${invocationRoot}`);
+      mkdirSync(invocationRoot, { recursive: true, mode: 0o700 });
+      stageOwned = true;
+      materializeCollection(plan, paths, stageCollection);
+      assertTrustedRepairArtifact(plan, paths);
+    }
+
+    if (attempt === null && assessment.replaceCollection) {
+      before = repairStatusAgainstPlan(plan, paths, { ownedRepairStageId: repairId });
+      assessment = assessRepairStatus(before);
+      if (!assessment.allowed || !assessment.replaceCollection) {
+        if (before.status === 'FILESYSTEM_READY') {
+          return {
+            schema_version: 'skills-refiner.collection.repair.v3', collection_id: collectionId,
+            status: 'FILESYSTEM_READY', operation_id: paths.id, mutation_occurred: false,
+            repaired: [], repair_id: null, quarantined_pre_state: null,
+            pre_state_manifest: null, post_state_manifest: null,
+            artifact_digest: plan.source.tree_digest,
+          };
+        }
+        fail('repair_precondition_changed', `repair state changed during staging: ${before.issues.join(', ')}`, 'recovery_required');
+      }
+      const preState = lstatExists(plan.target.collection_root)
+        ? inspectCollectionEntry({ home: plan.home, path: plan.target.collection_root }) : null;
+      const desiredIdentity = inspectCollectionEntry({ home: plan.home, path: stageCollection });
+      attempt = createRepairAttempt(plan, paths, {
+        repairId,
+        issues: before.issues, desiredTreeDigest: deployedTreeDigest(stageCollection),
+        desiredIdentity, stagePath: stageCollection, stageIdentity: desiredIdentity, preState,
+      });
+      injectFault('after_repair_prepared', faultPhase, killPhase);
+    }
+
+    if (attempt !== null) {
+      attempt = reconcileCollectionReplacement({
+        plan, paths, attempt, stageCollection, faultPhase, killPhase,
+      });
+      repaired.push('collection');
+    } else {
+      for (const issue of assessment.missingEntries) {
+        const name = issue.split(':')[1];
+        const destination = join(plan.target.collection_root, name);
+        if (lstatExists(destination)) fail('repair_conflict', `repair destination appeared: ${destination}`);
+        const staged = join(stageCollection, name);
+        const identity = inspectCollectionEntry({ home: plan.home, path: staged });
+        moveRepairEntryExact(plan, staged, destination, identity);
+        repaired.push(name);
+      }
+    }
+
+    before = repairStatusAgainstPlan(plan, paths);
+    assessment = assessRepairStatus(before);
+    if (!assessment.allowed) fail('repair_conflict', `repair post-publish state is untrusted: ${before.issues.join(', ')}`);
     if (before.issues.includes('ORPHANED_CATALOG')) {
       rebuildCatalogFromControls(home);
       repaired.push('catalog');
@@ -1682,20 +2271,6 @@ export function repairManagedCollection({ collectionId, home, confirmation }) {
       const catalog = loadCatalog(plan.home, paths.catalogPath);
       durableJson(paths.catalogViewPath, catalog);
       repaired.push('catalog_view');
-    }
-    writeOperation(paths, plan, OPERATION_STATES.repairing);
-    const missingEntries = before.issues.filter((value) => value.startsWith('MISSING_COLLECTION_ENTRY:'));
-    if (replaceCollection || missingEntries.length > 0) materializeCollection(plan, paths, join(repairRoot, plan.collection_id));
-    if (replaceCollection) {
-      if (lstatExists(plan.target.collection_root)) moveCollectionEntryExclusive({ home: plan.home, source: plan.target.collection_root, destination: join(paths.quarantineOperationRoot, 'repair-old', plan.collection_id) });
-      moveCollectionEntryExclusive({ home: plan.home, source: join(repairRoot, plan.collection_id), destination: plan.target.collection_root });
-      repaired.push('collection');
-    } else {
-      for (const issue of missingEntries) {
-        const name = issue.split(':')[1];
-        moveCollectionEntryExclusive({ home: plan.home, source: join(repairRoot, plan.collection_id, name), destination: join(plan.target.collection_root, name) });
-        repaired.push(name);
-      }
     }
     for (const issue of before.issues) {
       if (issue === 'GLOBAL_EXPOSURE_DRIFT') {
@@ -1705,21 +2280,60 @@ export function repairManagedCollection({ collectionId, home, confirmation }) {
       } else if (issue.startsWith('AGENT_EXPOSURE_DRIFT:')) {
         const agent = issue.split(':')[1];
         const root = plan.agent_roots.find((entry) => entry.agent === agent);
+        if (root === undefined) fail('repair_conflict', `repair cannot resolve agent exposure: ${agent}`);
         const path = exposurePath(plan, root);
         if (lstatExists(path)) fail('repair_conflict', `agent exposure has conflicting identity: ${path}`);
         createCollectionSymlinkExclusive({ home: plan.home, path, rawTarget: plan.target.exposure.agent_raw_target });
         repaired.push(`agent:${agent}`);
       }
     }
-    if (lstatExists(repairRoot)) rmSync(repairRoot, { recursive: true, force: true });
-    const after = statusAgainstPlan(plan, paths, { requireCommitted: false });
+
+    const after = repairStatusAgainstPlan(plan, paths);
     if (after.status !== 'FILESYSTEM_READY') fail('repair_failed', after.issues.join(', '), 'recovery_required');
-    writeOperation(paths, plan, OPERATION_STATES.committed, { mutationOccurred: repaired.length > 0 });
+    if (attempt !== null) {
+      injectFault('before_repair_commit', faultPhase, killPhase);
+      cleanupRepairInvocation({
+        plan, attempt, invocationRoot, stageCollection, stageOwned, finalize: true,
+      });
+      if (lstatExists(stageCollection) || lstatExists(invocationRoot)) {
+        fail('repair_stage_cleanup_failed', `repair stage could not be removed: ${attempt.repair_id}`, 'recovery_required');
+      }
+      stageOwned = false;
+      injectFault('after_repair_cleanup', faultPhase, killPhase);
+      attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.committed, { mutationOccurred: true });
+    }
     const reconciled = statusManagedCollection({ collectionId, home });
     if (reconciled.status !== 'FILESYSTEM_READY') fail('repair_failed', reconciled.issues.join(', '), 'recovery_required');
-    return { schema_version: 'skills-refiner.collection.repair.v2', collection_id: collectionId, status: 'FILESYSTEM_READY', operation_id: paths.id, mutation_occurred: repaired.length > 0, repaired };
+    return {
+      schema_version: 'skills-refiner.collection.repair.v3', collection_id: collectionId,
+      status: 'FILESYSTEM_READY', operation_id: paths.id, mutation_occurred: repaired.length > 0,
+      repaired, repair_id: attempt?.repair_id ?? null,
+      quarantined_pre_state: attempt?.pre_state.quarantine_path ?? null,
+      pre_state_manifest: attempt?.pre_state.manifest_hash ?? null,
+      post_state_manifest: attempt?.published_identity?.manifest_hash ?? null,
+      artifact_digest: plan.source.tree_digest,
+    };
+  } catch (error) {
+    if (attempt !== null) {
+      try {
+        const current = readPrivateJson(
+          plan.home, repairAttemptPaths(paths, attempt.repair_id).record, 'invalid_repair_attempt',
+        ).value;
+        validateRepairAttempt(current, plan, paths);
+        attempt = current;
+      } catch {}
+    }
+    if (attempt !== null && !TERMINAL_REPAIR_STATES.has(attempt.state)) {
+      try {
+        attempt = updateRepairAttempt(plan, paths, attempt, REPAIR_STATES.recoveryRequired, {
+          mutationOccurred: attempt.mutation_occurred,
+          errorCode: error.code ?? 'repair_failed',
+        });
+      } catch {}
+    }
+    throw error;
   } finally {
-    if (lstatExists(repairRoot)) rmSync(repairRoot, { recursive: true, force: true });
+    cleanupRepairInvocation({ plan, attempt, invocationRoot, stageCollection, stageOwned });
     releaseLock(paths, lock);
   }
 }

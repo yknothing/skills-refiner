@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   applyManagedPlan, compileManagedPlan, inspectManagedSource, MANAGED_APPLY_FAULT_PHASES,
+  MANAGED_REPAIR_FAULT_PHASES,
   recoverManagedOperation, repairManagedCollection, statusManagedCollection, undoManagedOperation,
 } from '../lib/managed-collection.mjs';
 import {
@@ -802,6 +803,307 @@ test('missing shared resource is repaired by exact collection replacement', (t) 
   const repaired = repairManagedCollection({ collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id });
   assert.equal(repaired.status, 'FILESYSTEM_READY');
   assert.equal(existsSync(join(fixture.skillsRoot, 'better-skills/docs/patterns/README.md')), true);
+});
+
+test('member drift repair preserves the observed collection and restores immutable artifact bytes', (t) => {
+  const { fixture, plan } = planned(t);
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  const collection = join(fixture.skillsRoot, 'better-skills');
+  const skill = join(collection, 'bs-prdefine/SKILL.md');
+  const expected = readFileSync(skill, 'utf8');
+  writeFileSync(skill, `${expected}\nLocal branch marker that must survive in quarantine.\n`);
+  const drift = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(drift.status, 'DRIFTED');
+  assert.equal(drift.issues.includes('MEMBER_DRIFT:bs-prdefine'), true);
+
+  const repaired = repairManagedCollection({
+    collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+  });
+  assert.equal(repaired.schema_version, 'skills-refiner.collection.repair.v3');
+  assert.equal(repaired.status, 'FILESYSTEM_READY');
+  assert.match(repaired.repair_id, /^repair-/u);
+  assert.match(repaired.pre_state_manifest, /^sha256:[0-9a-f]{64}$/u);
+  assert.equal(repaired.artifact_digest, plan.source.tree_digest);
+  assert.equal(readFileSync(skill, 'utf8'), expected);
+  assert.match(
+    readFileSync(join(repaired.quarantined_pre_state, 'bs-prdefine/SKILL.md'), 'utf8'),
+    /Local branch marker that must survive in quarantine/u,
+  );
+  const generation = JSON.parse(readFileSync(join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/operation.json`,
+  ), 'utf8'));
+  assert.equal(generation.state, 'COMMITTED');
+  const repair = JSON.parse(readFileSync(join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/repairs/${repaired.repair_id}/repair.json`,
+  ), 'utf8'));
+  assert.equal(repair.state, 'COMMITTED');
+  assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'FILESYSTEM_READY');
+});
+
+test('repeated member drift repairs retain every unique pre-state without path conflicts', (t) => {
+  const { fixture, plan } = planned(t);
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  const skill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+  const expected = readFileSync(skill, 'utf8');
+  const quarantines = [];
+  for (const marker of ['first retained drift', 'second retained drift', 'third retained drift']) {
+    writeFileSync(skill, `${expected}\n${marker}\n`);
+    const repaired = repairManagedCollection({
+      collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+    });
+    quarantines.push(repaired.quarantined_pre_state);
+    assert.match(readFileSync(join(repaired.quarantined_pre_state, 'bs-prdefine/SKILL.md'), 'utf8'), new RegExp(marker, 'u'));
+    assert.equal(readFileSync(skill, 'utf8'), expected);
+  }
+  assert.equal(new Set(quarantines).size, 3);
+  assert.equal(quarantines.every((path) => existsSync(path)), true);
+  const noop = repairManagedCollection({
+    collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+  });
+  assert.equal(noop.mutation_occurred, false);
+  assert.equal(noop.repair_id, null);
+});
+
+for (const mutation of ['delete', 'tamper']) {
+  test(`committed repair quarantine ${mutation} is observable and blocks further repair`, (t) => {
+    const { fixture, plan } = planned(t);
+    const applied = applyManagedPlan(plan, plan.plan_hash);
+    const skill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+    writeFileSync(skill, `${readFileSync(skill, 'utf8')}\nRetained repair evidence.\n`);
+    const repaired = repairManagedCollection({
+      collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+    });
+    if (mutation === 'delete') rmSync(repaired.quarantined_pre_state, { recursive: true });
+    else writeFileSync(join(repaired.quarantined_pre_state, 'bs-prdefine/tampered.txt'), 'drift\n');
+    const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+    assert.equal(status.status, 'DRIFTED');
+    assert.equal(status.issues.includes(`REPAIR_QUARANTINE_MISSING_OR_DRIFT:${repaired.repair_id}`), true);
+    assert.throws(
+      () => repairManagedCollection({
+        collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+      }),
+      /REPAIR_QUARANTINE_MISSING_OR_DRIFT/u,
+    );
+  });
+}
+
+test('an orphaned controller-named repair stage is visible and never deleted implicitly', (t) => {
+  const { fixture, plan } = planned(t);
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  const skill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+  writeFileSync(skill, `${readFileSync(skill, 'utf8')}\nDrift beside orphan stage.\n`);
+  const orphanId = 'repair-00000000-0000-4000-8000-000000000001';
+  const marker = join(
+    fixture.home, `.agents/.skills-refiner-repair/${applied.operation_id}/${orphanId}/better-skills/marker.txt`,
+  );
+  mkdirSync(dirname(marker), { recursive: true });
+  writeFileSync(marker, 'preserve orphan evidence\n');
+  const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.status, 'DRIFTED');
+  assert.equal(status.issues.includes(`ORPHAN_REPAIR_STAGE:${orphanId}`), true);
+  assert.throws(
+    () => repairManagedCollection({
+      collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+    }),
+    /ORPHAN_REPAIR_STAGE/u,
+  );
+  assert.equal(readFileSync(marker, 'utf8'), 'preserve orphan evidence\n');
+});
+
+test('a terminal repair stage-root residue is safely converged by explicit repair', (t) => {
+  const { fixture, plan } = planned(t);
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  const skill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+  writeFileSync(skill, `${readFileSync(skill, 'utf8')}\nTerminal cleanup fixture.\n`);
+  const first = repairManagedCollection({
+    collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+  });
+  const recordPath = join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/repairs/${first.repair_id}/repair.json`,
+  );
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  mkdirSync(dirname(record.stage_path), { recursive: true });
+  const drift = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(drift.issues.includes(`REPAIR_STAGE_RESIDUE:${first.repair_id}`), true);
+  const cleaned = repairManagedCollection({
+    collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+  });
+  assert.equal(cleaned.status, 'FILESYSTEM_READY');
+  assert.equal(cleaned.repair_id, null);
+  assert.equal(cleaned.repaired.includes(`repair_stage:${first.repair_id}`), true);
+  assert.equal(existsSync(dirname(record.stage_path)), false);
+});
+
+test('recover on a healthy committed generation is an exact zero-mutation no-op', (t) => {
+  const { fixture, plan } = planned(t);
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  const collection = join(fixture.skillsRoot, 'better-skills');
+  const activePath = join(fixture.home, '.agents/skill-control/collections/better-skills/active.json');
+  const activeBefore = readFileSync(activePath);
+  const memberBefore = readFileSync(join(collection, 'bs-prdefine/SKILL.md'));
+  const recovered = recoverManagedOperation({
+    home: fixture.home, operationId: applied.operation_id, confirmation: applied.operation_id,
+  });
+  assert.equal(recovered.status, 'FILESYSTEM_READY');
+  assert.equal(recovered.mutation_occurred, false);
+  assert.deepEqual(readFileSync(activePath), activeBefore);
+  assert.deepEqual(readFileSync(join(collection, 'bs-prdefine/SKILL.md')), memberBefore);
+});
+
+test('member repair refuses artifact drift before creating a WAL or moving the active collection', (t) => {
+  const { fixture, plan } = planned(t);
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  const skill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+  writeFileSync(skill, `${readFileSync(skill, 'utf8')}\nObserved drift must remain active.\n`);
+  const artifact = join(
+    fixture.home, `.agents/skill-control/collections/better-skills/artifacts/${plan.source.tree_digest.slice(7)}/repo/tampered.txt`,
+  );
+  writeFileSync(artifact, 'untrusted artifact mutation\n');
+  assert.throws(
+    () => repairManagedCollection({
+      collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+    }),
+    /ARTIFACT_IDENTITY_DRIFT/u,
+  );
+  assert.match(readFileSync(skill, 'utf8'), /Observed drift must remain active/u);
+  assert.equal(existsSync(join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/repairs`,
+  )), false);
+  const generation = JSON.parse(readFileSync(join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/operation.json`,
+  ), 'utf8'));
+  assert.equal(generation.state, 'COMMITTED');
+});
+
+test('repair publish failure compensates the exact pre-state and leaves generation committed', (t) => {
+  const { fixture, plan } = planned(t);
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  const skill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+  writeFileSync(skill, `${readFileSync(skill, 'utf8')}\nExact pre-state compensation marker.\n`);
+  assert.throws(
+    () => repairManagedCollection({
+      collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+      faultPhase: 'before_repair_publish',
+    }),
+    /injected fault/u,
+  );
+  assert.match(readFileSync(skill, 'utf8'), /Exact pre-state compensation marker/u);
+  const generation = JSON.parse(readFileSync(join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/operation.json`,
+  ), 'utf8'));
+  assert.equal(generation.state, 'COMMITTED');
+  const repairRoots = readdirSync(join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/repairs`,
+  ));
+  assert.equal(repairRoots.length, 1);
+  const repair = JSON.parse(readFileSync(join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/repairs/${repairRoots[0]}/repair.json`,
+  ), 'utf8'));
+  assert.equal(repair.state, 'ROLLED_BACK');
+  const retried = repairManagedCollection({
+    collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+  });
+  assert.equal(retried.status, 'FILESYSTEM_READY');
+  assert.notEqual(retried.repair_id, repair.repair_id);
+});
+
+for (const phase of MANAGED_REPAIR_FAULT_PHASES) {
+  test(`SIGKILL ${phase} leaves an independently resumable repair WAL`, (t) => {
+    const { fixture, plan } = planned(t);
+    const applied = applyManagedPlan(plan, plan.plan_hash);
+    const skill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+    const expected = readFileSync(skill, 'utf8');
+    writeFileSync(skill, `${expected}\nKilled repair marker for ${phase}.\n`);
+    const marker = join(fixture.home, `.agents/.skills-refiner-repair/${applied.operation_id}/user-owned-marker/keep.txt`);
+    mkdirSync(dirname(marker), { recursive: true });
+    writeFileSync(marker, 'do not delete\n');
+    const launcher = fileURLToPath(new URL('../bin/skills-refiner', import.meta.url));
+    const killed = spawnSync(launcher, [
+      'collection', 'repair', 'better-skills', '--confirm', applied.operation_id, '--json',
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env, HOME: fixture.home, SKILLS_REFINER_NODE_BIN: process.execPath,
+        SKILLS_REFINER_TEST_ALLOW_FAULTS: '1', SKILLS_REFINER_TEST_KILL_PHASE: phase,
+      },
+    });
+    assert.equal(killed.signal, 'SIGKILL');
+    const generation = JSON.parse(readFileSync(join(
+      fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}/operation.json`,
+    ), 'utf8'));
+    assert.equal(generation.state, 'COMMITTED');
+    const interrupted = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+    assert.equal(interrupted.status, 'RECOVERY_REQUIRED');
+    assert.equal(interrupted.issues.some((issue) => issue.startsWith('REPAIR_ATTEMPT_PENDING:')), true);
+    const resumed = repairManagedCollection({
+      collectionId: 'better-skills', home: fixture.home, confirmation: applied.operation_id,
+    });
+    assert.equal(resumed.status, 'FILESYSTEM_READY');
+    assert.equal(readFileSync(skill, 'utf8'), expected);
+    assert.equal(readFileSync(marker, 'utf8'), 'do not delete\n');
+    assert.equal(existsSync(resumed.quarantined_pre_state), true);
+    assert.equal(readdirSync(dirname(dirname(marker))).some((name) => name.startsWith('repair-')), false);
+  });
+}
+
+test('successor-generation repair crash resumes without rolling back the installed generation', (t) => {
+  const { fixture, plan: firstPlan, source } = planned(t);
+  applyManagedPlan(firstPlan, firstPlan.plan_hash);
+  const sourceSkill = join(source, 'skills/bs-prdefine/SKILL.md');
+  writeFileSync(sourceSkill, `${readFileSync(sourceSkill, 'utf8')}\nSuccessor generation content.\n`);
+  const committed = spawnSync('/usr/bin/git', [
+    '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-am', 'successor repair fixture',
+  ], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  attestManagedRevision(source);
+  const secondPlan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T04:00:00.000Z',
+  });
+  const second = applyManagedPlan(secondPlan, secondPlan.plan_hash);
+  const deployedSkill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+  writeFileSync(deployedSkill, `${readFileSync(deployedSkill, 'utf8')}\nSuccessor drift.\n`);
+  const launcher = fileURLToPath(new URL('../bin/skills-refiner', import.meta.url));
+  const killed = spawnSync(launcher, [
+    'collection', 'repair', 'better-skills', '--confirm', second.operation_id, '--json',
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env, HOME: fixture.home, SKILLS_REFINER_NODE_BIN: process.execPath,
+      SKILLS_REFINER_TEST_ALLOW_FAULTS: '1', SKILLS_REFINER_TEST_KILL_PHASE: 'after_repair_quarantine',
+    },
+  });
+  assert.equal(killed.signal, 'SIGKILL');
+  const activePath = join(fixture.home, '.agents/skill-control/collections/better-skills/active.json');
+  assert.equal(JSON.parse(readFileSync(activePath, 'utf8')).operation_id, second.operation_id);
+  assert.equal(JSON.parse(readFileSync(join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${second.operation_id}/operation.json`,
+  ), 'utf8')).state, 'COMMITTED');
+  const repairLedgerRoot = join(
+    fixture.home, `.agents/skill-control/collections/better-skills/operations/${second.operation_id}/repairs`,
+  );
+  const pendingRepairId = readdirSync(repairLedgerRoot)[0];
+  const pendingRepairPath = join(repairLedgerRoot, pendingRepairId, 'repair.json');
+  const activeBeforeWrongRecover = readFileSync(activePath);
+  const repairBeforeWrongRecover = readFileSync(pendingRepairPath);
+  const collectionPresentBeforeWrongRecover = existsSync(join(fixture.skillsRoot, 'better-skills'));
+  assert.throws(
+    () => recoverManagedOperation({
+      home: fixture.home, operationId: second.operation_id, confirmation: second.operation_id,
+    }),
+    /pending .*rerun collection repair/u,
+  );
+  assert.deepEqual(readFileSync(activePath), activeBeforeWrongRecover);
+  assert.deepEqual(readFileSync(pendingRepairPath), repairBeforeWrongRecover);
+  assert.equal(existsSync(join(fixture.skillsRoot, 'better-skills')), collectionPresentBeforeWrongRecover);
+  const resumed = repairManagedCollection({
+    collectionId: 'better-skills', home: fixture.home, confirmation: second.operation_id,
+  });
+  assert.equal(resumed.status, 'FILESYSTEM_READY');
+  assert.equal(JSON.parse(readFileSync(activePath, 'utf8')).operation_id, second.operation_id);
+  assert.match(readFileSync(deployedSkill, 'utf8'), /Successor generation content/u);
+  assert.doesNotMatch(readFileSync(deployedSkill, 'utf8'), /Successor drift/u);
 });
 
 test('status detects scoped receipt drift, competing installs, and orphaned control records', (t) => {

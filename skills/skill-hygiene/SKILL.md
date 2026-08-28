@@ -227,6 +227,20 @@ SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" collection undo \
   '<collection>-............' --confirm '<collection>-............' --json
 ```
 
+For generic managed collections, `collection repair` can restore missing entries and
+replace a drifted member, resource, index, locator, or collection root only
+while the active plan, immutable controller artifact, catalog authority,
+receipt scope, quarantine, and independent recovery evidence remain exact. A
+content replacement never overwrites the observed collection: it creates an
+independent repair WAL below the active operation, moves the exact observed
+pre-state to a unique repair quarantine, and publishes only bytes materialized
+from the plan-bound artifact. The V3 repair result exposes `repair_id`,
+`quarantined_pre_state`, `pre_state_manifest`, `post_state_manifest`, and
+`artifact_digest`. If status
+reports `REPAIR_ATTEMPT_PENDING:<repair-id>:<state>` after interruption, rerun
+the same `collection repair ... --confirm <operation-id>` command; do not use
+installation-generation `collection recover` for a repair transaction.
+
 `FILESYSTEM_READY` still means only that the plan-bound collection, index,
 members, shared resources, exposure projections, quarantine, recovery, catalog,
 operation and scoped receipt evidence are exact. It does not prove real Agent

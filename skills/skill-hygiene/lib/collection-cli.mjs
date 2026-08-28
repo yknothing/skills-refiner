@@ -119,9 +119,14 @@ function execute(argv) {
   if (command === 'repair') {
     if (argv[2] !== 'prodcraft' && !managedCollectionIds().includes(argv[2])) invalid();
     const options = parseOptions(argv.slice(3), new Set(['--confirm', '--json']));
+    const killPhase = process.env.SKILLS_REFINER_TEST_ALLOW_FAULTS === '1'
+      ? process.env.SKILLS_REFINER_TEST_KILL_PHASE ?? null
+      : null;
     return argv[2] === 'prodcraft'
       ? repairProdcraftCollection({ home, confirmation: required(options, '--confirm') })
-      : repairManagedCollection({ collectionId: argv[2], home, confirmation: required(options, '--confirm') });
+      : repairManagedCollection({
+        collectionId: argv[2], home, confirmation: required(options, '--confirm'), killPhase,
+      });
   }
   if (command === 'undo') {
     const id = argv[2];
