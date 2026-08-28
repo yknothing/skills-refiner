@@ -235,16 +235,28 @@ export async function runPanoramaCli(argv = process.argv.slice(2)) {
     notes: [...coverage.notes, ...collected.collectorNotes],
     commands: collected.commands,
     collectorNotes: collected.collectorNotes,
+    collectorStatus: collected.collectorStatus,
+    completeness: collected.completeness,
+    degradedReasons: collected.degradedReasons,
+    collectorBlockers: collected.collectorBlockers,
     managedCollections: collected.collectionList?.collections ?? [],
+    runtimeStatus: collected.runtimeStatus,
+    runtimeProfileStatus: collected.runtimeProfileStatus,
   });
 
-  const written = writePanoramaOutputs({
-    home,
-    doc,
-    stdoutOnly: options.stdoutOnly,
-    copyToCwd: options.copyCwd,
-    share: options.share,
-  });
+  let written;
+  try {
+    written = writePanoramaOutputs({
+      home,
+      doc,
+      stdoutOnly: options.stdoutOnly,
+      copyToCwd: options.copyCwd,
+      share: options.share,
+    });
+  } catch (error) {
+    process.stderr.write(`[ERROR] 无法安全写入 panorama 输出: ${error.message}\n`);
+    return EXIT_CODES.invalid;
+  }
 
   if (options.stdoutOnly) {
     process.stdout.write(`${JSON.stringify(written.stdout.json, null, 2)}\n`);
@@ -259,6 +271,10 @@ export async function runPanoramaCli(argv = process.argv.slice(2)) {
       process.stdout.write(`  可分享 Markdown: ${written.shareMdPath}\n`);
     }
     process.stdout.write(`条目 ${doc.summary.total}；齐全 ${doc.summary.gap_counts['齐全']}；缺口见报告。\n`);
+  }
+  if (collected.collectorStatus !== 'COMPLETE') {
+    process.stderr.write(`[DEGRADED] 收集器不完整: ${collected.degradedReasons.join(', ')}\n`);
+    return EXIT_CODES.collectorFailed;
   }
   return EXIT_CODES.ok;
 }

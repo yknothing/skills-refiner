@@ -48,7 +48,7 @@ safe_delete_tree() {
   tmp_root="${tmp_root%/}"
   [ -z "$target" ] || [ ! -d "$target" ] && return 0
   case "$target" in
-    "$tmp_root"/*|/tmp/*|/private/tmp/*|/var/folders/*)
+    "$tmp_root"/*|/tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
       find "$target" -depth -mindepth 1 -delete 2>/dev/null || return 1
       rmdir "$target" 2>/dev/null || true
       ;;
@@ -59,7 +59,8 @@ safe_delete_tree() {
   esac
 }
 
-SANDBOX=$(mktemp -d)
+SANDBOX_RAW=$(mktemp -d)
+SANDBOX=$(cd "$SANDBOX_RAW" && pwd -P)
 trap 'safe_delete_tree "$SANDBOX"' EXIT
 
 write_skill() {
@@ -153,12 +154,10 @@ setup_sandbox
 export SKILLS_REFINER_NODE_BIN="$NODE24"
 export HOME="$SANDBOX"
 
-OUT=$("$PANORAMA_BIN" --yes --agents claude,cursor,codex --hygiene-root "$HYGIENE_ROOT" 2>&1) || {
-  echo "$OUT"
-  echo "CLI failed"
-  exit 1
-}
+OUT=$("$PANORAMA_BIN" --yes --agents claude,cursor,codex --hygiene-root "$HYGIENE_ROOT" 2>&1)
+CLI_STATUS=$?
 echo "$OUT"
+assert_eq "incomplete collector exits nonzero after writing evidence" "3" "$CLI_STATUS"
 
 LATEST_JSON="$SANDBOX/Library/Application Support/skills-refiner/panorama/latest.json"
 LATEST_MD="$SANDBOX/Library/Application Support/skills-refiner/panorama/latest.md"
@@ -167,7 +166,10 @@ assert_true "latest.json exists" test -f "$LATEST_JSON"
 assert_true "latest.md exists" test -f "$LATEST_MD"
 
 SCHEMA=$("$NODE24" -e "const d=require('fs').readFileSync(process.argv[1],'utf8'); console.log(JSON.parse(d).schema_version)" "$LATEST_JSON")
-assert_eq "schema_version" "skills-refiner.panorama.v1" "$SCHEMA"
+assert_eq "schema_version" "skills-refiner.panorama.v2" "$SCHEMA"
+
+COLLECTOR_STATUS=$("$NODE24" -e "const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); console.log(d.collectors.status)" "$LATEST_JSON")
+assert_eq "collector status preserves incomplete state" "DEGRADED" "$COLLECTOR_STATUS"
 
 has_forbidden=$("$NODE24" -e "
 const d=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));
@@ -212,6 +214,11 @@ const t=require('fs').readFileSync(process.argv[1],'utf8');
 console.log(t.includes(process.argv[2])?'yes':'no');
 " "$SHARE_JSON" "$SANDBOX")
 assert_eq "share redacts sandbox home" "no" "$share_has_sandbox"
+
+for private_output in "$LATEST_JSON" "$LATEST_MD" "$SHARE_JSON" "$SANDBOX/Library/Application Support/skills-refiner/panorama/share.md"; do
+  mode=$("$NODE24" -e "console.log((require('fs').statSync(process.argv[1]).mode & 0o777).toString(8))" "$private_output")
+  assert_eq "private output mode 0600: $(basename "$private_output")" "600" "$mode"
+done
 
 # 零交互 --stdout-only
 STDOUT_JSON=$("$PANORAMA_BIN" --yes --agents claude --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>/dev/null)

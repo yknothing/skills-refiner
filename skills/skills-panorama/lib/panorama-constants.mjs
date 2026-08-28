@@ -7,7 +7,7 @@ import { join } from 'node:path';
 
 /** @type {Readonly<{ schemaVersion: string; productNameZh: string; skillId: string; cliName: string }>} */
 export const PANORAMA_IDENTITY = Object.freeze({
-  schemaVersion: 'skills-refiner.panorama.v1',
+  schemaVersion: 'skills-refiner.panorama.v2',
   productNameZh: '已安装 Agent Skills 全景',
   skillId: 'skills-panorama',
   cliName: 'skill-panorama',
@@ -133,7 +133,7 @@ export const FORBIDDEN_COLLAPSED_FIELDS = Object.freeze(['installed', 'ready']);
 
 /** 扫描收集器相关。 */
 export const SCAN_COLLECTOR = Object.freeze({
-  schemaVersion: 'skill-scan.v5',
+  schemaVersion: 'skill-scan.v6',
   relativeBinFromHygiene: join('bin', 'skill-scan.sh'),
   hygieneSkillDirName: 'skill-hygiene',
   jsonFlag: '--json',
@@ -175,7 +175,13 @@ export const EXIT_CODES = Object.freeze({
 /** 脱敏占位。 */
 export const REDACTION = Object.freeze({
   homeToken: '~',
-  usernameToken: '<user>',
+  absolutePathToken: '<absolute-path>',
+  urlToken: '<url>',
+  sshToken: '<ssh-endpoint>',
+  queryToken: '<query>',
+  fragmentToken: '<fragment>',
+  secretToken: '<redacted-secret>',
+  secretKeyToken: '<redacted-secret-key>',
 });
 
 /**

@@ -47,6 +47,10 @@ SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
 
 JSON 是契约权威；Markdown 给人读。
 
+`latest.*` 与 `share.*` 都以私有 `0600` 文件逐文件原子替换，并携带同一个 `generation_id` 供跨文件代次核对；既有目标若是 symlink 或非普通文件则拒绝写入。`--share` 会递归脱敏 URL、SSH endpoint、query/fragment、当前 HOME 与其它主机绝对路径。
+
+若任一收集器未完整成功，CLI 仍会在事实可解析时生成报告，但写明 `collectors.status: DEGRADED`、保留结构化 blocker，并以退出码 `3` 结束。调用方不得把“报告已生成”误当成“收集完整”。
+
 ## 对人说的六列
 
 | 对人显示 | JSON 键 |
@@ -59,6 +63,10 @@ JSON 是契约权威；Markdown 给人读。
 | 是否撞名/撞内容 | `collision` |
 
 无控制清单时：**不要**把条目判成「清单与现实不符」；仍可归「齐全」。
+
+同名时必须查看 `identity.variants`：每个 variant 独立携带来源身份、内容指纹、canonical target、`catalog_active` 与 `catalog_conformance`。同名同内容但来自不同仓库仍是冲突，默认 `preserve`；不得仅凭内容相同替用户清退。
+
+运行时事实见顶层 `runtime_truth_matrix`，按 Agent 分开呈现 `filesystem`、`deployment`、`catalog`、`body`、`route`、`context`。六层不得互相代证；目录嵌套本身不证明节省 context。
 
 ## 八类缺口导航
 
@@ -96,6 +104,7 @@ JSON 是契约权威；Markdown 给人读。
 - `暂无法判定` = 上游收集器字段不足；全景不猜测补全。
 - `部分 Agent 已出现` = 源里有，但所选且存在的 Agent 中仅部分有投影；不是齐全，也不是笼统无法判定。
 - 分享报告用 `--share` 脱敏副本；本机 `latest.*` 保留真名真路径便于排障。
+- `identity_status: ambiguous_name` 表示一个名字对应多个实体；单实体但只有路径证据时是 `path_qualified`，不要退回模糊的 `ambiguous` / `qualified`。
 
 ## 相关能力
 
