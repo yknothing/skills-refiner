@@ -271,6 +271,30 @@ path while the original payload remains quarantined, and a running Agent may
 retain cached state. Rehydrated entries are never automatically quarantined
 again—review the new evidence first.
 
+### Revision-pure physical collection upgrades
+
+`collection check/plan` accepts only an exact 40-character revision selected as
+HEAD in an approved-origin Git worktree. Current plans additionally require local
+`origin/*` containment. Validation and artifact publication parse and verify the
+selected commit, tree, and blob objects directly, then publish through a
+controller-owned staging directory. Object IDs, portable paths, entry types,
+executable bits, and post-write bytes are revalidated before the atomic rename.
+Symlinks, submodules, unresolved Git LFS pointers, reserved or colliding paths,
+and inputs beyond the bounded node/depth/byte budgets fail closed. Therefore
+ignored files, empty local directories,
+smudge-filter output, hidden worktree overrides, and local permission drift do
+not enter the artifact. Visible tracked modifications and untracked files are
+also outside the authority boundary; the controller does not execute
+repository-configured clean filters or filesystem monitors to classify them.
+Use a dedicated checkout instead of a development workspace for operator
+clarity. Local remote-tracking containment is not a live fetch or signed
+release proof; record a separate point-in-time remote check when the stronger
+claim is required. Collection copying restores source permissions explicitly,
+so identity is stable across restrictive and ordinary caller `umask` values.
+The persisted collection digest intentionally retains its historical Node 24
+locale comparator for schema compatibility; a future byte-order digest requires
+an explicit schema migration rather than silently changing active identity.
+
 ### Runtime-aware exposure and evidence
 
 Physical collections organize source-owned Skills, but nesting alone does not

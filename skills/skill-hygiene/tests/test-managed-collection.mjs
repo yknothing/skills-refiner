@@ -37,6 +37,21 @@ test('declarative source inspection supports folded YAML and pinned member sets'
   }
 });
 
+test('managed source identity is stable across restrictive umasks', (t) => {
+  const originalUmask = process.umask();
+  try {
+    process.umask(0o022);
+    const root = makeManagedRoot();
+    t.after(() => removeManagedRoot(root));
+    const source = makeManagedSource(root, 'better-skills');
+    const revision = managedRevision(source);
+    const ordinary = inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision });
+    process.umask(0o077);
+    const restrictive = inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision });
+    assert.deepEqual(restrictive, ordinary);
+  } finally { process.umask(originalUmask); }
+});
+
 test('source inspection rejects a current member with invalid portable YAML', (t) => {
   const root = makeManagedRoot();
   t.after(() => removeManagedRoot(root));
@@ -48,6 +63,7 @@ test('source inspection rejects a current member with invalid portable YAML', (t
   ));
   const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'invalid portable frontmatter'], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);
+  attestManagedRevision(source);
   assert.throws(() => inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) }), /not portable YAML/u);
 });
 
@@ -60,6 +76,7 @@ test('source inspection fails when a canonical current member is missing', (t) =
   assert.equal(committed.status, 0, committed.stderr);
   const commit = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'remove canonical member'], { encoding: 'utf8' });
   assert.equal(commit.status, 0, commit.stderr);
+  attestManagedRevision(source);
   assert.throws(() => inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) }), /source member bs-prdefine/u);
 });
 
@@ -82,6 +99,134 @@ test('source inspection rejects a clean local commit absent from origin tracking
   assert.doesNotThrow(
     () => inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) }),
   );
+});
+
+test('ignored and empty local paths cannot enter managed source identity', (t) => {
+  const root = makeManagedRoot();
+  t.after(() => removeManagedRoot(root));
+  const source = makeManagedSource(root, 'better-skills');
+  writeFileSync(join(source, '.gitignore'), '.DS_Store\nignored-local/\n');
+  const committed = spawnSync('/usr/bin/git', [
+    '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'add', '.gitignore',
+  ], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  const commit = spawnSync('/usr/bin/git', [
+    '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-m', 'ignore local metadata',
+  ], { encoding: 'utf8' });
+  assert.equal(commit.status, 0, commit.stderr);
+  attestManagedRevision(source);
+  const expected = inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) });
+  writeFileSync(join(source, '.DS_Store'), 'ignored metadata\n');
+  mkdirSync(join(source, 'ignored-local'));
+  const observed = inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) });
+  assert.deepEqual(observed, expected);
+});
+
+test('visible worktree-only bytes cannot enter managed source identity', (t) => {
+  const root = makeManagedRoot();
+  t.after(() => removeManagedRoot(root));
+  const source = makeManagedSource(root, 'better-skills');
+  const revision = managedRevision(source);
+  const expected = inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision });
+  writeFileSync(join(source, 'untracked.txt'), 'untracked local bytes\n');
+  writeFileSync(join(source, 'skills/bs-prdefine/SKILL.md'), 'visible worktree-only override\n');
+  assert.deepEqual(inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision }), expected);
+});
+
+test('hidden worktree bytes and modes cannot enter a managed artifact', (t) => {
+  const root = makeManagedRoot();
+  t.after(() => removeManagedRoot(root));
+  const source = makeManagedSource(root, 'better-skills');
+  const revision = managedRevision(source);
+  const expected = inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision });
+  const skillPath = join(source, 'skills/bs-prdefine/SKILL.md');
+  const hidden = spawnSync('/usr/bin/git', ['-C', source, 'update-index', '--assume-unchanged', 'skills/bs-prdefine/SKILL.md'], { encoding: 'utf8' });
+  assert.equal(hidden.status, 0, hidden.stderr);
+  writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\nHidden local override.\n`);
+  chmodSync(join(source, 'skills/bs-prdefine'), 0o700);
+  chmodSync(skillPath, 0o600);
+  const status = spawnSync('/usr/bin/git', ['-C', source, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' });
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(status.stdout, '');
+  assert.deepEqual(inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision }), expected);
+  const fixture = makeManagedHome(root, 'better-skills');
+  const plan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision, now: '2026-07-20T00:00:00.000Z',
+  });
+  applyManagedPlan(plan, plan.plan_hash);
+  const deployed = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+  assert.doesNotMatch(readFileSync(deployed, 'utf8'), /Hidden local override/u);
+  assert.equal(lstatSync(dirname(deployed)).mode & 0o777, 0o755);
+  assert.equal(lstatSync(deployed).mode & 0o777, 0o644);
+});
+
+test('Git smudge filters cannot alter managed source authority bytes', (t) => {
+  const root = makeManagedRoot();
+  t.after(() => removeManagedRoot(root));
+  const source = makeManagedSource(root, 'better-skills');
+  writeFileSync(join(source, '.gitattributes'), '*.fixture filter=fixture\nexport.fixture export-subst text eol=crlf\n');
+  writeFileSync(join(source, 'tracked.fixture'), 'CANONICAL\n');
+  writeFileSync(join(source, 'export.fixture'), 'revision=$Format:%H$\n');
+  for (const args of [
+    ['-C', source, 'config', 'filter.fixture.clean', "sed 's/SMUDGED/CANONICAL/'"],
+    ['-C', source, 'config', 'filter.fixture.smudge', "sed 's/CANONICAL/SMUDGED/'"],
+    ['-C', source, 'config', 'filter.fixture.required', 'true'],
+    ['-C', source, 'add', '.gitattributes', 'tracked.fixture', 'export.fixture'],
+    ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'add filtered source'],
+  ]) {
+    const result = spawnSync('/usr/bin/git', args, { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  attestManagedRevision(source);
+  const revision = managedRevision(source);
+  const canonical = inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision });
+  rmSync(join(source, 'tracked.fixture'));
+  const checkout = spawnSync('/usr/bin/git', ['-C', source, 'checkout', '--', 'tracked.fixture'], { encoding: 'utf8' });
+  assert.equal(checkout.status, 0, checkout.stderr);
+  assert.equal(readFileSync(join(source, 'tracked.fixture'), 'utf8'), 'SMUDGED\n');
+  const status = spawnSync('/usr/bin/git', ['-C', source, 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' });
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(status.stdout, '');
+  assert.deepEqual(inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision }), canonical);
+  const fixture = makeManagedHome(root, 'better-skills');
+  const plan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision, now: '2026-07-20T00:00:00.000Z',
+  });
+  applyManagedPlan(plan, plan.plan_hash);
+  const artifact = join(
+    plan.control.root, 'artifacts', plan.source.tree_digest.slice('sha256:'.length), 'repo/export.fixture',
+  );
+  assert.equal(readFileSync(artifact, 'utf8'), 'revision=$Format:%H$\n');
+});
+
+test('Git replacement refs cannot alter managed source authority bytes', (t) => {
+  const root = makeManagedRoot();
+  t.after(() => removeManagedRoot(root));
+  const source = makeManagedSource(root, 'better-skills');
+  const revision = managedRevision(source);
+  const canonical = inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision });
+  const original = spawnSync('/usr/bin/git', [
+    '-C', source, 'rev-parse', `${revision}:skills/bs-prdefine/SKILL.md`,
+  ], { encoding: 'utf8' });
+  assert.equal(original.status, 0, original.stderr);
+  const replacement = spawnSync('/usr/bin/git', ['-C', source, 'hash-object', '-w', '--stdin'], {
+    encoding: 'utf8', input: 'replacement bytes that are not a valid Skill\n',
+  });
+  assert.equal(replacement.status, 0, replacement.stderr);
+  const installed = spawnSync('/usr/bin/git', [
+    '-C', source, 'replace', original.stdout.trim(), replacement.stdout.trim(),
+  ], { encoding: 'utf8' });
+  assert.equal(installed.status, 0, installed.stderr);
+  const replaced = spawnSync('/usr/bin/git', [
+    '-C', source, 'cat-file', 'blob', original.stdout.trim(),
+  ], { encoding: 'utf8' });
+  assert.equal(replaced.status, 0, replaced.stderr);
+  assert.match(replaced.stdout, /replacement bytes/u);
+  assert.deepEqual(inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision }), canonical);
 });
 
 test('remote-tracking attestation drift after planning blocks apply before mutation', (t) => {
@@ -110,6 +255,69 @@ test('managed plan applies from a clean Git linked worktree without hashing its 
   });
   assert.equal(applyManagedPlan(plan, plan.plan_hash).status, 'FILESYSTEM_READY');
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'FILESYSTEM_READY');
+});
+
+test('managed gateway lifecycle is deterministic across restrictive umasks', (t) => {
+  const originalUmask = process.umask();
+  try {
+    process.umask(0o022);
+    const root = makeManagedRoot();
+    t.after(() => removeManagedRoot(root));
+    const source = makeManagedSource(root, 'loopos');
+    const fixture = makeManagedHome(root, 'loopos');
+    const plan = compileManagedPlan({
+      collectionId: 'loopos', home: fixture.home, sourceRoot: source,
+      revision: managedRevision(source), now: '2026-07-20T00:00:00.000Z',
+    });
+    process.umask(0o077);
+    assert.equal(applyManagedPlan(plan, plan.plan_hash).status, 'FILESYSTEM_READY');
+    process.umask(0o022);
+    assert.equal(statusManagedCollection({ collectionId: 'loopos', home: fixture.home }).status, 'FILESYSTEM_READY');
+    process.umask(0o077);
+    assert.equal(statusManagedCollection({ collectionId: 'loopos', home: fixture.home }).status, 'FILESYSTEM_READY');
+    const collection = join(fixture.skillsRoot, 'loopos');
+    assert.equal(lstatSync(collection).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(collection, 'loopos')).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(collection, 'loopos/SKILL.md')).mode & 0o777, 0o644);
+    assert.equal(lstatSync(join(collection, 'loopos/loopos-runtime.json')).mode & 0o777, 0o600);
+  } finally { process.umask(originalUmask); }
+});
+
+test('managed apply preserves an unowned conflicting staging root', (t) => {
+  const { fixture, plan } = planned(t, 'loopos');
+  const stageRoot = join(
+    fixture.home, '.agents/.skills-refiner-stage',
+    `${plan.collection_id}-${plan.plan_hash.slice(7, 19)}`,
+  );
+  mkdirSync(stageRoot, { recursive: true });
+  const marker = join(stageRoot, 'user-owned-marker.txt');
+  writeFileSync(marker, 'preserve\n');
+  assert.throws(() => applyManagedPlan(plan, plan.plan_hash), /staging root already exists/u);
+  assert.equal(readFileSync(marker, 'utf8'), 'preserve\n');
+});
+
+test('managed status detects and repair restores collection root mode drift', (t) => {
+  const { fixture, plan } = planned(t, 'loopos');
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  chmodSync(join(fixture.skillsRoot, 'loopos'), 0o700);
+  const drifted = statusManagedCollection({ collectionId: 'loopos', home: fixture.home });
+  assert.equal(drifted.issues.includes('COLLECTION_ROOT_MODE_DRIFT'), true);
+  repairManagedCollection({ collectionId: 'loopos', home: fixture.home, confirmation: applied.operation_id });
+  assert.equal(statusManagedCollection({ collectionId: 'loopos', home: fixture.home }).status, 'FILESYSTEM_READY');
+  assert.equal(lstatSync(join(fixture.skillsRoot, 'loopos')).mode & 0o777, 0o755);
+});
+
+test('managed status rejects hidden Git metadata and unsafe artifact root modes', (t) => {
+  const { fixture, plan } = planned(t, 'loopos');
+  applyManagedPlan(plan, plan.plan_hash);
+  const artifactRoot = join(plan.control.root, 'artifacts', plan.source.tree_digest.slice(7), 'repo');
+  chmodSync(artifactRoot, 0o750);
+  assert.equal(statusManagedCollection({ collectionId: 'loopos', home: fixture.home }).status, 'FILESYSTEM_READY');
+  chmodSync(artifactRoot, 0o777);
+  assert.equal(statusManagedCollection({ collectionId: 'loopos', home: fixture.home }).issues.includes('ARTIFACT_ROOT_MODE_UNSAFE'), true);
+  chmodSync(artifactRoot, 0o700);
+  mkdirSync(join(artifactRoot, '.git'));
+  assert.equal(statusManagedCollection({ collectionId: 'loopos', home: fixture.home }).issues.includes('ARTIFACT_CONTAINS_GIT_METADATA'), true);
 });
 
 test('status skips a planned exposure after that Agent root is removed', (t) => {
@@ -788,6 +996,7 @@ test('source inspection rejects references not closed by declared packaging reso
   writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\n[Missing](references/not-declared.md)\n`);
   const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'broken reference'], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);
+  attestManagedRevision(source);
   assert.throws(() => inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) }), /packaged reference/u);
 });
 
@@ -798,5 +1007,6 @@ test('source inspection closes references originating from shared resources', (t
   rmSync(join(source, 'tools/check-patterns.sh'));
   const committed = spawnSync('/usr/bin/git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-am', 'remove shared dependency'], { encoding: 'utf8' });
   assert.equal(committed.status, 0, committed.stderr);
+  attestManagedRevision(source);
   assert.throws(() => inspectManagedSource({ collectionId: 'better-skills', sourceRoot: source, revision: managedRevision(source) }), /reference input/u);
 });

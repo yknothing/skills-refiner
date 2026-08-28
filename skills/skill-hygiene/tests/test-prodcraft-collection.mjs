@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
@@ -59,14 +59,33 @@ test('source inspection rejects symlinked members and frontmatter identity drift
   const target = join(root, 'elsewhere');
   mkdirSync(target);
   symlinkSync(target, join(source, 'skills/.curated/pc-intake/linked'));
+  let committed = spawnSync('/usr/bin/git', [
+    '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'add', 'skills/.curated/pc-intake/linked',
+  ], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  committed = spawnSync('/usr/bin/git', [
+    '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-m', 'add unsafe source symlink',
+  ], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  committed = spawnSync('/usr/bin/git', ['-C', source, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
   assert.throws(() => inspectProdcraftSource({ sourceRoot: source, revision: sourceRevision(source) }), /symlink/u);
 
   const sourceTwo = makeSource(join(root, 'second'));
   writeFileSync(join(sourceTwo, 'skills/.curated/pc-intake/SKILL.md'), '---\nname: wrong\ndescription: Use when wrong.\n---\n');
+  committed = spawnSync('/usr/bin/git', [
+    '-C', sourceTwo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-am', 'drift frontmatter identity',
+  ], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  committed = spawnSync('/usr/bin/git', ['-C', sourceTwo, 'update-ref', 'refs/remotes/origin/main', 'HEAD'], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
   assert.throws(() => inspectProdcraftSource({ sourceRoot: sourceTwo, revision: sourceRevision(sourceTwo) }), /frontmatter name/u);
 });
 
-test('source inspection requires exact clean Git HEAD and approved origin', (t) => {
+test('source inspection requires exact Git HEAD and ignores worktree-only bytes', (t) => {
   const root = makeRoot();
   t.after(() => removeRoot(root));
   const source = makeSource(root);
@@ -74,11 +93,33 @@ test('source inspection requires exact clean Git HEAD and approved origin', (t) 
     () => inspectProdcraftSource({ sourceRoot: source, revision: 'a'.repeat(40) }),
     /HEAD does not match/u,
   );
+  const expected = inspectProdcraftSource({ sourceRoot: source, revision: sourceRevision(source) });
   writeFileSync(join(source, 'untracked.txt'), 'untracked\n');
-  assert.throws(
-    () => inspectProdcraftSource({ sourceRoot: source, revision: sourceRevision(source) }),
-    /worktree must be clean/u,
-  );
+  writeFileSync(join(source, 'skills/.curated/pc-intake/SKILL.md'), 'worktree-only override\n');
+  assert.deepEqual(inspectProdcraftSource({ sourceRoot: source, revision: sourceRevision(source) }), expected);
+});
+
+test('ignored and empty local paths cannot enter ProdCraft source identity', (t) => {
+  const root = makeRoot();
+  t.after(() => removeRoot(root));
+  const source = makeSource(root);
+  writeFileSync(join(source, '.gitignore'), '.DS_Store\nignored-local/\n');
+  const added = spawnSync('/usr/bin/git', ['-C', source, 'add', '.gitignore'], { encoding: 'utf8' });
+  assert.equal(added.status, 0, added.stderr);
+  const committed = spawnSync('/usr/bin/git', [
+    '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-m', 'ignore local metadata',
+  ], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  const attested = spawnSync('/usr/bin/git', [
+    '-C', source, 'update-ref', 'refs/remotes/origin/main', 'HEAD',
+  ], { encoding: 'utf8' });
+  assert.equal(attested.status, 0, attested.stderr);
+  const expected = inspectProdcraftSource({ sourceRoot: source, revision: sourceRevision(source) });
+  writeFileSync(join(source, '.DS_Store'), 'ignored metadata\n');
+  mkdirSync(join(source, 'ignored-local'));
+  const observed = inspectProdcraftSource({ sourceRoot: source, revision: sourceRevision(source) });
+  assert.deepEqual(observed, expected);
 });
 
 test('source inspection rejects a clean local commit absent from origin tracking refs', (t) => {
@@ -179,6 +220,69 @@ function plannedFixture(t) {
   const plan = compileProdcraftPlan({ home: fixture.home, sourceRoot: source, revision: sourceRevision(source), now: '2026-07-20T00:00:00.000Z' });
   return { root, source, fixture, plan };
 }
+
+test('ProdCraft lifecycle is deterministic across restrictive umasks', (t) => {
+  const originalUmask = process.umask();
+  try {
+    process.umask(0o022);
+    const root = makeRoot();
+    t.after(() => removeRoot(root));
+    const source = makeSource(root);
+    const fixture = makeLegacyHome(root);
+    const plan = compileProdcraftPlan({
+      home: fixture.home, sourceRoot: source, revision: sourceRevision(source),
+      now: '2026-07-20T00:00:00.000Z',
+    });
+    process.umask(0o077);
+    assert.equal(applyProdcraftPlan(plan, plan.plan_hash).status, 'FILESYSTEM_READY');
+    process.umask(0o022);
+    assert.equal(statusProdcraftCollection({ home: fixture.home }).status, 'FILESYSTEM_READY');
+    process.umask(0o077);
+    assert.equal(statusProdcraftCollection({ home: fixture.home }).status, 'FILESYSTEM_READY');
+    const collection = join(fixture.skillsRoot, 'prodcraft');
+    assert.equal(lstatSync(collection).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(collection, 'pc-prodcraft')).mode & 0o777, 0o755);
+    assert.equal(lstatSync(join(collection, 'pc-prodcraft/SKILL.md')).mode & 0o777, 0o644);
+    assert.equal(lstatSync(join(collection, 'pc-prodcraft/prodcraft-runtime.json')).mode & 0o777, 0o600);
+  } finally { process.umask(originalUmask); }
+});
+
+test('ProdCraft apply preserves an unowned conflicting staging root', (t) => {
+  const { fixture, plan } = plannedFixture(t);
+  const stageRoot = join(
+    fixture.home, '.agents/.skills-refiner-stage',
+    `prodcraft-${plan.plan_hash.slice(7, 19)}`,
+  );
+  mkdirSync(stageRoot, { recursive: true });
+  const marker = join(stageRoot, 'user-owned-marker.txt');
+  writeFileSync(marker, 'preserve\n');
+  assert.throws(() => applyProdcraftPlan(plan, plan.plan_hash), /staging root already exists/u);
+  assert.equal(readFileSync(marker, 'utf8'), 'preserve\n');
+});
+
+test('ProdCraft status detects and repair restores collection root mode drift', (t) => {
+  const { fixture, plan } = plannedFixture(t);
+  const applied = applyProdcraftPlan(plan, plan.plan_hash);
+  chmodSync(join(fixture.skillsRoot, 'prodcraft'), 0o700);
+  const drifted = statusProdcraftCollection({ home: fixture.home });
+  assert.equal(drifted.issues.includes('COLLECTION_ROOT_MODE_DRIFT'), true);
+  repairProdcraftCollection({ home: fixture.home, confirmation: applied.operation_id });
+  assert.equal(statusProdcraftCollection({ home: fixture.home }).status, 'FILESYSTEM_READY');
+  assert.equal(lstatSync(join(fixture.skillsRoot, 'prodcraft')).mode & 0o777, 0o755);
+});
+
+test('ProdCraft status rejects hidden Git metadata and unsafe artifact root modes', (t) => {
+  const { fixture, plan } = plannedFixture(t);
+  applyProdcraftPlan(plan, plan.plan_hash);
+  const artifactRoot = join(plan.control.root, 'artifacts', plan.source.tree_digest.slice(7), 'repo');
+  chmodSync(artifactRoot, 0o750);
+  assert.equal(statusProdcraftCollection({ home: fixture.home }).status, 'FILESYSTEM_READY');
+  chmodSync(artifactRoot, 0o777);
+  assert.equal(statusProdcraftCollection({ home: fixture.home }).issues.includes('ARTIFACT_ROOT_MODE_UNSAFE'), true);
+  chmodSync(artifactRoot, 0o700);
+  mkdirSync(join(artifactRoot, '.git'));
+  assert.equal(statusProdcraftCollection({ home: fixture.home }).issues.includes('ARTIFACT_CONTAINS_GIT_METADATA'), true);
+});
 
 test('apply publishes the physical collection, index, locator, and bounded projections', (t) => {
   const { fixture, plan } = plannedFixture(t);

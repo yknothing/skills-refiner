@@ -48,6 +48,7 @@ export function makeSource(root) {
   writeFileSync(join(curated, 'index.json'), `${JSON.stringify({ schema_version: 'prodcraft-curated-index.v1', skills: curatedSkills }, null, 2)}\n`);
   for (const name of PUBLIC_MEMBER_NAMES) skill(join(curated, name), name);
   mkdirSync(join(source, 'workflows'), { recursive: true });
+  writeFileSync(join(source, 'workflows/.gitkeep'), '');
   writeFileSync(join(source, 'skills/_gateway.md'), '# Gateway\n');
   writeFileSync(join(source, 'CLAUDE.md'), '# Prodcraft\n');
   writeFileSync(join(source, 'manifest.yml'), 'name: prodcraft\nversion: 1.0.0\n');

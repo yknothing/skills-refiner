@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  closeSync, constants, copyFileSync, cpSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
+  chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
   mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync,
   renameSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
@@ -10,13 +10,15 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { canonicalJson } from './cleanup-contract.mjs';
-import { computeTreeDigest } from './collection-tree.mjs';
+import { computeTreeDigest, copyTreeWithStableModes } from './collection-tree.mjs';
 import {
   createCollectionFileExclusive, createCollectionSymlinkExclusive, ensureMacosHelper, inspectCollectionEntry,
   MacosAdapterError, moveCollectionEntryExclusive, replaceCollectionFileCas, unlinkCollectionSymlinkExact,
 } from './cleanup-macos.mjs';
 import { collectionSpec, managedCollectionIds } from './collection-specs.mjs';
-import { originTrackingRefsContaining } from './git-source-attestation.mjs';
+import {
+  materializeGitRevision, originTrackingRefsContaining, sourceGitAccess,
+} from './git-source-attestation.mjs';
 import { observeUpstreamVersion, upstreamVersionEvidence } from './upstream-version.mjs';
 import {
   buildManagedPlan, MANAGED_COLLECTION_SCHEMAS, validateManagedIndex,
@@ -324,17 +326,19 @@ function packagingReferenceActions(root, spec, graph) {
 
 function copyPackagingInputs(sourceRoot, target, spec) {
   mkdirSync(target, { recursive: true, mode: 0o755 });
+  chmodSync(target, 0o755);
   for (const member of spec.members) {
-    cpSync(join(sourceRoot, member.sourcePath), join(target, member.name), {
+    copyTreeWithStableModes(join(sourceRoot, member.sourcePath), join(target, member.name), {
       recursive: true, force: false, errorOnExist: true, preserveTimestamps: true,
-    });
+    }, fail);
   }
   for (const sourcePath of spec.sharedPaths) {
     const destination = join(target, sourcePath);
     mkdirSync(dirname(destination), { recursive: true, mode: 0o755 });
-    cpSync(join(sourceRoot, sourcePath), destination, {
+    chmodSync(dirname(destination), 0o755);
+    copyTreeWithStableModes(join(sourceRoot, sourcePath), destination, {
       recursive: true, force: false, errorOnExist: true, preserveTimestamps: true,
-    });
+    }, fail);
   }
 }
 
@@ -369,84 +373,81 @@ export function inspectManagedSource({ collectionId, sourceRoot, revision }) {
   if (root !== sourceRoot) fail('unsafe_source_root', 'source root must be normalized and absolute');
   assertRealDirectory(root, 'source root');
   if (!/^[0-9a-f]{40}$/u.test(revision)) fail('invalid_revision', 'revision must be a full commit SHA');
-  const gitEnvironment = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
-  const git = (...args) => spawnSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnvironment });
+  const { git, readObjects } = sourceGitAccess(root);
   const top = git('rev-parse', '--show-toplevel');
   const head = git('rev-parse', 'HEAD');
-  const status = git('status', '--porcelain=v1', '--untracked-files=all');
   const remote = git('remote', 'get-url', 'origin');
   if (top.status !== 0 || realpathSync(top.stdout.trim()) !== root) fail('unverified_source', 'source root must be a Git worktree root');
   if (head.status !== 0 || head.stdout.trim() !== revision) fail('source_revision_mismatch', 'source HEAD does not match revision');
-  if (status.status !== 0 || status.stdout.length !== 0) fail('source_worktree_dirty', 'source worktree must be clean');
   if (remote.status !== 0 || !approvedGithubOrigin(remote.stdout.trim(), spec)) fail('source_origin_mismatch', `source origin must be ${spec.repositoryId}`);
-  const manifestPath = join(root, spec.manifestPath);
-  if (!lstatExists(manifestPath) || !lstatSync(manifestPath).isFile()) fail('invalid_manifest', `manifest is missing: ${manifestPath}`);
-  upstreamVersionEvidence(root, spec.upstreamVersion);
-  for (const rejected of spec.rejectedMembers) {
-    const rejectedRoot = join(root, rejected.sourcePath);
-    assertRealDirectory(rejectedRoot, `rejected source member ${rejected.name}`);
-    let rejectionProven = false;
-    try { parseFrontmatter(join(rejectedRoot, 'SKILL.md')); }
-    catch (error) {
-      rejectionProven = error instanceof ManagedCollectionError
-        && error.code === 'invalid_skill'
-        && rejected.reason === 'invalid_portable_yaml'
-        && /not portable YAML/u.test(error.message);
-      if (!rejectionProven) throw error;
-    }
-    if (!rejectionProven) fail('stale_rejection_profile', `rejected member now passes its recorded gate: ${rejected.name}`);
-  }
-  const memberMetadata = spec.members.map(({ name, sourcePath }) => {
-    const memberRoot = join(root, sourcePath);
-    assertRealDirectory(memberRoot, `source member ${name}`);
-    const metadata = parseFrontmatter(join(memberRoot, 'SKILL.md'));
-    if (metadata.name !== name) fail('invalid_skill', `frontmatter name mismatch for ${name}`);
-    if ([...metadata.description].length > 1024) fail('invalid_skill', `frontmatter description too long for ${name}`);
-    return { name, source_path: sourcePath };
-  });
-  const references = referenceGraph(root, [
-    ...spec.members.map(({ sourcePath }) => join(root, sourcePath)),
-    ...spec.sharedPaths.map((sourcePath) => join(root, sourcePath)),
-  ], { allowMissing: true, excludedPaths: new Set(spec.referenceExclusions) });
-  const actions = packagingReferenceActions(root, spec, references);
   const remoteAttestation = originTrackingRefsContaining(git, revision);
   if (!remoteAttestation.ok || remoteAttestation.refs.length === 0) {
     fail('source_revision_not_remote_tracked', 'source revision must be contained by an origin remote-tracking ref');
   }
-  for (const sourcePath of spec.sharedPaths) {
-    const resourceRoot = join(root, sourcePath);
-    assertRealResource(resourceRoot, `shared resource ${sourcePath}`);
-  }
-  const previewRoot = realpathSync(mkdtempSync(join(tmpdir(), `skills-refiner-${collectionId}-preview-`)));
-  let members;
-  let resources;
+  const authorityParent = realpathSync(mkdtempSync(join(tmpdir(), `skills-refiner-${collectionId}-authority-`)));
   try {
-    const preview = join(previewRoot, collectionId);
-    copyPackagingInputs(root, preview, spec);
-    applyPackagingReferenceActions(root, preview, spec, actions);
+    const authorityRoot = join(authorityParent, 'repository');
+    materializeGitRevision({ readObjects, revision, destination: authorityRoot, fail });
+    const manifestPath = join(authorityRoot, spec.manifestPath);
+    if (!lstatExists(manifestPath) || !lstatSync(manifestPath).isFile()) fail('invalid_manifest', `manifest is missing: ${manifestPath}`);
+    upstreamVersionEvidence(authorityRoot, spec.upstreamVersion);
+    for (const rejected of spec.rejectedMembers) {
+      const rejectedRoot = join(authorityRoot, rejected.sourcePath);
+      assertRealDirectory(rejectedRoot, `rejected source member ${rejected.name}`);
+      let rejectionProven = false;
+      try { parseFrontmatter(join(rejectedRoot, 'SKILL.md')); }
+      catch (error) {
+        rejectionProven = error instanceof ManagedCollectionError
+          && error.code === 'invalid_skill'
+          && rejected.reason === 'invalid_portable_yaml'
+          && /not portable YAML/u.test(error.message);
+        if (!rejectionProven) throw error;
+      }
+      if (!rejectionProven) fail('stale_rejection_profile', `rejected member now passes its recorded gate: ${rejected.name}`);
+    }
+    const memberMetadata = spec.members.map(({ name, sourcePath }) => {
+      const memberRoot = join(authorityRoot, sourcePath);
+      assertRealDirectory(memberRoot, `source member ${name}`);
+      const metadata = parseFrontmatter(join(memberRoot, 'SKILL.md'));
+      if (metadata.name !== name) fail('invalid_skill', `frontmatter name mismatch for ${name}`);
+      if ([...metadata.description].length > 1024) fail('invalid_skill', `frontmatter description too long for ${name}`);
+      return { name, source_path: sourcePath };
+    });
+    const references = referenceGraph(authorityRoot, [
+      ...spec.members.map(({ sourcePath }) => join(authorityRoot, sourcePath)),
+      ...spec.sharedPaths.map((sourcePath) => join(authorityRoot, sourcePath)),
+    ], { allowMissing: true, excludedPaths: new Set(spec.referenceExclusions) });
+    const actions = packagingReferenceActions(authorityRoot, spec, references);
+    for (const sourcePath of spec.sharedPaths) {
+      const resourceRoot = join(authorityRoot, sourcePath);
+      assertRealResource(resourceRoot, `shared resource ${sourcePath}`);
+    }
+    const preview = join(authorityParent, 'preview');
+    copyPackagingInputs(authorityRoot, preview, spec);
+    applyPackagingReferenceActions(authorityRoot, preview, spec, actions);
     referenceGraph(preview, [
       ...spec.members.map(({ name }) => join(preview, name)),
       ...spec.sharedPaths.map((sourcePath) => join(preview, sourcePath)),
     ], { excludedPaths: new Set(spec.referenceExclusions) });
-    members = memberMetadata.map(({ name, source_path }) => ({
+    const members = memberMetadata.map(({ name, source_path }) => ({
       name, source_path, tree_digest: deployedTreeDigest(join(preview, name)),
     }));
-    resources = spec.sharedPaths.map((sourcePath) => ({
+    const resources = spec.sharedPaths.map((sourcePath) => ({
       source_path: sourcePath,
       relative_path: sourcePath,
       tree_digest: resourceDigest(join(preview, sourcePath), { deployed: true }),
     }));
+    return {
+      provider: 'github', repository_id: spec.repositoryId, revision, root,
+      remote_attestation: {
+        scheme: 'origin-tracking-containment.v1', refs: remoteAttestation.refs,
+      },
+      tree_digest: treeDigest(authorityRoot), manifest_digest: sha256(readFileSync(manifestPath)),
+      reference_graph_digest: references.digest, members, resources,
+    };
   } finally {
-    rmSync(previewRoot, { recursive: true, force: true });
+    rmSync(authorityParent, { recursive: true, force: true });
   }
-  return {
-    provider: 'github', repository_id: spec.repositoryId, revision, root,
-    remote_attestation: {
-      scheme: 'origin-tracking-containment.v1', refs: remoteAttestation.refs,
-    },
-    tree_digest: treeDigest(root), manifest_digest: sha256(readFileSync(manifestPath)),
-    reference_graph_digest: references.digest, members, resources,
-  };
 }
 
 function nativeIdentity(home, path) { return inspectCollectionEntry({ home, path }); }
@@ -467,15 +468,13 @@ function qualifiedProjectionTarget({ path, name, legacyPath, candidate, spec }) 
   try {
     if (treeDigest(destination) !== candidateMember.tree_digest) return false;
     if (sameFilesystemObject(destination, join(candidate.root, member.sourcePath))) return true;
-    const gitEnvironment = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
-    const git = (...args) => spawnSync('/usr/bin/git', ['-C', destination, ...args], { encoding: 'utf8', env: gitEnvironment });
+    const { git } = sourceGitAccess(destination);
     const top = git('rev-parse', '--show-toplevel');
     const head = git('rev-parse', 'HEAD');
-    const status = git('status', '--porcelain=v1', '--untracked-files=all');
     const remote = git('remote', 'get-url', 'origin');
-    if (top.status !== 0 || head.status !== 0 || status.status !== 0 || remote.status !== 0) return false;
+    if (top.status !== 0 || head.status !== 0 || remote.status !== 0) return false;
     const topRoot = realpathSync(top.stdout.trim());
-    return head.stdout.trim() === candidate.revision && status.stdout.length === 0
+    return head.stdout.trim() === candidate.revision
       && approvedGithubOrigin(remote.stdout.trim(), spec)
       && sameFilesystemObject(destination, join(topRoot, member.sourcePath));
   } catch { return false; }
@@ -768,6 +767,7 @@ function operationPaths(plan, id = operationId(plan)) {
     activePath: join(plan.control.root, 'active.json'), artifactRepo: join(plan.control.root, 'artifacts', plan.source.tree_digest.slice(7), 'repo'),
     recoveryOperationRoot, recoveryPreState: join(recoveryOperationRoot, 'pre-state'), recoveryPlanPath: join(recoveryOperationRoot, 'plan.json'),
     quarantineOperationRoot, stageRoot: join(plan.home, '.agents/.skills-refiner-stage', id),
+    artifactStage: join(plan.home, '.agents/.skills-refiner-stage', id, 'artifact-repo'),
     stageCollection: join(plan.home, '.agents/.skills-refiner-stage', id, plan.collection_id),
     lockPath: join(plan.home, '.agents/skill-control/collection-mutation.lock'),
     catalogPath: join(plan.home, 'Library/Application Support/skills-refiner/catalog.json'),
@@ -961,16 +961,23 @@ function verifyPreconditions(plan) {
 
 function ensureArtifact(plan, paths) {
   if (lstatExists(paths.artifactRepo)) {
+    const rootMode = lstatSync(paths.artifactRepo).mode & 0o777;
+    if ((rootMode & 0o500) !== 0o500 || (rootMode & 0o022) !== 0) fail('artifact_conflict', 'existing artifact root mode is unsafe');
+    if (lstatExists(join(paths.artifactRepo, '.git'))) fail('artifact_conflict', 'existing artifact contains Git metadata');
     if (treeDigest(paths.artifactRepo) !== plan.source.tree_digest) fail('artifact_conflict', 'existing artifact digest mismatch');
     return;
   }
   assertSafeManagedPath(plan.home, paths.artifactRepo);
   mkdirSync(dirname(paths.artifactRepo), { recursive: true, mode: 0o700 });
-  cpSync(plan.source.root, paths.artifactRepo, {
-    recursive: true, force: false, errorOnExist: true, preserveTimestamps: true,
-    filter: (source) => relative(plan.source.root, source) !== '.git' && !relative(plan.source.root, source).startsWith(`.git${sep}`),
+  assertSafeManagedPath(plan.home, paths.artifactStage);
+  const { readObjects } = sourceGitAccess(plan.source.root);
+  materializeGitRevision({
+    readObjects, revision: plan.source.revision, destination: paths.artifactStage, fail,
   });
-  if (treeDigest(paths.artifactRepo) !== plan.source.tree_digest) fail('artifact_copy_failed', 'artifact copy changed identity');
+  if (treeDigest(paths.artifactStage) !== plan.source.tree_digest) fail('artifact_copy_failed', 'artifact copy changed identity');
+  renameSync(paths.artifactStage, paths.artifactRepo);
+  const parent = openSync(dirname(paths.artifactRepo), 'r');
+  try { fsyncSync(parent); } finally { closeSync(parent); }
 }
 
 function runtimeLocator(plan, paths) {
@@ -990,7 +997,9 @@ function expectedMembers(plan, paths) {
     try {
       const gateway = join(temporary, name);
       const source = plan.source.members.find((member) => member.name === name);
-      cpSync(join(paths.artifactRepo, source.source_path), gateway, { recursive: true, force: false, errorOnExist: true, preserveTimestamps: true });
+      copyTreeWithStableModes(join(paths.artifactRepo, source.source_path), gateway, {
+        recursive: true, force: false, errorOnExist: true, preserveTimestamps: true,
+      }, fail);
       durableJson(join(gateway, locatorFilename(plan)), runtimeLocator(plan, paths));
       return { name, relative_path: name, tree_digest: deployedTreeDigest(gateway) };
     } finally { rmSync(temporary, { recursive: true, force: true }); }
@@ -1212,6 +1221,7 @@ export function applyManagedPlan(plan, confirmation, { faultPhase = null, killPh
   const lock = acquireLock(paths, plan);
   let mutation = false;
   let operationPublished = false;
+  let stageOwned = false;
   try {
     mkdirSync(dirname(paths.operationRoot), { recursive: true, mode: 0o700 });
     mkdirSync(paths.operationRoot, { recursive: false, mode: 0o700 });
@@ -1219,6 +1229,13 @@ export function applyManagedPlan(plan, confirmation, { faultPhase = null, killPh
     writeOperation(paths, plan, OPERATION_STATES.planned);
     operationPublished = true;
     verifyPreconditions(plan);
+    assertSafeManagedPath(plan.home, paths.stageRoot);
+    if (lstatExists(paths.stageRoot)) fail('stage_conflict', `staging root already exists: ${paths.stageRoot}`);
+    mkdirSync(dirname(paths.stageRoot), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(paths.stageRoot), 0o700);
+    mkdirSync(paths.stageRoot, { recursive: false, mode: 0o700 });
+    stageOwned = true;
+    chmodSync(paths.stageRoot, 0o700);
     ensureArtifact(plan, paths);
     copyRecovery(plan, paths);
     materializeCollection(plan, paths);
@@ -1269,7 +1286,7 @@ export function applyManagedPlan(plan, confirmation, { faultPhase = null, killPh
     if (error instanceof MacosAdapterError) fail('native_mutation_blocked', error.reason, error.status);
     throw error;
   } finally {
-    if (lstatExists(paths.stageRoot)) rmSync(paths.stageRoot, { recursive: true, force: true });
+    if (stageOwned && lstatExists(paths.stageRoot)) rmSync(paths.stageRoot, { recursive: true, force: true });
     releaseLock(paths, lock);
   }
 }
@@ -1297,7 +1314,11 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     if (operation.operation_id !== paths.id || operation.plan_hash !== plan.plan_hash) issues.push('OPERATION_IDENTITY_DRIFT');
     if (requireCommitted && operation.state !== OPERATION_STATES.committed) issues.push(`OPERATION_NOT_COMMITTED:${operation.state}`);
   } catch { issues.push('OPERATION_MISSING_OR_INVALID'); }
-  try { const stat = lstatSync(plan.target.collection_root); if (stat.isSymbolicLink() || !stat.isDirectory()) issues.push('COLLECTION_ROOT_NOT_REAL_DIRECTORY'); } catch { issues.push('COLLECTION_ROOT_MISSING'); }
+  try {
+    const stat = lstatSync(plan.target.collection_root);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) issues.push('COLLECTION_ROOT_NOT_REAL_DIRECTORY');
+    else if ((stat.mode & 0o777) !== 0o755) issues.push('COLLECTION_ROOT_MODE_DRIFT');
+  } catch { issues.push('COLLECTION_ROOT_MISSING'); }
   if (lstatExists(join(plan.target.collection_root, 'SKILL.md'))) issues.push('COLLECTION_ROOT_HAS_SKILL_MD');
   try {
     index = readJson(join(plan.target.collection_root, 'INDEX.json'), 'invalid_index');
@@ -1305,7 +1326,12 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     expected = expectedIndex(plan, paths);
     if (canonicalJson(index) !== canonicalJson(expected)) issues.push('INDEX_IDENTITY_DRIFT');
   } catch { issues.push('INDEX_MISSING_OR_INVALID'); }
-  try { if (treeDigest(paths.artifactRepo) !== plan.source.tree_digest) issues.push('ARTIFACT_IDENTITY_DRIFT'); } catch { issues.push('ARTIFACT_MISSING_OR_INVALID'); }
+  try {
+    const artifactRootMode = lstatSync(paths.artifactRepo).mode & 0o777;
+    if ((artifactRootMode & 0o500) !== 0o500 || (artifactRootMode & 0o022) !== 0) issues.push('ARTIFACT_ROOT_MODE_UNSAFE');
+    if (lstatExists(join(paths.artifactRepo, '.git'))) issues.push('ARTIFACT_CONTAINS_GIT_METADATA');
+    if (treeDigest(paths.artifactRepo) !== plan.source.tree_digest) issues.push('ARTIFACT_IDENTITY_DRIFT');
+  } catch { issues.push('ARTIFACT_MISSING_OR_INVALID'); }
   if (index !== null) {
     const expectedEntries = new Set(['INDEX.json', ...index.members.map(({ name }) => name), ...index.resources.map(({ relative_path }) => relative_path.split('/')[0])]);
     try {
@@ -1317,10 +1343,18 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     for (const member of index.members) {
       const path = join(plan.target.collection_root, member.name);
       if (!lstatExists(path)) continue;
-      try { if (deployedTreeDigest(path) !== expectedMembers.get(member.name)) issues.push(`MEMBER_DRIFT:${member.name}`); } catch { issues.push(`MEMBER_INVALID:${member.name}`); }
+      try {
+        if ((lstatSync(path).mode & 0o777) !== 0o755) issues.push(`MEMBER_ROOT_MODE_DRIFT:${member.name}`);
+        if (deployedTreeDigest(path) !== expectedMembers.get(member.name)) issues.push(`MEMBER_DRIFT:${member.name}`);
+      } catch { issues.push(`MEMBER_INVALID:${member.name}`); }
     }
     for (const resource of index.resources) {
-      try { if (resourceDigest(join(plan.target.collection_root, resource.relative_path), { deployed: true }) !== resource.tree_digest) issues.push(`RESOURCE_DRIFT:${resource.relative_path}`); } catch { issues.push(`RESOURCE_MISSING_OR_INVALID:${resource.relative_path}`); }
+      try {
+        const resourcePath = join(plan.target.collection_root, resource.relative_path);
+        const stat = lstatSync(resourcePath);
+        if (stat.isDirectory() && (stat.mode & 0o777) !== 0o755) issues.push(`RESOURCE_ROOT_MODE_DRIFT:${resource.relative_path}`);
+        if (resourceDigest(resourcePath, { deployed: true }) !== resource.tree_digest) issues.push(`RESOURCE_DRIFT:${resource.relative_path}`);
+      } catch { issues.push(`RESOURCE_MISSING_OR_INVALID:${resource.relative_path}`); }
     }
     if (plan.target.exposure.type === 'gateway') {
       const locatorPath = join(plan.target.collection_root, plan.target.exposure.name, locatorFilename(plan));
@@ -1626,12 +1660,16 @@ export function repairManagedCollection({ collectionId, home, confirmation }) {
   const missingResource = before.issues.some((issue) => issue.startsWith('RESOURCE_MISSING_OR_INVALID:'));
   const replaceCollection = before.issues.includes('COLLECTION_ROOT_MISSING')
     || before.issues.includes('INDEX_MISSING_OR_INVALID') || before.issues.includes('LOCATOR_MISSING_OR_INVALID')
+    || before.issues.includes('COLLECTION_ROOT_MODE_DRIFT')
+    || before.issues.some((issue) => issue.startsWith('MEMBER_ROOT_MODE_DRIFT:')
+      || issue.startsWith('RESOURCE_ROOT_MODE_DRIFT:'))
     || missingResource;
   const allowed = before.issues.every((issue) => issue.startsWith('MISSING_COLLECTION_ENTRY:')
     || issue.startsWith('AGENT_EXPOSURE_DRIFT:') || issue === 'GLOBAL_EXPOSURE_DRIFT'
     || ['ORPHANED_CATALOG', 'CATALOG_VIEW_MISSING', 'CATALOG_VIEW_DRIFT', 'CATALOG_VIEW_INVALID'].includes(issue)
-    || (replaceCollection && (['COLLECTION_ROOT_MISSING', 'INDEX_MISSING_OR_INVALID', 'INDEX_IDENTITY_DRIFT', 'LOCATOR_MISSING_OR_INVALID', 'LOCATOR_DRIFT'].includes(issue)
-      || issue.startsWith('RESOURCE_MISSING_OR_INVALID:'))));
+    || (replaceCollection && (['COLLECTION_ROOT_MISSING', 'COLLECTION_ROOT_MODE_DRIFT', 'INDEX_MISSING_OR_INVALID', 'INDEX_IDENTITY_DRIFT', 'LOCATOR_MISSING_OR_INVALID', 'LOCATOR_DRIFT'].includes(issue)
+      || issue.startsWith('RESOURCE_MISSING_OR_INVALID:') || issue.startsWith('MEMBER_ROOT_MODE_DRIFT:')
+      || issue.startsWith('RESOURCE_ROOT_MODE_DRIFT:'))));
   if (!allowed) fail('repair_conflict', `repair refuses non-missing drift: ${before.issues.join(', ')}`);
   const lock = acquireLock(paths, plan);
   const repairRoot = join(plan.home, '.agents/.skills-refiner-repair', paths.id);

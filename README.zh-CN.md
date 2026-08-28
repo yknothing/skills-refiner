@@ -260,6 +260,25 @@ TTY 提供 **Keep / Later / Inspect / Retire**。空输入等于 Later，因此�
 payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent 也可能保留
 缓存。系统不会自动再次隔离 rehydrated 条目，必须先 review 新证据。
 
+### revision-pure 物理 collection 升级
+
+`collection check/plan` 只接受 approved-origin Git worktree 当前 HEAD 所选择的精确 40 位 revision。
+当前 plan 还要求该 revision 被本地 `origin/*` remote-tracking ref 包含。校验与 artifact
+发布会直接解析并复核选定 commit、tree、blob objects，再经 controller-owned staging
+目录发布；atomic rename 前会复算 object ID，并复核 portable path、entry type、executable
+bit 与落盘 bytes。symlink、submodule、未解析 Git LFS pointer、保留/碰撞 path，或超过
+node/depth/byte 上限的输入都会 fail closed。因此 ignored 文件、未跟踪空目录、smudge
+filter 输出、隐藏 worktree override 和本地 permission drift 都不会进入 artifact。可见
+tracked modification 与 untracked 文件同样不属于 authority boundary；控制器不会为了
+分类它们而执行 repository-configured clean filter 或 filesystem monitor。仍建议使用专用
+checkout，而不是日常开发 workspace，以保持操作可读性。本地 remote-tracking containment
+不是实时 fetch 或 signed release 证明；需要更强 claim 时必须另存一次时点明确的远端
+核验。Collection copy 会显式恢复 source permission，所以普通与 restrictive caller
+`umask` 不会改变 plan、apply、repair 或 status identity。
+为兼容已经激活的 generation，持久化 collection digest 仍使用历史 Node 24 locale
+comparator；未来若切换为 byte-order digest，必须走显式 schema migration，不能静默改变
+active identity。
+
 ### 运行时暴露面与证据
 
 物理 collection 解决来源与升级组织问题，但仅靠目录嵌套不会降低 Agent catalog

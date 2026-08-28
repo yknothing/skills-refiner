@@ -128,9 +128,22 @@ must move as one physical and recoverable unit. Do not substitute manual `mv`,
 wildcard deletion, ad-hoc symlinks, or direct `.skill-lock.json` edits.
 
 The current declarative managed profiles are `loopos`, `langcraft`, and
-`better-skills`. A reviewed source must be a clean Git worktree at the exact
+`better-skills`. A reviewed source must be a Git worktree whose HEAD selects the exact
 40-character revision and approved origin. A branch or `latest` is only a
-candidate discovery input; resolve it before `check`.
+candidate discovery input; resolve it before `check`. Use a dedicated checkout for operator clarity.
+`check` materializes and validates only the selected commit's Git objects;
+it directly verifies commit, tree, and blob object IDs, portable paths, entry
+types, executable bits, and the final written bytes inside a controller-owned
+staging directory before atomic publication. Symlinks, submodules, unresolved
+Git LFS pointers, reserved or colliding paths, and inputs beyond the bounded
+node/depth/byte budgets fail closed. Consequently,
+ignored files, empty local directories, smudge-filter output, hidden worktree
+overrides, visible tracked modifications, untracked files, and local permission
+drift cannot enter the artifact. The controller does not execute repository-configured
+clean filters or filesystem monitors to classify worktree state. Current plans require
+the revision to be contained by a local `origin/*` remote-tracking ref. That is a content-bound
+local attestation, not a live remote fetch or signed release proof; record a
+separate point-in-time remote check when that stronger claim matters.
 
 ```bash
 NODE24=/absolute/path/to/node24
@@ -238,7 +251,12 @@ Deployment comparison ignores only the exact Finder metadata basename
 `.DS_Store` at any collection depth. Source, immutable artifact, predecessor,
 quarantine, and recovery identities remain exact, and every other unknown file
 still causes drift. Do not delete `.DS_Store` merely to manufacture a green
-status.
+status. Controller-owned copies restore every source permission explicitly, so
+plan, apply, repair, and status identity do not depend on the invoking shell's
+ambient `umask`.
+Persisted collection digests retain their historical Node 24 locale comparator
+for schema compatibility. Do not change that comparator without an explicit
+digest-schema migration and predecessor compatibility proof.
 
 ## Managing the ProdCraft V1 physical collection
 

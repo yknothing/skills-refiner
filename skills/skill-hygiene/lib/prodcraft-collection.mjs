@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   closeSync,
   constants,
   copyFileSync,
-  cpSync,
   existsSync,
   fsyncSync,
   fstatSync,
@@ -32,8 +32,10 @@ import {
   validateOperationRecord,
 } from './collection-contract.mjs';
 import { canonicalJson } from './cleanup-contract.mjs';
-import { computeTreeDigest } from './collection-tree.mjs';
-import { originTrackingRefsContaining } from './git-source-attestation.mjs';
+import { computeTreeDigest, copyTreeWithStableModes } from './collection-tree.mjs';
+import {
+  materializeGitRevision, originTrackingRefsContaining, sourceGitAccess,
+} from './git-source-attestation.mjs';
 import { observeUpstreamVersion, upstreamVersionEvidence } from './upstream-version.mjs';
 import {
   createCollectionFileExclusive,
@@ -233,71 +235,71 @@ export function inspectProdcraftSource({ sourceRoot, revision }) {
   if (root !== sourceRoot) fail('unsafe_source_root', 'source root must be normalized and absolute');
   assertAbsoluteRealDirectory(root, 'source root');
   if (!/^[0-9a-f]{40}$/u.test(revision)) fail('invalid_revision', 'revision must be a full commit SHA');
-  const registryPath = join(root, 'schemas/distribution/public-skill-registry.json');
-  const indexPath = join(root, 'skills/.curated/index.json');
-  const registryBytes = readFileSync(registryPath);
-  const indexBytes = readFileSync(indexPath);
-  const registry = readJson(registryPath, 'invalid_registry');
-  const index = readJson(indexPath, 'invalid_curated_index');
-  const registryNames = registry.public_skills?.map(({ name }) => name);
-  const indexNames = index.skills?.map(({ name }) => name);
-  if (!Array.isArray(registryNames) || !Array.isArray(indexNames)) fail('invalid_public_surface', 'registry/index skills arrays are required');
-  const expected = [...PUBLIC_MEMBER_NAMES].sort();
-  for (const names of [registryNames, indexNames]) {
-    if (names.length !== 40 || new Set(names).size !== 40
-        || canonicalJson([...names].sort()) !== canonicalJson(expected)) {
-      fail('invalid_public_surface', 'public surface must equal the reviewed 40 pc-* packages');
-    }
-  }
-  const curatedRoot = join(root, 'skills/.curated');
-  const diskNames = readdirSync(curatedRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory()).map(({ name }) => name).sort();
-  if (canonicalJson(diskNames) !== canonicalJson(expected)) fail('invalid_public_surface', 'curated directories do not match registry');
-  const members = expected.map((name) => {
-    if (!PUBLIC_SET.has(name)) fail('invalid_public_surface', `unknown member ${name}`);
-    const memberRoot = join(curatedRoot, name);
-    assertAbsoluteRealDirectory(memberRoot, `member ${name}`);
-    const metadata = frontmatter(join(memberRoot, 'SKILL.md'));
-    if (metadata.name !== name) fail('invalid_skill', `frontmatter name mismatch for ${name}`);
-    if (metadata.description.length > 1024) fail('invalid_skill', `frontmatter description too long for ${name}`);
-    return { name, relative_path: `skills/.curated/${name}`, tree_digest: treeDigest(memberRoot) };
-  });
-  const references = referenceGraph(curatedRoot);
-  const gitEnvironment = {
-    ...process.env,
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-  };
-  const git = (...args) => spawnSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', env: gitEnvironment });
+  const { git, readObjects } = sourceGitAccess(root);
   const topLevel = git('rev-parse', '--show-toplevel');
   const head = git('rev-parse', 'HEAD');
-  const status = git('status', '--porcelain=v1', '--untracked-files=all');
   const remote = git('remote', 'get-url', 'origin');
   if (topLevel.status !== 0 || realpathSync(topLevel.stdout.trim()) !== root) fail('unverified_source', 'source root must be a Git worktree root');
   if (head.status !== 0 || head.stdout.trim() !== revision) fail('source_revision_mismatch', 'source HEAD does not match the approved revision');
-  if (status.status !== 0 || status.stdout.length !== 0) fail('source_worktree_dirty', 'source worktree must be clean');
   if (remote.status !== 0 || !['https://github.com/yknothing/prodcraft.git', 'git@github.com:yknothing/prodcraft.git'].includes(remote.stdout.trim())) {
     fail('source_origin_mismatch', 'source origin must be the approved yknothing/prodcraft repository');
   }
-  upstreamVersionEvidence(root, { path: 'manifest.yml', format: 'yaml_root_version' });
   const remoteAttestation = originTrackingRefsContaining(git, revision);
   if (!remoteAttestation.ok || remoteAttestation.refs.length === 0) {
     fail('source_revision_not_remote_tracked', 'source revision must be contained by an origin remote-tracking ref');
   }
-  return {
-    provider: 'github',
-    repository_id: RECEIPT_SOURCE,
-    revision,
-    root,
-    remote_attestation: {
-      scheme: 'origin-tracking-containment.v1', refs: remoteAttestation.refs,
-    },
-    tree_digest: treeDigest(root),
-    registry_digest: sha256(registryBytes),
-    curated_index_digest: sha256(indexBytes),
-    reference_graph_digest: references.digest,
-    members,
-  };
+  const authorityParent = realpathSync(mkdtempSync(join(tmpdir(), 'skills-refiner-prodcraft-authority-')));
+  try {
+    const authorityRoot = join(authorityParent, 'repository');
+    materializeGitRevision({ readObjects, revision, destination: authorityRoot, fail });
+    const registryPath = join(authorityRoot, 'schemas/distribution/public-skill-registry.json');
+    const indexPath = join(authorityRoot, 'skills/.curated/index.json');
+    const registryBytes = readFileSync(registryPath);
+    const indexBytes = readFileSync(indexPath);
+    const registry = readJson(registryPath, 'invalid_registry');
+    const index = readJson(indexPath, 'invalid_curated_index');
+    const registryNames = registry.public_skills?.map(({ name }) => name);
+    const indexNames = index.skills?.map(({ name }) => name);
+    if (!Array.isArray(registryNames) || !Array.isArray(indexNames)) fail('invalid_public_surface', 'registry/index skills arrays are required');
+    const expected = [...PUBLIC_MEMBER_NAMES].sort();
+    for (const names of [registryNames, indexNames]) {
+      if (names.length !== 40 || new Set(names).size !== 40
+          || canonicalJson([...names].sort()) !== canonicalJson(expected)) {
+        fail('invalid_public_surface', 'public surface must equal the reviewed 40 pc-* packages');
+      }
+    }
+    const curatedRoot = join(authorityRoot, 'skills/.curated');
+    const diskNames = readdirSync(curatedRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory()).map(({ name }) => name).sort();
+    if (canonicalJson(diskNames) !== canonicalJson(expected)) fail('invalid_public_surface', 'curated directories do not match registry');
+    const members = expected.map((name) => {
+      if (!PUBLIC_SET.has(name)) fail('invalid_public_surface', `unknown member ${name}`);
+      const memberRoot = join(curatedRoot, name);
+      assertAbsoluteRealDirectory(memberRoot, `member ${name}`);
+      const metadata = frontmatter(join(memberRoot, 'SKILL.md'));
+      if (metadata.name !== name) fail('invalid_skill', `frontmatter name mismatch for ${name}`);
+      if (metadata.description.length > 1024) fail('invalid_skill', `frontmatter description too long for ${name}`);
+      return { name, relative_path: `skills/.curated/${name}`, tree_digest: treeDigest(memberRoot) };
+    });
+    const references = referenceGraph(curatedRoot);
+    upstreamVersionEvidence(authorityRoot, { path: 'manifest.yml', format: 'yaml_root_version' });
+    return {
+      provider: 'github',
+      repository_id: RECEIPT_SOURCE,
+      revision,
+      root,
+      remote_attestation: {
+        scheme: 'origin-tracking-containment.v1', refs: remoteAttestation.refs,
+      },
+      tree_digest: treeDigest(authorityRoot),
+      registry_digest: sha256(registryBytes),
+      curated_index_digest: sha256(indexBytes),
+      reference_graph_digest: references.digest,
+      members,
+    };
+  } finally {
+    rmSync(authorityParent, { recursive: true, force: true });
+  }
 }
 
 function contained(home, path) {
@@ -463,6 +465,7 @@ function operationPaths(plan, id = operationId(plan)) {
     recoveryPreState: join(recoveryOperationRoot, 'pre-state'),
     quarantineOperationRoot,
     stageRoot: join(plan.home, '.agents/.skills-refiner-stage', id),
+    artifactStage: join(plan.home, '.agents/.skills-refiner-stage', id, 'artifact-repo'),
     stageCollection: join(plan.home, '.agents/.skills-refiner-stage', id, 'prodcraft'),
     lockPath: join(plan.home, '.agents/skill-control/collection-mutation.lock'),
   };
@@ -653,20 +656,23 @@ function nativeIdentity(home, path) {
 
 function ensureArtifact(plan, paths) {
   if (lstatExists(paths.artifactRepo)) {
+    const rootMode = lstatSync(paths.artifactRepo).mode & 0o777;
+    if ((rootMode & 0o500) !== 0o500 || (rootMode & 0o022) !== 0) fail('artifact_conflict', 'existing artifact root mode is unsafe');
+    if (lstatExists(join(paths.artifactRepo, '.git'))) fail('artifact_conflict', 'existing artifact contains Git metadata');
     if (treeDigest(paths.artifactRepo) !== plan.source.tree_digest) fail('artifact_conflict', 'existing artifact digest mismatch');
     return;
   }
   assertSafeManagedPath(plan.home, paths.artifactRepo);
   mkdirSync(dirname(paths.artifactRepo), { recursive: true, mode: 0o700 });
-  cpSync(plan.source.root, paths.artifactRepo, {
-    recursive: true,
-    force: false,
-    errorOnExist: true,
-    preserveTimestamps: true,
-    filter: (source) => relative(plan.source.root, source) !== '.git'
-      && !relative(plan.source.root, source).startsWith(`.git${sep}`),
+  assertSafeManagedPath(plan.home, paths.artifactStage);
+  const { readObjects } = sourceGitAccess(plan.source.root);
+  materializeGitRevision({
+    readObjects, revision: plan.source.revision, destination: paths.artifactStage, fail,
   });
-  if (treeDigest(paths.artifactRepo) !== plan.source.tree_digest) fail('artifact_copy_failed', 'artifact copy did not preserve source identity');
+  if (treeDigest(paths.artifactStage) !== plan.source.tree_digest) fail('artifact_copy_failed', 'artifact copy did not preserve source identity');
+  renameSync(paths.artifactStage, paths.artifactRepo);
+  const parent = openSync(dirname(paths.artifactRepo), 'r');
+  try { fsyncSync(parent); } finally { closeSync(parent); }
 }
 
 function runtimeLocator(plan, paths) {
@@ -694,12 +700,12 @@ function expectedMaterializedMembers(plan, paths) {
   const temporaryRoot = realpathSync(mkdtempSync(join(tmpdir(), 'skills-refiner-prodcraft-gateway-')));
   try {
     const temporaryGateway = join(temporaryRoot, 'pc-prodcraft');
-    cpSync(join(paths.artifactRepo, 'skills/.curated/pc-prodcraft'), temporaryGateway, {
+    copyTreeWithStableModes(join(paths.artifactRepo, 'skills/.curated/pc-prodcraft'), temporaryGateway, {
       recursive: true,
       force: false,
       errorOnExist: true,
       preserveTimestamps: true,
-    });
+    }, fail);
     durableJson(join(temporaryGateway, 'prodcraft-runtime.json'), runtimeLocator(plan, paths));
     gateway.tree_digest = treeDigest(temporaryGateway);
   } finally {
@@ -734,13 +740,14 @@ function materializeCollection(plan, paths, target = paths.stageCollection) {
   assertSafeManagedPath(plan.home, target);
   if (lstatExists(target)) fail('stage_conflict', `staging target already exists: ${target}`);
   mkdirSync(target, { recursive: true, mode: 0o755 });
+  chmodSync(target, 0o755);
   for (const member of plan.source.members) {
-    cpSync(join(paths.artifactRepo, member.relative_path), join(target, member.name), {
+    copyTreeWithStableModes(join(paths.artifactRepo, member.relative_path), join(target, member.name), {
       recursive: true,
       force: false,
       errorOnExist: true,
       preserveTimestamps: true,
-    });
+    }, fail);
   }
   const locatorPath = join(target, 'pc-prodcraft/prodcraft-runtime.json');
   durableJson(locatorPath, runtimeLocator(plan, paths));
@@ -948,12 +955,20 @@ export function applyProdcraftPlan(plan, confirmation, { faultPhase = null, kill
   verifyPreconditions(plan);
   const lock = acquireLock(paths, plan);
   let mutationOccurred = false;
+  let stageOwned = false;
   try {
     verifyPreconditions(plan);
     if (lstatExists(paths.operationRoot) || lstatExists(paths.quarantineOperationRoot)) fail('operation_conflict', `operation already exists: ${paths.id}`);
     mkdirSync(paths.operationRoot, { recursive: true, mode: 0o700 });
     durableJson(paths.planPath, plan);
     writeOperation(paths, plan, OPERATION_STATES.planned);
+    assertSafeManagedPath(plan.home, paths.stageRoot);
+    if (lstatExists(paths.stageRoot)) fail('stage_conflict', `staging root already exists: ${paths.stageRoot}`);
+    mkdirSync(dirname(paths.stageRoot), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(paths.stageRoot), 0o700);
+    mkdirSync(paths.stageRoot, { recursive: false, mode: 0o700 });
+    stageOwned = true;
+    chmodSync(paths.stageRoot, 0o700);
     ensureArtifact(plan, paths);
     materializeCollection(plan, paths);
     copyRecovery(plan, paths);
@@ -993,7 +1008,6 @@ export function applyProdcraftPlan(plan, confirmation, { faultPhase = null, kill
         fail('recovery_required', `apply failed and rollback did not complete: ${rollbackError.message}`, 'recovery_required');
       }
     } else {
-      if (lstatExists(paths.stageRoot)) rmSync(paths.stageRoot, { recursive: true, force: true });
       if (lstatExists(paths.recoveryOperationRoot)) rmSync(paths.recoveryOperationRoot, { recursive: true, force: true });
       if (lstatExists(paths.quarantineOperationRoot)) rmSync(paths.quarantineOperationRoot, { recursive: true, force: true });
       if (lstatExists(paths.operationRoot)) rmSync(paths.operationRoot, { recursive: true, force: true });
@@ -1003,6 +1017,7 @@ export function applyProdcraftPlan(plan, confirmation, { faultPhase = null, kill
     }
     throw error;
   } finally {
+    if (stageOwned && lstatExists(paths.stageRoot)) rmSync(paths.stageRoot, { recursive: true, force: true });
     releaseLock(paths, lock);
   }
 }
@@ -1021,6 +1036,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
   try {
     const rootStat = lstatSync(plan.target.collection_root);
     if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) issues.push('COLLECTION_ROOT_NOT_REAL_DIRECTORY');
+    else if ((rootStat.mode & 0o777) !== 0o755) issues.push('COLLECTION_ROOT_MODE_DRIFT');
   } catch { issues.push('COLLECTION_ROOT_MISSING'); }
   if (lstatExists(join(plan.target.collection_root, 'SKILL.md'))) issues.push('COLLECTION_ROOT_HAS_SKILL_MD');
   try {
@@ -1030,6 +1046,9 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     if (canonicalJson(index) !== canonicalJson(expectedIndex)) issues.push('INDEX_IDENTITY_DRIFT');
   } catch { issues.push('INDEX_MISSING_OR_INVALID'); }
   try {
+    const artifactRootMode = lstatSync(paths.artifactRepo).mode & 0o777;
+    if ((artifactRootMode & 0o500) !== 0o500 || (artifactRootMode & 0o022) !== 0) issues.push('ARTIFACT_ROOT_MODE_UNSAFE');
+    if (lstatExists(join(paths.artifactRepo, '.git'))) issues.push('ARTIFACT_CONTAINS_GIT_METADATA');
     if (treeDigest(paths.artifactRepo) !== plan.source.tree_digest) issues.push('ARTIFACT_IDENTITY_DRIFT');
   } catch { issues.push('ARTIFACT_MISSING_OR_INVALID'); }
   if (index !== null) {
@@ -1048,6 +1067,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
       const path = join(plan.target.collection_root, member.name);
       if (!lstatExists(path)) continue;
       try {
+        if ((lstatSync(path).mode & 0o777) !== 0o755) issues.push(`MEMBER_ROOT_MODE_DRIFT:${member.name}`);
         if (expectedMembers.size > 0 && treeDigest(path) !== expectedMembers.get(member.name)?.tree_digest) issues.push(`MEMBER_DRIFT:${member.name}`);
       } catch { issues.push(`MEMBER_INVALID:${member.name}`); }
     }
@@ -1294,11 +1314,14 @@ export function repairProdcraftCollection({ home, confirmation }) {
   const indexPath = join(plan.target.collection_root, 'INDEX.json');
   const locatorPath = join(plan.target.collection_root, 'pc-prodcraft/prodcraft-runtime.json');
   const replaceCollection = (before.issues.includes('INDEX_MISSING_OR_INVALID') && !lstatExists(indexPath))
-    || (before.issues.includes('LOCATOR_MISSING_OR_INVALID') && !lstatExists(locatorPath));
+    || (before.issues.includes('LOCATOR_MISSING_OR_INVALID') && !lstatExists(locatorPath))
+    || before.issues.includes('COLLECTION_ROOT_MODE_DRIFT')
+    || before.issues.some((issue) => issue.startsWith('MEMBER_ROOT_MODE_DRIFT:'));
   const allowed = before.issues.every((issue) => issue.startsWith('MISSING_COLLECTION_ENTRY:')
     || issue === 'GATEWAY_PROJECTION_DRIFT'
     || issue.startsWith('AGENT_GATEWAY_DRIFT:')
-    || (replaceCollection && ['INDEX_MISSING_OR_INVALID', 'LOCATOR_MISSING_OR_INVALID', 'INDEX_IDENTITY_DRIFT', 'MEMBER_DRIFT:pc-prodcraft'].includes(issue)));
+    || (replaceCollection && (['INDEX_MISSING_OR_INVALID', 'LOCATOR_MISSING_OR_INVALID', 'INDEX_IDENTITY_DRIFT', 'MEMBER_DRIFT:pc-prodcraft', 'COLLECTION_ROOT_MODE_DRIFT'].includes(issue)
+      || issue.startsWith('MEMBER_ROOT_MODE_DRIFT:'))));
   if (!allowed) fail('repair_conflict', `repair refuses non-missing drift: ${before.issues.join(', ')}`);
   const lock = acquireLock(paths, plan);
   const repaired = [];

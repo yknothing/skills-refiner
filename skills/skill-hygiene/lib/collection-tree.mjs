@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
+import {
+  chmodSync, cpSync, lstatSync, readFileSync, readdirSync, realpathSync,
+} from 'node:fs';
 import { isAbsolute, join, relative } from 'node:path';
 
 function walk(root, current, hash, fail, ignoredBasenames) {
@@ -33,4 +35,32 @@ export function computeTreeDigest(root, fail, { ignoredBasenames = [] } = {}) {
   const hash = createHash('sha256');
   walk(root, root, hash, fail, new Set(ignoredBasenames));
   return `sha256:${hash.digest('hex')}`;
+}
+
+function restoreCopiedModes(source, destination, fail) {
+  const sourceStat = lstatSync(source);
+  const destinationStat = lstatSync(destination);
+  if (sourceStat.isSymbolicLink() || destinationStat.isSymbolicLink()) {
+    fail('source_symlink', `copied tree contains symlink: ${source}`);
+  }
+  if (sourceStat.isDirectory() !== destinationStat.isDirectory()
+      || sourceStat.isFile() !== destinationStat.isFile()) {
+    fail('copy_identity_mismatch', `copied tree changed entry type: ${source}`);
+  }
+  chmodSync(destination, sourceStat.mode & 0o777);
+  if (!sourceStat.isDirectory()) return;
+  for (const entry of readdirSync(destination, { withFileTypes: true })) {
+    restoreCopiedModes(join(source, entry.name), join(destination, entry.name), fail);
+  }
+}
+
+/**
+ * fs.cpSync applies the caller's ambient umask while creating directories.
+ * Collection identity includes permission bits, so restore every copied mode
+ * explicitly before hashing or publishing the copy.
+ */
+export function copyTreeWithStableModes(source, destination, options, fail) {
+  if (typeof fail !== 'function') throw new TypeError('copyTreeWithStableModes requires a fail callback');
+  cpSync(source, destination, options);
+  restoreCopiedModes(source, destination, fail);
 }
