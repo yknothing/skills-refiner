@@ -43,6 +43,18 @@ assert_true() {
   fi
 }
 
+assert_json_variable() {
+  local label="$1" variable_name="$2" javascript="$3"
+  if printf '%s' "${!variable_name}" \
+      | "$NODE24" -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));${javascript}"; then
+    echo -e "  ${GREEN}✓${NC} $label"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}✗${NC} $label"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 safe_delete_tree() {
   local target="$1" tmp_root="${TMPDIR:-/tmp}"
   tmp_root="${tmp_root%/}"
@@ -88,6 +100,22 @@ setup_sandbox() {
 
   # 仅源
   write_skill "$SANDBOX/.agents/skills/source-only-skill" "source-only-skill"
+  cat > "$SANDBOX/.agents/.skill-lock.json" << 'EOF'
+{
+  "version": 3,
+  "skills": {
+    "source-only-skill": {
+      "source": "example/panorama-fixtures",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/example/panorama-fixtures.git",
+      "skillPath": "skills/source-only-skill/SKILL.md",
+      "skillFolderHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedAt": "2099-01-02T03:04:05.000Z",
+      "updatedAt": "2099-06-07T08:09:10.000Z"
+    }
+  }
+}
+EOF
 
   # 部分投影：仅 Claude 有投影（第八类）
   write_skill "$SANDBOX/.agents/skills/partial-skill" "partial-skill"
@@ -195,8 +223,21 @@ assert_eq "broken → 链接损坏" "链接损坏" "$(gap_of broken-link-skill)"
 assert_eq "collision → 命名冲突" "命名冲突" "$(gap_of collision-skill)"
 assert_eq "ghost catalog → 清单与现实不符" "清单与现实不符" "$(gap_of ghost-member)"
 
+LIFECYCLE=$($NODE24 -e '
+const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+const row=d.entries.find((entry)=>entry.identity.name==="source-only-skill");
+const observation=row.provenance_lifecycle.variants[0].observations.find((item)=>item.lifecycle.installed_at!==null);
+console.log([row.provenance_lifecycle.evidence_scope, observation.lifecycle.timestamp_semantics,
+  observation.lifecycle.installed_at, observation.lifecycle.updated_at,
+  observation.source.resolved_revision === null ? "null" : observation.source.resolved_revision].join(":"));
+' "$LATEST_JSON")
+assert_eq "entry lifecycle projects installer-declared receipt without revision" \
+  "identity_variants:installer_declared:2099-01-02T03:04:05.000Z:2099-06-07T08:09:10.000Z:null" \
+  "$LIFECYCLE"
+
 assert_true "markdown has 八类导航" grep -q "部分 Agent 已出现" "$LATEST_MD"
 assert_true "markdown has 字段对照" grep -q "字段对照" "$LATEST_MD"
+assert_true "markdown has per-skill installer-declared lifecycle" grep -q "2099-01-02T03:04:05.000Z" "$LATEST_MD"
 if grep -q "rm -rf" "$LATEST_MD"; then
   echo -e "  ${RED}✗${NC} markdown forbids rm -rf"
   FAIL=$((FAIL + 1))
@@ -222,18 +263,17 @@ done
 
 # 零交互 --stdout-only
 STDOUT_JSON=$("$PANORAMA_BIN" --yes --agents claude --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>/dev/null)
-assert_true "stdout-only emits JSON" "$NODE24" -e "JSON.parse(process.argv[1])" "$STDOUT_JSON"
+assert_json_variable "stdout-only emits JSON" STDOUT_JSON ''
 
 # `all` 必须来自 scanner topology，且不能把权威源目录误当成 Agent。
 ALL_STDOUT_JSON=$("$PANORAMA_BIN" --yes --agents all --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>/dev/null)
-assert_true "--agents all discovers every present Agent root" "$NODE24" -e '
-const d=JSON.parse(process.argv[1]);
+assert_json_variable "--agents all discovers every present Agent root" ALL_STDOUT_JSON '
 const locations=d.agents.map((agent)=>agent.location);
 for (const expected of [".claude/skills", ".cursor/skills", ".codex/skills", ".gemini/skills"]) {
   if (!locations.includes(expected)) process.exit(1);
 }
 if (locations.includes(".agents/skills")) process.exit(1);
-' "$ALL_STDOUT_JSON"
+'
 
 # 大型 stdout 必须完整排空。真实全机矩阵会轻易超过 pipe buffer；过去
 # direct-entrypoint 在 write 后立即 process.exit，产生可复现的截断 JSON。
@@ -244,9 +284,8 @@ while [ "$large_index" -le 260 ]; do
 done
 LARGE_STDOUT_JSON=$("$PANORAMA_BIN" --yes --agents claude,cursor,codex \
   --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>/dev/null)
-assert_true "large stdout-only JSON is complete" "$NODE24" -e \
-  "const d=JSON.parse(process.argv[1]); if(d.entries.length < 260) process.exit(1)" \
-  "$LARGE_STDOUT_JSON"
+assert_json_variable "large stdout-only JSON is complete" LARGE_STDOUT_JSON \
+  'if(d.entries.length < 260) process.exit(1)'
 
 echo ""
 echo "Passed: $PASS  Failed: $FAIL"

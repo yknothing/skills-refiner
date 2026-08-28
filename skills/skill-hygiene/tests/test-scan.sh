@@ -107,8 +107,8 @@ setup_sandbox() {
       "sourceUrl": "https://github.com/example/skills.git",
       "skillPath": "skills/receipt-backed/SKILL.md",
       "skillFolderHash": "0123456789abcdef0123456789abcdef01234567",
-      "installedAt": "2026-07-14T00:00:00.000Z",
-      "updatedAt": "2026-07-14T00:00:00.000Z"
+      "installedAt": "2099-01-02T03:04:05.000Z",
+      "updatedAt": "2099-06-07T08:09:10.000Z"
     }
   }
 }
@@ -464,6 +464,14 @@ run_tests() {
     assert_eq "Installer receipt never invents an immutable revision or ambient Git root" \
         "true" \
         "$(echo "$json_output" | jq '.entries[] | select(.dir_name == "receipt-backed") | .provenance.resolved_revision == null and .provenance.git_root == "" and .provenance.git_branch == ""')"
+    assert_eq "Installer lifecycle preserves declared timestamps without event verification" \
+        "installer_receipt:receipt_snapshot_observed:installer_declared:2099-01-02T03:04:05.000Z:2099-06-07T08:09:10.000Z" \
+        "$(echo "$json_output" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .installer_receipt | [.evidence_scope, .evidence_state, .timestamp_semantics, .installed_at, .updated_at] | join(":")')"
+    assert_eq "Installer lifecycle binds receipt key to current frontmatter identity" \
+        "receipt-backed:receipt_key_matches_frontmatter_name" \
+        "$(echo "$json_output" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .installer_receipt | [.receipt_skill, .identity_binding] | join(":")')"
+    assert_eq "Installer lifecycle is not copied onto Agent projections" "true" \
+        "$(echo "$json_output" | jq 'all(.entries[] | select(.location != ".agents/skills"); .installer_receipt == null)')"
     assert_eq "Unproven real directory provenance" "unknown" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .mutation_provenance.kind')"
     assert_eq "JSON has runtime_load_blockers key" "true" "$(echo "$json_output" | jq 'has("runtime_load_blockers")')"
     assert_eq "JSON has collection_index_blockers key" "true" "$(echo "$json_output" | jq 'has("collection_index_blockers")')"
@@ -568,6 +576,22 @@ run_tests() {
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json --skip-provenance-tree 2>/dev/null)
     assert_eq "Skipped provenance tree cannot promote receipt source" "null" \
         "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+    assert_eq "Skipped provenance tree still exposes only installer-declared lifecycle" \
+        "installer_declared:2099-01-02T03:04:05.000Z:2099-06-07T08:09:10.000Z" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .installer_receipt | [.timestamp_semantics, .installed_at, .updated_at] | join(":")')"
+
+    sed 's/^name: receipt-backed$/name: renamed-receipt-backed/' "$skill_backup" \
+        > "$safety_home/.agents/skills/receipt-backed/SKILL.md"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json --skip-provenance-tree 2>/dev/null)
+    assert_eq "Receipt lifecycle is not attached after frontmatter identity replacement" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.installer_receipt // "null")')"
+    cp "$skill_backup" "$safety_home/.agents/skills/receipt-backed/SKILL.md"
+
+    jq '.skills["receipt-backed"].installedAt = "2099-02-31T03:04:05.000Z"' \
+        "$receipt_backup" > "$receipt_file"
+    safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    assert_eq "Impossible installer-declared calendar date is not emitted" "null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.installer_receipt // "null")')"
 
     jq '.version = 2' "$receipt_backup" > "$receipt_file"
     invalid_receipt_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)

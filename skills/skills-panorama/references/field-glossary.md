@@ -16,6 +16,14 @@
 
 `identity.review_signals` 原样聚合 scanner 已给出的 `risk_indicators` 与 `hygiene_flags`；它是可追溯的治理复核证据，不参与八类拓扑缺口推导。`review_required` 只表示需要人工查看，不等于已确认漏洞。
 
+`provenance_lifecycle` 是逐 identity variant 的来源、版本与生命周期观察面，不是新的事实源。每条 `observations[]` 都保留 `evidence_scope`、`evidence_state` 与 `content_binding`：
+
+- `controller_verified` 只允许来自 schema、observer、状态 shape、operation/plan、source identity 与当前 `INDEX.json` 全部一致且 `FILESYSTEM_READY` 的 collection status；其上游版本 authority 为 `immutable_artifact_manifest`。
+- `controller_observed_not_ready`、`controller_identity_mismatch`、`controller_contract_invalid`、`catalog_fallback` 与 `index_fallback` 均不得产生 `source_qualified` identity 或暴露 immutable revision。
+- `installer_declared` 只是安装器 receipt 对时间的声明。只有 receipt key 与当前 frontmatter name 一致时才展示；`tree_unverified` 仍明确表示内容未绑定，不能写成已验证安装事件。
+- `installer_declared_collection_aggregate` 是集合 receipt 的聚合历史，不代表单个成员的安装/更新时间。
+- 同名多 variant 必须逐项保留，禁止把不同仓库的来源、版本或时间合并为一个值。
+
 顶层 `managed_collections` 不是技能行的第七个布尔字段，而是集合控制面的独立状态：文件系统、运行时、上游版本证据与 issues 不得相互塌缩。
 
 顶层 `runtime_truth_matrix` 按 Agent 将 `filesystem` / `deployment` / `catalog` / `body` / `route` / `context` 六层分开。`context.result=unverified` 时禁止推断目录索引已经节省 context；`cursor.deployment.result=observe_only` 也不得冒充已部署。

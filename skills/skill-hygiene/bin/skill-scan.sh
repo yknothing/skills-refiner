@@ -41,6 +41,7 @@ PROVENANCE_RECEIPT_TMP=""
 GIT_TREE_HASH_RESULT=""
 MUTATION_PROVENANCE_JSON=""
 INSTALLER_SOURCE_CLAIM_JSON="null"
+INSTALLER_RECEIPT_LIFECYCLE_JSON="null"
 SCAN_CONTENT_CACHE_DIR=""
 SCAN_CONTENT_CACHE_HITS_FILE=""
 
@@ -672,6 +673,48 @@ installer_source_claim_from_receipt() {
           confidence:"receipt_bound"}')
 }
 
+# Installer receipt timestamps are declarations supplied by the installer, not
+# verified installation events. Emit them as a separate optional entry fact so
+# downstream readers cannot confuse them with immutable source attestation.
+installer_lifecycle_from_receipt() {
+    local entry_name="$1" receipt_snapshot="$2" lifecycle
+    INSTALLER_RECEIPT_LIFECYCLE_JSON="null"
+
+    [ -n "$entry_name" ] && [ -f "$receipt_snapshot" ] || return
+    lifecycle=$(jq -c --arg skill "$entry_name" --argjson schema_version "$SKILL_LOCK_SCHEMA_VERSION" '
+        def valid_timestamp:
+          type == "string" and length <= 64
+          and test("^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[0-1])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?Z$")
+          and ((sub("\\.[0-9]+Z$"; "Z")) as $seconds
+               | (try ($seconds | fromdateiso8601 | strftime("%Y-%m-%dT%H:%M:%SZ")) catch null) == $seconds);
+        if .version == $schema_version
+           and (.skills | type == "object")
+           and (.skills[$skill] | type == "object")
+           and ([.skills[$skill].source,
+                 .skills[$skill].sourceType,
+                 .skills[$skill].sourceUrl,
+                 .skills[$skill].skillPath]
+                | all(type == "string" and length > 0))
+           and (.skills[$skill].sourceType == "github")
+           and (.skills[$skill].skillFolderHash | type == "string" and test("^[0-9a-f]{40}$"))
+           and (.skills[$skill].installedAt | valid_timestamp)
+           and (.skills[$skill].updatedAt | valid_timestamp)
+        then {
+          evidence_scope: "installer_receipt",
+          evidence_state: "receipt_snapshot_observed",
+          timestamp_semantics: "installer_declared",
+          receipt_skill: $skill,
+          installed_at: .skills[$skill].installedAt,
+          updated_at: .skills[$skill].updatedAt
+        }
+        else null end
+    ' "$receipt_snapshot" 2>/dev/null || true)
+    case "$lifecycle" in
+        null|'') return ;;
+        *) INSTALLER_RECEIPT_LIFECYCLE_JSON="$lifecycle" ;;
+    esac
+}
+
 git_source_path_for_dir() {
     local root="$1" dir="$2"
     [ -n "$root" ] || return 0
@@ -1033,6 +1076,7 @@ mutation_provenance_for_entry() {
     local unknown='{"kind":"unknown","confidence":"none","evidence":null}'
     MUTATION_PROVENANCE_JSON="$unknown"
     INSTALLER_SOURCE_CLAIM_JSON="null"
+    INSTALLER_RECEIPT_LIFECYCLE_JSON="null"
 
     if [ "$location" != ".agents/skills" ] || [ "$entry_type" != "directory" ]; then
         return
@@ -1043,6 +1087,7 @@ mutation_provenance_for_entry() {
     fi
 
     local receipt_file="$HOME_DIR/.agents/.skill-lock.json"
+    installer_lifecycle_from_receipt "$entry_name" "$receipt_snapshot"
 
     if jq -e --arg skill "$entry_name" --argjson schema_version "$SKILL_LOCK_SCHEMA_VERSION" '
         .version == $schema_version and
@@ -1216,10 +1261,11 @@ scan_directory() {
             continue
         fi
 
-        local mutation_provenance_json installer_source_claim_json
+        local mutation_provenance_json installer_source_claim_json installer_receipt_lifecycle_json
         mutation_provenance_for_entry "$dir_label" "$entry_type" "$entry_name" "$entry_path" "$install_receipt_snapshot"
         mutation_provenance_json="$MUTATION_PROVENANCE_JSON"
         installer_source_claim_json="$INSTALLER_SOURCE_CLAIM_JSON"
+        installer_receipt_lifecycle_json="$INSTALLER_RECEIPT_LIFECYCLE_JSON"
 
         if [ "$entry_type" = "broken_symlink" ]; then
             local entry_json
@@ -1236,6 +1282,7 @@ scan_directory() {
                 --arg link_target "$link_target" \
                 --arg raw_link_target_base64 "$raw_link_target_base64" \
                 --argjson mutation_provenance "$mutation_provenance_json" \
+                --argjson installer_receipt "$installer_receipt_lifecycle_json" \
                 '{name: $name, dir_name: $dir_name, location: $location,
                   entry_path: $entry_path, active_root: $active_root,
                   storage_relative_path: $storage_relative_path,
@@ -1246,6 +1293,7 @@ scan_directory() {
                   raw_link_target: $link_target,
                   raw_link_target_base64: $raw_link_target_base64,
                   mutation_provenance: $mutation_provenance,
+                  installer_receipt: $installer_receipt,
                   description: "", word_count: 0, age_days: 0,
                   flags: ["broken_symlink"]}')
             if [ -n "$results_file" ]; then
@@ -1296,6 +1344,7 @@ scan_directory() {
                 --arg raw_link_target_base64 "$raw_link_target_base64" \
                 --argjson mutation_provenance "$mutation_provenance_json" \
                 --argjson installer_source_claim "$installer_source_claim_json" \
+                --argjson installer_receipt "$installer_receipt_lifecycle_json" \
                 --arg installer_storage_git_root "$installer_storage_git_root" \
                 --arg installer_storage_git_branch "$installer_storage_git_branch" \
                 --arg source_skill_file "$source_skill_file" \
@@ -1318,6 +1367,13 @@ scan_directory() {
                 .raw_link_target = (if $raw_link_target == "" then null else $raw_link_target end) |
                 .raw_link_target_base64 = (if $entry_type == "directory" then null else $raw_link_target_base64 end) |
                 .mutation_provenance = $mutation_provenance |
+                .installer_receipt = (
+                    if $installer_receipt != null
+                       and $cached.name == $dir_name
+                       and $installer_receipt.receipt_skill == $dir_name
+                    then ($installer_receipt + {identity_binding:"receipt_key_matches_frontmatter_name"})
+                    else null end
+                ) |
                 .source_skill_file = $source_skill_file |
                 .flags = ([.flags[] | select(startswith("backup") | not)]
                           + if $is_backup then ["backup_remnant"] else [] end) |
@@ -1388,6 +1444,13 @@ scan_directory() {
         top_version=$(get_frontmatter "$skill_file" "version")
         metadata_version=$(get_metadata_value "$skill_file" "version")
         declared_version="${metadata_version:-$top_version}"
+        if [ "$installer_receipt_lifecycle_json" != "null" ]; then
+            installer_receipt_lifecycle_json=$(printf '%s' "$installer_receipt_lifecycle_json" | jq -c \
+                --arg dir_name "$entry_name" --arg frontmatter_name "$name" '
+                if .receipt_skill == $dir_name and $frontmatter_name == $dir_name
+                then . + {identity_binding:"receipt_key_matches_frontmatter_name"}
+                else null end' 2>/dev/null || printf 'null')
+        fi
         word_count=$(count_content_words "$skill_file")
         mtime=$(get_mtime "$skill_file")
         mtime_iso=$(iso_from_epoch "$mtime")
@@ -1618,6 +1681,7 @@ scan_directory() {
             --argjson tool_dependencies_count "$tool_dependencies_count" \
             --argjson runtime_loadable "$runtime_loadable_json" \
             --argjson mutation_provenance "$mutation_provenance_json" \
+            --argjson installer_receipt "$installer_receipt_lifecycle_json" \
             --argjson collection_member_contract "$collection_member_contract" \
             --argjson flags "$flags_json" \
             --argjson risks "$risk_json" \
@@ -1637,6 +1701,7 @@ scan_directory() {
                 raw_link_target: (if $raw_link_target == "" then null else $raw_link_target end),
                 raw_link_target_base64: (if $entry_type == "directory" then null else $raw_link_target_base64 end),
                 mutation_provenance: $mutation_provenance,
+                installer_receipt: $installer_receipt,
                 source_skill_file: $source_skill_file,
                 canonical_skill_file: $canonical_skill_file,
                 canonical_dir: $canonical_dir,

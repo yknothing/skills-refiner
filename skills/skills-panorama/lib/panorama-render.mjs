@@ -237,6 +237,62 @@ export function buildPanoramaDocument(params) {
   };
 }
 
+function markdownCell(value) {
+  return String(value ?? '未知').replaceAll('|', '\\|').replace(/[\r\n]+/gu, ' ');
+}
+
+function summarizeObservationValues(observations, selector, multipleLabel = '多值') {
+  const values = [...new Set((observations ?? []).map(selector)
+    .filter((value) => typeof value === 'string' && value.length > 0))];
+  if (values.length === 0) return '未知';
+  if (values.length === 1) return values[0];
+  return `${multipleLabel}(${values.length}，见 JSON observations)`;
+}
+
+function sourceLabel(observation) {
+  const source = observation?.source ?? {};
+  const repository = source.repository_id ?? source.repository_url;
+  if (!repository) return null;
+  const revision = source.resolved_revision ? `@${source.resolved_revision.slice(0, 12)}` : '';
+  const path = source.source_path ? `:${source.source_path}` : '';
+  return `${repository}${revision}${path}`;
+}
+
+function evidenceLabel(observation) {
+  const scope = observation?.evidence_scope ?? {};
+  const state = observation?.evidence_state ?? {};
+  return [
+    `${scope.source ?? 'unknown'}=${state.source ?? 'unknown'}`,
+    `${scope.lifecycle ?? 'unknown'}=${state.lifecycle ?? 'unknown'}`,
+    `${scope.version ?? 'unknown'}=${state.version ?? 'unknown'}`,
+    `binding=${state.content_binding ?? 'unknown'}`,
+  ].join('; ');
+}
+
+function versionLabel(observation) {
+  const version = observation?.version ?? {};
+  const value = version.value ?? version.declaration;
+  if (!value) return null;
+  return version.authority ? `${value} (${version.authority})` : value;
+}
+
+function lifecycleTimestampLabel(observation, field) {
+  const lifecycle = observation?.lifecycle ?? {};
+  const value = lifecycle[field];
+  if (typeof value !== 'string' || value.length === 0) return null;
+  return lifecycle.timestamp_semantics
+    ? `${value} (${lifecycle.timestamp_semantics})` : value;
+}
+
+function receiptHistoryLabel(observation) {
+  const history = observation?.lifecycle?.receipt_history;
+  if (!history) return null;
+  const start = history.installed_at ?? '未知';
+  const end = history.updated_at ?? '未知';
+  const count = Number.isInteger(history.entry_count) ? `; entries=${history.entry_count}` : '';
+  return `${start} → ${end} (${history.timestamp_semantics}${count})`;
+}
+
 /**
  * 渲染中文 Markdown（高可读：总览 → 八类 → Agent 摘要 → 字段对照）。
  * @param {object} doc buildPanoramaDocument 结果
@@ -300,6 +356,34 @@ export function renderPanoramaMarkdown(doc) {
     lines.push('文件系统状态、运行时验证和上游版本是三个独立事实；`UNVERIFIED` 不会被写成通过。');
     lines.push('');
   }
+  lines.push('### 逐 Skill 来源与生命周期');
+  lines.push('');
+  lines.push('直接 receipt-bound 条目的时间只转述 installer receipt，语义为 `installer_declared`，不是已验证事件时间。受管集合成员的首次/当前激活时间来自 controller，语义为 `controller_record`；其 receipt history 仅是集合聚合，固定标为 `installer_declared_collection_aggregate`，不能当作逐 Skill 安装事件。immutable revision 仅对 `source_qualified` identity 展示。');
+  lines.push('');
+  lines.push('| Skill / identity variant | 资格 | 来源 | 版本（authority） | 安装/首次激活时间 | 更新/当前代激活时间 | receipt history（集合聚合） | evidence scope/state |');
+  lines.push('|---|---|---|---|---|---|---|---|');
+  for (const entry of doc.entries ?? []) {
+    const viewVariants = entry.provenance_lifecycle?.variants ?? [];
+    if (viewVariants.length === 0) {
+      lines.push(`| ${markdownCell(entry.identity?.name)} | unavailable | 未知 | 未知 | 未知 | 未知 | 未知 | unavailable |`);
+      continue;
+    }
+    for (let index = 0; index < viewVariants.length; index += 1) {
+      const variant = viewVariants[index];
+      const observations = variant.observations ?? [];
+      const suffix = viewVariants.length > 1 ? ` [${index + 1}/${viewVariants.length}]` : '';
+      const source = summarizeObservationValues(observations, sourceLabel, '来源冲突');
+      const version = summarizeObservationValues(observations, versionLabel, '版本冲突');
+      const installedAt = summarizeObservationValues(observations, (observation) => lifecycleTimestampLabel(observation, 'installed_at'), '时间冲突');
+      const updatedAt = summarizeObservationValues(observations, (observation) => lifecycleTimestampLabel(observation, 'updated_at'), '时间冲突');
+      const receiptHistory = summarizeObservationValues(observations, receiptHistoryLabel, '聚合历史冲突');
+      const evidence = summarizeObservationValues(observations, evidenceLabel, '多状态');
+      lines.push(`| ${markdownCell(`${entry.identity?.name ?? 'unknown'}${suffix}`)} | ${markdownCell(variant.qualification)} | ${markdownCell(source)} | ${markdownCell(version)} | ${markdownCell(installedAt)} | ${markdownCell(updatedAt)} | ${markdownCell(receiptHistory)} | ${markdownCell(evidence)} |`);
+    }
+  }
+  lines.push('');
+  lines.push('同名多 variant 逐行保留；表中“冲突/多状态”不会被合并为单一来源，精确观察见 JSON `provenance_lifecycle.variants[].observations[]`。');
+  lines.push('');
   lines.push('| 缺口类 | 数量 |');
   lines.push('|---|---:|');
   for (const gap of GAP_CLASS_PRIORITY) {

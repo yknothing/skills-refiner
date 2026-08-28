@@ -22,6 +22,140 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const SKILL_ROOT = join(MODULE_DIR, '..');
 const REPO_SKILLS_ROOT = join(SKILL_ROOT, '..');
 const MAX_DIAGNOSTIC_LENGTH = 4096;
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/u;
+const GIT_REVISION = /^[0-9a-f]{40}$/u;
+const COLLECTION_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+
+function exactObjectKeys(value, expected) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
+}
+
+function validUtcTimestamp(value) {
+  if (typeof value !== 'string'
+      || !/^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[0-1])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?Z$/u.test(value)) return false;
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return false;
+  const seconds = value.replace(/\.[0-9]+Z$/u, 'Z');
+  return new Date(parsed).toISOString().replace(/\.[0-9]{3}Z$/u, 'Z') === seconds;
+}
+
+function validUpstreamRelease(value) {
+  if (value?.status === 'declared') {
+    return exactObjectKeys(value, ['status', 'value', 'source_path', 'source_digest', 'extraction'])
+      && typeof value.value === 'string' && value.value.length > 0 && value.value.length <= 128
+      && typeof value.source_path === 'string' && value.source_path.length > 0
+      && SHA256_DIGEST.test(value.source_digest ?? '')
+      && typeof value.extraction === 'string' && value.extraction.length > 0;
+  }
+  if (value?.status === 'not_declared') {
+    return exactObjectKeys(value, ['status', 'value', 'source_path', 'source_digest', 'extraction'])
+      && value.value === null && value.source_path === null
+      && value.source_digest === null && value.extraction === null;
+  }
+  if (value?.status === 'invalid') {
+    return exactObjectKeys(value, ['status', 'value', 'source_path', 'source_digest', 'extraction', 'error_code'])
+      && value.value === null && value.source_digest === null
+      && (value.source_path === null || typeof value.source_path === 'string')
+      && (value.extraction === null || typeof value.extraction === 'string')
+      && typeof value.error_code === 'string' && value.error_code.length > 0;
+  }
+  return false;
+}
+
+function validControllerSource(value) {
+  return exactObjectKeys(value, [
+    'provider', 'repository_id', 'resolved_revision', 'artifact_digest', 'upstream_release',
+  ])
+    && value.provider === 'github'
+    && typeof value.repository_id === 'string' && value.repository_id.length > 0
+    && GIT_REVISION.test(value.resolved_revision ?? '')
+    && SHA256_DIGEST.test(value.artifact_digest ?? '')
+    && validUpstreamRelease(value.upstream_release);
+}
+
+function validReceiptHistory(history) {
+  return exactObjectKeys(history, ['entry_count', 'first_installed_at', 'last_updated_at'])
+    && Number.isSafeInteger(history.entry_count) && history.entry_count >= 0
+    && validUtcTimestamp(history.first_installed_at)
+    && validUtcTimestamp(history.last_updated_at);
+}
+
+function validControllerLifecycle(value) {
+  return exactObjectKeys(value, [
+    'receipt_history', 'plan_created_at', 'first_activated_at', 'current_generation_activated_at',
+  ]) && validUtcTimestamp(value.plan_created_at)
+    && (value.first_activated_at === null || validUtcTimestamp(value.first_activated_at))
+    && (value.current_generation_activated_at === null
+      || validUtcTimestamp(value.current_generation_activated_at))
+    && validReceiptHistory(value.receipt_history);
+}
+
+function validRecoverySource(value) {
+  if (value === null || validControllerSource(value)) return true;
+  const artifactShape = exactObjectKeys(value, [
+    'provider', 'repository_id', 'resolved_revision', 'artifact_digest',
+  ]) && SHA256_DIGEST.test(value.artifact_digest ?? '');
+  const indexShape = exactObjectKeys(value, [
+    'provider', 'repository_id', 'resolved_revision', 'tree_digest',
+  ]) && SHA256_DIGEST.test(value.tree_digest ?? '');
+  return (artifactShape || indexShape)
+    && value.provider === 'github'
+    && typeof value.repository_id === 'string' && value.repository_id.length > 0
+    && GIT_REVISION.test(value.resolved_revision ?? '');
+}
+
+function validRecoveryLifecycle(value) {
+  return value === null || validControllerLifecycle(value)
+    || (exactObjectKeys(value, ['receipt_history', 'plan_created_at'])
+      && validUtcTimestamp(value.plan_created_at)
+      && validReceiptHistory(value.receipt_history));
+}
+
+function validCollectionStatusEnvelope(value) {
+  const baseKeys = [
+    'schema_version', 'collection_id', 'status', 'scope', 'runtime_status', 'observed_at',
+    'observer_version', 'operation_id', 'plan_hash', 'physical_collection_root', 'member_count',
+    'external_receipt_state', 'source', 'lifecycle', 'issues',
+  ];
+  const isV1 = value?.schema_version === 'skills-refiner.collection.status.v1'
+    && value?.observer_version === 'skills-refiner.collection.observer.v1'
+    && value?.collection_id === 'prodcraft';
+  const isV2 = value?.schema_version === 'skills-refiner.collection.status.v2'
+    && value?.observer_version === 'skills-refiner.collection.observer.v2'
+    && value?.collection_id !== 'prodcraft';
+  if (!isV1 && !isV2) return false;
+  const managedV2Keys = [...baseKeys, 'name_collision_status', 'name_collisions', 'management_attention'];
+  const expectedKeys = isV2 && value.status !== 'UNMANAGED' ? managedV2Keys : baseKeys;
+  if (!exactObjectKeys(value, expectedKeys)
+      || !COLLECTION_ID.test(value.collection_id ?? '')
+      || !['FILESYSTEM_READY', 'DRIFTED', 'RECOVERY_REQUIRED', 'UNMANAGED'].includes(value.status)
+      || value.scope !== 'filesystem' || value.runtime_status !== 'UNVERIFIED'
+      || !validUtcTimestamp(value.observed_at)
+      || typeof value.physical_collection_root !== 'string'
+      || !isAbsolute(value.physical_collection_root)
+      || !Number.isSafeInteger(value.member_count) || value.member_count < 0
+      || typeof value.external_receipt_state !== 'string'
+      || !Array.isArray(value.issues) || !value.issues.every((issue) => typeof issue === 'string')) return false;
+  if (isV2 && value.status !== 'UNMANAGED'
+      && (!['CLEAR', 'OBSERVED', 'ATTENTION_REQUIRED'].includes(value.name_collision_status)
+        || !Array.isArray(value.name_collisions) || !Array.isArray(value.management_attention))) return false;
+  if (value.status === 'UNMANAGED') {
+    return value.operation_id === null && value.plan_hash === null
+      && value.source === null && value.lifecycle === null;
+  }
+  const operationValid = value.operation_id === null
+    || new RegExp(`^${value.collection_id}-[0-9a-f]{12}$`, 'u').test(value.operation_id);
+  const planHashValid = value.plan_hash === null || SHA256_DIGEST.test(value.plan_hash);
+  const pairConsistent = value.operation_id === null || value.plan_hash === null
+    || value.operation_id === `${value.collection_id}-${value.plan_hash.slice(7, 19)}`;
+  if (!operationValid || !planHashValid || !pairConsistent) return false;
+  if (value.status === 'RECOVERY_REQUIRED') {
+    return validRecoverySource(value.source) && validRecoveryLifecycle(value.lifecycle);
+  }
+  return value.operation_id !== null && value.plan_hash !== null
+    && validControllerSource(value.source) && validControllerLifecycle(value.lifecycle);
+}
 
 function boundedDiagnostic(result, fallback) {
   const raw = [result.stderr, result.error?.message]
@@ -180,7 +314,15 @@ export function collectCollectionList(options) {
   const command = `SKILLS_REFINER_NODE_BIN=${nodeBin} bash ${launcher} ${args.join(' ')}`;
   try {
     const list = JSON.parse(result.stdout);
-    if (list?.schema_version !== COLLECTION_COLLECTOR.listSchema) {
+    const listShapeValid = exactObjectKeys(list, [
+      'schema_version', 'observed_at', 'collections', 'catalog_updated_at',
+    ]) && list?.schema_version === COLLECTION_COLLECTOR.listSchema
+      && validUtcTimestamp(list.observed_at)
+      && validUtcTimestamp(list.catalog_updated_at)
+      && Array.isArray(list.collections)
+      && list.collections.every(validCollectionStatusEnvelope)
+      && new Set(list.collections.map(({ collection_id: id }) => id)).size === list.collections.length;
+    if (!listShapeValid) {
       const diagnostic = `collection list schema 不兼容: ${list?.schema_version ?? 'missing'}`;
       const reportedError = list?.schema_version === 'skills-refiner.collection.error.v1' ? list : null;
       return {
@@ -354,8 +496,10 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
   /**
    * @param {string | null | undefined} root
    * @param {string} label
+   * @param {object | null} collectionStatus
+   * @param {object | null} catalogEntry
    */
-  function ingestRoot(root, label) {
+  function ingestRoot(root, label, collectionStatus = null, catalogEntry = null) {
     if (typeof root !== 'string' || root.length === 0) return;
     if (ingestedRoots.has(root)) return;
     ingestedRoots.add(root);
@@ -393,6 +537,73 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
       const members = Array.isArray(index?.[INDEX_MEMBERS_FIELD])
         ? index[INDEX_MEMBERS_FIELD]
         : [];
+      const indexCollectionId = index.collection_id ?? collectionStatus?.collection_id
+        ?? catalogEntry?.collection_id ?? label;
+      const hasCollectionStatus = collectionStatus !== null
+        && typeof collectionStatus === 'object';
+      const hasCatalogEntry = catalogEntry !== null && typeof catalogEntry === 'object';
+      const statusEnvelopeValid = hasCollectionStatus
+        && validCollectionStatusEnvelope(collectionStatus);
+      if (hasCollectionStatus && !statusEnvelopeValid) {
+        notes.push(`${label} collection status contract 不兼容，禁止提升 controller evidence`);
+      }
+      const statusIdentityMatches = statusEnvelopeValid
+        && collectionStatus?.collection_id === indexCollectionId
+        && collectionStatus?.physical_collection_root === root
+        && collectionStatus?.member_count === members.length
+        && (index.operation_id === undefined
+          || collectionStatus?.operation_id === index.operation_id)
+        && (index.source?.repository_id === undefined
+          || collectionStatus?.source?.repository_id === index.source.repository_id)
+        && (index.source?.resolved_revision === undefined
+          || collectionStatus?.source?.resolved_revision === index.source.resolved_revision)
+        && (index.artifact_digest === undefined
+          || collectionStatus?.source?.artifact_digest === index.artifact_digest);
+      const statusSourceQualified = Boolean(statusEnvelopeValid
+        && typeof collectionStatus?.source?.repository_id === 'string'
+        && collectionStatus.source.repository_id.length > 0
+        && /^[0-9a-f]{40}$/u.test(collectionStatus?.source?.resolved_revision ?? '')
+        && collectionStatus?.source?.upstream_release
+        && typeof collectionStatus.source.upstream_release === 'object'
+        && ['declared', 'not_declared'].includes(collectionStatus.source.upstream_release.status));
+      const controllerVerified = statusIdentityMatches && statusSourceQualified
+        && collectionStatus?.status === 'FILESYSTEM_READY'
+        && Array.isArray(collectionStatus?.issues)
+        && collectionStatus.issues.length === 0;
+      const controllerEvidence = hasCollectionStatus ? {
+        evidence_scope: 'collection_list_status',
+        evidence_state: controllerVerified ? 'controller_verified'
+          : !statusEnvelopeValid ? 'controller_contract_invalid'
+            : statusIdentityMatches ? 'controller_observed_not_ready' : 'controller_identity_mismatch',
+        identity_consistent: statusIdentityMatches,
+        collection_status: collectionStatus.status ?? null,
+        runtime_status: collectionStatus.runtime_status ?? null,
+        operation_id: collectionStatus.operation_id ?? null,
+        plan_hash: collectionStatus.plan_hash ?? null,
+        source: collectionStatus.source ?? null,
+        lifecycle: collectionStatus.lifecycle ?? null,
+      } : hasCatalogEntry ? {
+        evidence_scope: 'collection_catalog_entry',
+        evidence_state: 'catalog_fallback',
+        identity_consistent: catalogEntry.collection_id === indexCollectionId
+          && (index.operation_id === undefined || catalogEntry.operation_id === index.operation_id),
+        collection_status: null,
+        runtime_status: null,
+        operation_id: catalogEntry.operation_id ?? null,
+        plan_hash: catalogEntry.plan_hash ?? null,
+        source: catalogEntry.source ?? null,
+        lifecycle: catalogEntry.lifecycle ?? null,
+      } : {
+        evidence_scope: 'managed_collection_index',
+        evidence_state: 'index_fallback',
+        identity_consistent: true,
+        collection_status: null,
+        runtime_status: null,
+        operation_id: index.operation_id ?? null,
+        plan_hash: null,
+        source: index.source ?? null,
+        lifecycle: null,
+      };
       for (const member of members) {
         const memberName = member?.[INDEX_MEMBER_NAME_FIELD];
         const memberRelativePath = member?.relative_path;
@@ -420,7 +631,7 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
           absenceReason = 'declared_member_path_missing';
         }
         const observation = {
-          collection_id: index.collection_id ?? label,
+          collection_id: indexCollectionId,
           source_provider: index.source?.provider ?? null,
           repository_id: index.source?.repository_id ?? null,
           repository_url: index.source?.source_url ?? null,
@@ -433,6 +644,7 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
           member_path: memberPath,
           relative_path: memberRelativePath,
           tree_digest: member.tree_digest ?? null,
+          collection_evidence: controllerEvidence,
           present,
           absence_reason: absenceReason,
         };
@@ -448,7 +660,7 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
   const collections = collectionList?.collections;
   if (Array.isArray(collections)) {
     for (const entry of collections) {
-      ingestRoot(entry?.physical_collection_root, `集合 ${entry.collection_id ?? '?'}`);
+      ingestRoot(entry?.physical_collection_root, `集合 ${entry.collection_id ?? '?'}`, entry);
     }
   } else {
     notes.push('无 collection list，尝试仅用 catalog.json 声明根');
@@ -457,7 +669,7 @@ export function approvedMembersFromCollectionArtifacts(collectionList, catalog =
   const catalogCollections = catalog?.collections;
   if (catalogCollections && typeof catalogCollections === 'object') {
     for (const [id, entry] of Object.entries(catalogCollections)) {
-      ingestRoot(entry?.collection_root, `catalog:${id}`);
+      ingestRoot(entry?.collection_root, `catalog:${id}`, null, entry);
     }
   }
 

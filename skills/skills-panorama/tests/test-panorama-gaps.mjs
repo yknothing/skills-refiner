@@ -27,6 +27,7 @@ import { CATALOG_ACTIVE_VALUES, GAP_CLASSES, LINK_HEALTH_VALUES } from '../lib/p
 import { normalizePanoramaRows, assertNoCollapsedFields } from '../lib/panorama-normalize.mjs';
 import {
   approvedMembersFromCollectionArtifacts,
+  collectCollectionList,
   collectRuntimeState,
   collectSkillScan,
 } from '../lib/panorama-collect.mjs';
@@ -67,9 +68,107 @@ test('--agents all 只展开 scanner 实际发现的 Agent 根并排除源目录
   assert.throws(() => parseAgentsFlag('all', { '.agents/skills': {} }), /未从 skill-scan topology/);
 });
 
+test('collection list 外层合法但 status 子项 schema 未知时 fail closed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'skills-panorama-invalid-status-'));
+  try {
+    const home = realpathSync(root);
+    const hygieneRoot = join(home, 'fake-hygiene');
+    const bin = join(hygieneRoot, 'bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'skills-refiner'), `#!/usr/bin/env bash
+printf '%s\\n' '{"schema_version":"skills-refiner.collection.list.v1","observed_at":"2026-08-22T00:00:02.000Z","collections":[{"collection_id":"prodcraft","status":"FILESYSTEM_READY"}],"catalog_updated_at":"2026-08-22T00:00:01.000Z"}'
+`);
+    const result = collectCollectionList({ home, hygieneRoot, nodeBin: process.execPath });
+    assert.equal(result.ok, false);
+    assert.equal(result.complete, false);
+    assert.equal(result.list, null);
+    assert.equal(result.blocker.kind, 'schema_mismatch');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('合法 RECOVERY_REQUIRED 弱 shape 保留为 controller 事实但不晋级 verified', () => {
+  const root = mkdtempSync(join(tmpdir(), 'skills-panorama-recovery-status-'));
+  try {
+    const home = realpathSync(root);
+    const hygieneRoot = join(home, 'fake-hygiene');
+    const bin = join(hygieneRoot, 'bin');
+    mkdirSync(bin, { recursive: true });
+    const recoveryList = {
+      schema_version: 'skills-refiner.collection.list.v1',
+      observed_at: '2026-08-22T00:00:02.000Z',
+      catalog_updated_at: '2026-08-22T00:00:01.000Z',
+      collections: [
+        {
+          schema_version: 'skills-refiner.collection.status.v1', collection_id: 'prodcraft',
+          status: 'RECOVERY_REQUIRED', scope: 'filesystem', runtime_status: 'UNVERIFIED',
+          observed_at: '2026-08-22T00:00:02.000Z',
+          observer_version: 'skills-refiner.collection.observer.v1',
+          operation_id: 'prodcraft-aaaaaaaaaaaa', plan_hash: `sha256:${'a'.repeat(64)}`,
+          physical_collection_root: `${home}/.agents/skills/prodcraft`, member_count: 0,
+          external_receipt_state: 'unknown', source: null, lifecycle: null,
+          issues: ['NONTERMINAL_OPERATION:STAGING'],
+        },
+        {
+          schema_version: 'skills-refiner.collection.status.v2', collection_id: 'loopos',
+          status: 'RECOVERY_REQUIRED', scope: 'filesystem', runtime_status: 'UNVERIFIED',
+          observed_at: '2026-08-22T00:00:02.000Z',
+          observer_version: 'skills-refiner.collection.observer.v2',
+          operation_id: 'loopos-bbbbbbbbbbbb', plan_hash: `sha256:${'b'.repeat(64)}`,
+          physical_collection_root: `${home}/.agents/skills/loopos`, member_count: 10,
+          external_receipt_state: 'unknown',
+          source: {
+            provider: 'github', repository_id: 'example/loopos',
+            resolved_revision: 'c'.repeat(40), artifact_digest: `sha256:${'d'.repeat(64)}`,
+            upstream_release: {
+              status: 'not_declared', value: null, source_path: null,
+              source_digest: null, extraction: null,
+            },
+          },
+          lifecycle: {
+            receipt_history: {
+              entry_count: 10, first_installed_at: '2026-07-01T00:00:00.000Z',
+              last_updated_at: '2026-08-22T00:00:00.000Z',
+            },
+            plan_created_at: '2026-08-22T00:00:00.000Z',
+          },
+          name_collision_status: 'CLEAR', name_collisions: [], management_attention: [],
+          issues: ['OPERATION_NOT_COMMITTED:STAGING'],
+        },
+      ],
+    };
+    writeFileSync(join(bin, 'skills-refiner'), `#!/usr/bin/env bash
+printf '%s\\n' '${JSON.stringify(recoveryList)}'
+`);
+    const result = collectCollectionList({ home, hygieneRoot, nodeBin: process.execPath });
+    assert.equal(result.ok, true);
+    assert.equal(result.complete, true);
+    assert.equal(result.list.collections[0].status, 'RECOVERY_REQUIRED');
+    assert.equal(result.list.collections[1].status, 'RECOVERY_REQUIRED');
+    const rootPath = join(home, '.agents', 'skills', 'prodcraft');
+    const memberPath = join(rootPath, 'pc-intake');
+    mkdirSync(memberPath, { recursive: true });
+    writeFileSync(join(memberPath, 'SKILL.md'), '---\nname: pc-intake\ndescription: Recovery fixture.\n---\n');
+    writeFileSync(join(rootPath, 'INDEX.json'), `${JSON.stringify({
+      schema_version: 'skills-refiner.collection.index.v1', collection_id: 'prodcraft',
+      operation_id: 'prodcraft-aaaaaaaaaaaa', source: {
+        provider: 'github', repository_id: 'example/prodcraft', resolved_revision: 'a'.repeat(40),
+      }, members: [{ name: 'pc-intake', relative_path: 'pc-intake', tree_digest: 'sha256:test' }],
+    })}\n`);
+    const observed = approvedMembersFromCollectionArtifacts(result.list);
+    assert.equal(
+      observed.approvedMembers.get('pc-intake')[0].collection_evidence.evidence_state,
+      'controller_identity_mismatch',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * 构造最小 scan 条目。
- * @param {{ name: string, location: string, entry_kind: string, entry_path?: string, hash?: string, link_target?: string|null, canonical_dir?: string|null, canonical_skill_file?: string|null, flags?: string[], risk_indicators?: object[], repository?: string|null, version?: string|null }} partial
+ * @param {{ name: string, location: string, entry_kind: string, entry_path?: string, hash?: string, link_target?: string|null, canonical_dir?: string|null, canonical_skill_file?: string|null, flags?: string[], risk_indicators?: object[], repository?: string|null, version?: string|null, provenance?: object, mutation_provenance?: object, installer_receipt?: object|null, storage_relative_path?: string|null }} partial
  */
 function entry(partial) {
   return {
@@ -84,11 +183,96 @@ function entry(partial) {
     canonical_dir: partial.canonical_dir ?? null,
     canonical_skill_file: partial.canonical_skill_file ?? null,
     declared_version: partial.version ?? null,
-    provenance: { source_url: partial.repository ?? null, kind: 'fixture' },
+    storage_relative_path: partial.storage_relative_path ?? null,
+    provenance: partial.provenance ?? { source_url: partial.repository ?? null, kind: 'fixture' },
+    mutation_provenance: partial.mutation_provenance ?? null,
+    installer_receipt: partial.installer_receipt ?? null,
     flags: partial.flags ?? [],
     risk_indicators: partial.risk_indicators ?? [],
   };
 }
+
+test('逐 identity 投影 receipt 生命周期，合法但虚假的时间仍只标 installer_declared', () => {
+  const installedAt = '2099-01-02T03:04:05.000Z';
+  const updatedAt = '2099-06-07T08:09:10.000Z';
+  const scanned = entry({
+    name: 'receipt-backed',
+    location: '.agents/skills',
+    entry_kind: 'directory',
+    storage_relative_path: 'receipt-backed',
+    version: '1.2.3',
+    provenance: {
+      kind: 'global_source', source_url: 'https://github.com/example/skills.git',
+      source_provider: 'github', repository_id: 'example/skills',
+      source_path: 'skills/receipt-backed', resolved_revision: null,
+      claim_kind: 'installer_receipt_claim', confidence: 'receipt_bound',
+    },
+    mutation_provenance: {
+      kind: 'installed_copy', confidence: 'direct',
+      evidence: { kind: 'content_bound_installer_receipt' },
+    },
+    installer_receipt: {
+      evidence_scope: 'installer_receipt',
+      evidence_state: 'receipt_snapshot_observed',
+      timestamp_semantics: 'installer_declared',
+      receipt_skill: 'receipt-backed',
+      identity_binding: 'receipt_key_matches_frontmatter_name',
+      installed_at: installedAt,
+      updated_at: updatedAt,
+    },
+  });
+  const scan = { skills: [scanned], skill_links: [], broken_symlinks: [], name_collisions: [] };
+  const [row] = normalizePanoramaRows({
+    scan,
+    agents: AGENTS,
+    approvedNames: new Set(),
+    catalog: { present: false, catalog: null },
+  }).rows;
+  assert.equal(row.provenance_lifecycle.evidence_scope, 'identity_variants');
+  assert.equal(row.provenance_lifecycle.evidence_state, 'single_variant');
+  const [variantView] = row.provenance_lifecycle.variants;
+  assert.equal(variantView.qualification, 'path_qualified');
+  const receiptObservation = variantView.observations.find((item) => item.evidence_scope.lifecycle === 'installer_receipt');
+  assert.equal(receiptObservation.source.repository_id, 'example/skills');
+  assert.equal(receiptObservation.source.resolved_revision, null);
+  assert.equal(receiptObservation.version.value, '1.2.3');
+  assert.equal(receiptObservation.lifecycle.installed_at, installedAt);
+  assert.equal(receiptObservation.lifecycle.updated_at, updatedAt);
+  assert.equal(receiptObservation.lifecycle.timestamp_semantics, 'installer_declared');
+  assert.equal(receiptObservation.evidence_state.lifecycle, 'installer_declared');
+  assert.equal(receiptObservation.evidence_state.content_binding, 'content_bound');
+
+  const doc = buildPanoramaDocument({ rows: [row], agents: AGENTS, catalogMode: 'absent' });
+  const markdown = renderPanoramaMarkdown(doc);
+  assert.match(markdown, /逐 Skill 来源与生命周期/u);
+  assert.match(markdown, /example\/skills/u);
+  assert.match(markdown, /1\.2\.3/u);
+  assert.match(markdown, new RegExp(installedAt, 'u'));
+  assert.match(markdown, /installer_declared/u);
+
+  scanned.installer_receipt.timestamp_semantics = 'verified_event';
+  const [unsafeRow] = normalizePanoramaRows({
+    scan,
+    agents: AGENTS,
+    approvedNames: new Set(),
+    catalog: { present: false, catalog: null },
+  }).rows;
+  const unsafeObservation = unsafeRow.provenance_lifecycle.variants[0].observations[0];
+  assert.equal(unsafeObservation.lifecycle.installed_at, null);
+  assert.equal(unsafeObservation.evidence_state.lifecycle, 'unavailable');
+
+  scanned.installer_receipt.timestamp_semantics = 'installer_declared';
+  scanned.installer_receipt.installed_at = '2099-02-31T03:04:05.000Z';
+  const [impossibleDateRow] = normalizePanoramaRows({
+    scan,
+    agents: AGENTS,
+    approvedNames: new Set(),
+    catalog: { present: false, catalog: null },
+  }).rows;
+  const impossibleDateObservation = impossibleDateRow.provenance_lifecycle.variants[0].observations[0];
+  assert.equal(impossibleDateObservation.lifecycle.installed_at, null);
+  assert.equal(impossibleDateObservation.evidence_state.lifecycle, 'unavailable');
+});
 
 test('金样：无清单仍可齐全', () => {
   const scan = {
@@ -200,17 +384,62 @@ test('目录型集合成员按 INDEX 声明路径确认为源侧实物，不误�
   try {
     const collectionRoot = join(root, 'collection');
     const memberPath = join(collectionRoot, 'pc-intake');
+    const revision = 'a'.repeat(40);
+    const planHash = `sha256:${'a'.repeat(64)}`;
+    const operationId = `prodcraft-${planHash.slice(7, 19)}`;
+    const firstActivatedAt = '2026-07-22T00:00:01.000Z';
+    const currentActivatedAt = '2026-08-22T00:00:01.000Z';
     mkdirSync(memberPath, { recursive: true });
     writeFileSync(join(memberPath, 'SKILL.md'), '---\nname: pc-intake\ndescription: Test.\n---\n');
     writeFileSync(join(collectionRoot, 'INDEX.json'), `${JSON.stringify({
       schema_version: 'skills-refiner.collection.index.v1',
       collection_id: 'prodcraft',
+      operation_id: operationId,
+      source: {
+        provider: 'github', repository_id: 'example/prodcraft',
+        source_url: 'https://github.com/example/prodcraft.git', resolved_revision: revision,
+      },
       members: [{ name: 'pc-intake', relative_path: 'pc-intake', tree_digest: 'sha256:test' }],
     })}\n`);
-    const observed = approvedMembersFromCollectionArtifacts({
-      collections: [{ collection_id: 'prodcraft', physical_collection_root: realpathSync(collectionRoot) }],
-    });
-    assert.equal(observed.approvedMembers.get('pc-intake')[0].present, true);
+    const collectionStatus = {
+      schema_version: 'skills-refiner.collection.status.v1',
+      collection_id: 'prodcraft', physical_collection_root: realpathSync(collectionRoot),
+      operation_id: operationId, plan_hash: planHash,
+      status: 'FILESYSTEM_READY', runtime_status: 'UNVERIFIED', issues: [],
+      scope: 'filesystem', observed_at: '2026-08-22T00:00:02.000Z',
+      observer_version: 'skills-refiner.collection.observer.v1', member_count: 1,
+      external_receipt_state: 'unrelated_history_changed',
+      source: {
+        provider: 'github', repository_id: 'example/prodcraft', resolved_revision: revision,
+        artifact_digest: `sha256:${'3'.repeat(64)}`,
+        upstream_release: {
+          status: 'declared', value: '1.0.0', source_path: 'manifest.yml',
+          source_digest: `sha256:${'2'.repeat(64)}`, extraction: 'yaml_root_version',
+        },
+      },
+      lifecycle: {
+        plan_created_at: '2026-07-22T00:00:00.000Z',
+        first_activated_at: firstActivatedAt,
+        current_generation_activated_at: currentActivatedAt,
+        receipt_history: {
+          entry_count: 40,
+          first_installed_at: '2099-01-02T03:04:05.000Z',
+          last_updated_at: '2099-06-07T08:09:10.000Z',
+        },
+      },
+    };
+    const observed = approvedMembersFromCollectionArtifacts({ collections: [collectionStatus] });
+    const observedMember = observed.approvedMembers.get('pc-intake')[0];
+    assert.equal(observedMember.present, true);
+    assert.equal(observedMember.collection_evidence.evidence_state, 'controller_verified');
+
+    const schemaLessStatus = { ...collectionStatus };
+    delete schemaLessStatus.schema_version;
+    const schemaLessObserved = approvedMembersFromCollectionArtifacts({ collections: [schemaLessStatus] });
+    assert.equal(
+      schemaLessObserved.approvedMembers.get('pc-intake')[0].collection_evidence.evidence_state,
+      'controller_contract_invalid',
+    );
 
     const normalized = normalizePanoramaRows({
       scan: { skills: [], skill_links: [], broken_symlinks: [], name_collisions: [] },
@@ -225,6 +454,141 @@ test('目录型集合成员按 INDEX 声明路径确认为源侧实物，不误�
     assert.equal(row.catalog_active, CATALOG_ACTIVE_VALUES.active);
     assert.equal(row.gap_class, GAP_CLASSES.SOURCE_ONLY);
     assert.equal(isCatalogDrift(row, normalized.catalog_mode), false);
+    const observation = row.provenance_lifecycle.variants[0].observations[0];
+    assert.equal(observation.evidence_state.source, 'controller_verified');
+    assert.equal(observation.source.claim_kind, 'controller_record');
+    assert.equal(observation.source.confidence, 'controller_verified');
+    assert.equal(observation.source.resolved_revision, revision);
+    assert.deepEqual(observation.version, {
+      value: '1.0.0', declaration: 'declared', authority: 'immutable_artifact_manifest',
+    });
+    assert.equal(observation.lifecycle.installed_at, firstActivatedAt);
+    assert.equal(observation.lifecycle.updated_at, currentActivatedAt);
+    assert.equal(observation.lifecycle.timestamp_semantics, 'controller_record');
+    assert.equal(
+      observation.lifecycle.receipt_history.timestamp_semantics,
+      'installer_declared_collection_aggregate',
+    );
+    assert.equal(observation.lifecycle.receipt_history.entry_count, 40);
+
+    const markdown = renderPanoramaMarkdown(buildPanoramaDocument({
+      rows: [row], agents: AGENTS, catalogMode: normalized.catalog_mode,
+    }));
+    assert.match(markdown, /1\.0\.0 \(immutable_artifact_manifest\)/u);
+    assert.match(markdown, /controller_record/u);
+    assert.match(markdown, /installer_declared_collection_aggregate/u);
+
+    collectionStatus.source.upstream_release.value = '   ';
+    const emptyVersionObserved = approvedMembersFromCollectionArtifacts({ collections: [collectionStatus] });
+    const [emptyVersionRow] = normalizePanoramaRows({
+      scan: { skills: [], skill_links: [], broken_symlinks: [], name_collisions: [] },
+      agents: AGENTS,
+      approvedNames: emptyVersionObserved.approvedNames,
+      approvedMembers: emptyVersionObserved.approvedMembers,
+      collectionRoots: emptyVersionObserved.collectionRoots,
+      catalog: { present: true, catalog: { schema_version: 'skills-refiner.collection-catalog.v1' } },
+    }).rows;
+    const emptyVersion = emptyVersionRow.provenance_lifecycle.variants[0].observations[0].version;
+    assert.deepEqual(emptyVersion, {
+      value: null, declaration: 'not_declared', authority: 'immutable_artifact_manifest',
+    });
+
+    collectionStatus.source.upstream_release = {
+      status: 'not_declared', value: null, source_path: null, source_digest: null, extraction: null,
+    };
+    const notDeclaredObserved = approvedMembersFromCollectionArtifacts({ collections: [collectionStatus] });
+    const [notDeclaredRow] = normalizePanoramaRows({
+      scan: { skills: [], skill_links: [], broken_symlinks: [], name_collisions: [] },
+      agents: AGENTS,
+      approvedNames: notDeclaredObserved.approvedNames,
+      approvedMembers: notDeclaredObserved.approvedMembers,
+      collectionRoots: notDeclaredObserved.collectionRoots,
+      catalog: { present: true, catalog: { schema_version: 'skills-refiner.collection-catalog.v1' } },
+    }).rows;
+    assert.deepEqual(notDeclaredRow.provenance_lifecycle.variants[0].observations[0].version, {
+      value: null, declaration: 'not_declared', authority: 'immutable_artifact_manifest',
+    });
+
+    collectionStatus.source.resolved_revision = 'b'.repeat(40);
+    const mismatchedObserved = approvedMembersFromCollectionArtifacts({ collections: [collectionStatus] });
+    const [mismatchedRow] = normalizePanoramaRows({
+      scan: { skills: [], skill_links: [], broken_symlinks: [], name_collisions: [] },
+      agents: AGENTS,
+      approvedNames: mismatchedObserved.approvedNames,
+      approvedMembers: mismatchedObserved.approvedMembers,
+      collectionRoots: mismatchedObserved.collectionRoots,
+      catalog: { present: true, catalog: { schema_version: 'skills-refiner.collection-catalog.v1' } },
+    }).rows;
+    const mismatchedObservation = mismatchedRow.provenance_lifecycle.variants[0].observations[0];
+    assert.equal(mismatchedObservation.evidence_state.source, 'controller_identity_mismatch');
+    assert.equal(mismatchedObservation.source.resolved_revision, null);
+    assert.equal(mismatchedObservation.source.confidence, 'controller_unverified');
+    assert.equal(mismatchedObservation.version.declaration, 'unknown');
+    assert.equal(mismatchedRow.identity.identity_status, 'collection_qualified');
+    assert.equal(mismatchedRow.identity.variants[0].resolved_revision, null);
+
+    collectionStatus.source.resolved_revision = revision;
+    collectionStatus.status = 'DRIFTED';
+    collectionStatus.issues = ['COLLECTION_DRIFT'];
+    const driftedObserved = approvedMembersFromCollectionArtifacts({ collections: [collectionStatus] });
+    const [driftedRow] = normalizePanoramaRows({
+      scan: { skills: [], skill_links: [], broken_symlinks: [], name_collisions: [] },
+      agents: AGENTS,
+      approvedNames: driftedObserved.approvedNames,
+      approvedMembers: driftedObserved.approvedMembers,
+      collectionRoots: driftedObserved.collectionRoots,
+      catalog: { present: true, catalog: { schema_version: 'skills-refiner.collection-catalog.v1' } },
+    }).rows;
+    const driftedObservation = driftedRow.provenance_lifecycle.variants[0].observations[0];
+    assert.equal(driftedObservation.evidence_state.source, 'controller_observed_not_ready');
+    assert.equal(driftedRow.identity.identity_status, 'collection_qualified');
+    assert.equal(driftedObservation.source.resolved_revision, null);
+
+    collectionStatus.status = 'RECOVERY_REQUIRED';
+    collectionStatus.issues = ['OPERATION_NOT_COMMITTED:STAGING'];
+    const recoveryObserved = approvedMembersFromCollectionArtifacts({ collections: [collectionStatus] });
+    const [recoveryRow] = normalizePanoramaRows({
+      scan: { skills: [], skill_links: [], broken_symlinks: [], name_collisions: [] },
+      agents: AGENTS,
+      approvedNames: recoveryObserved.approvedNames,
+      approvedMembers: recoveryObserved.approvedMembers,
+      collectionRoots: recoveryObserved.collectionRoots,
+      catalog: { present: true, catalog: { schema_version: 'skills-refiner.collection-catalog.v1' } },
+    }).rows;
+    const recoveryObservation = recoveryRow.provenance_lifecycle.variants[0].observations[0];
+    assert.equal(recoveryObservation.evidence_state.source, 'controller_observed_not_ready');
+    assert.equal(recoveryRow.identity.identity_status, 'collection_qualified');
+    assert.equal(recoveryObservation.source.resolved_revision, null);
+    collectionStatus.status = 'FILESYSTEM_READY';
+    collectionStatus.issues = [];
+
+    const fallback = approvedMembersFromCollectionArtifacts(null, {
+      collections: {
+        prodcraft: {
+          collection_id: 'prodcraft', collection_root: realpathSync(collectionRoot),
+          operation_id: operationId, plan_hash: planHash,
+          source: { provider: 'github', repository_id: 'example/prodcraft', resolved_revision: revision },
+          lifecycle: collectionStatus.lifecycle,
+        },
+      },
+    });
+    assert.equal(
+      fallback.approvedMembers.get('pc-intake')[0].collection_evidence.evidence_state,
+      'catalog_fallback',
+    );
+    const [fallbackRow] = normalizePanoramaRows({
+      scan: { skills: [], skill_links: [], broken_symlinks: [], name_collisions: [] },
+      agents: AGENTS,
+      approvedNames: fallback.approvedNames,
+      approvedMembers: fallback.approvedMembers,
+      collectionRoots: fallback.collectionRoots,
+      catalog: { present: true, catalog: { schema_version: 'skills-refiner.collection-catalog.v1' } },
+    }).rows;
+    const fallbackObservation = fallbackRow.provenance_lifecycle.variants[0].observations[0];
+    assert.equal(fallbackObservation.evidence_state.source, 'catalog_fallback');
+    assert.equal(fallbackObservation.source.claim_kind, 'index_claim');
+    assert.equal(fallbackObservation.source.confidence, 'controller_unverified');
+    assert.equal(fallbackObservation.version.declaration, 'unknown');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -342,6 +706,12 @@ test('相同上游 revision/path/digest 的物理副本保持一个 source-quali
   assert.equal(row.identity.variants.length, 1);
   assert.deepEqual(row.identity.variants[0].canonical_targets, ['/srv/copy/same-source', '/srv/source/same-source']);
   assert.equal(row.collision.status, 'none');
+  assert.equal(row.provenance_lifecycle.evidence_state, 'single_variant');
+  assert.equal(row.provenance_lifecycle.variants[0].qualification, 'source_qualified');
+  assert.equal(
+    row.provenance_lifecycle.variants[0].observations[0].source.resolved_revision,
+    'a'.repeat(40),
+  );
 });
 
 test('同一健康外部目标的 Agent-only 链接不误报链接损坏', () => {
@@ -369,6 +739,15 @@ test('每个 identity variant 独立记录 catalog 状态，顶层混合状态�
   const managedMember = {
     collection_id: 'repo-a', repository_id: 'org/repo-a', resolved_revision: 'a'.repeat(40),
     source_path: 'shared', member_path: managedPath, tree_digest: 'sha256:shared', present: true,
+    collection_evidence: {
+      evidence_scope: 'collection_list_status', evidence_state: 'controller_verified',
+      identity_consistent: true,
+      source: {
+        provider: 'github', repository_id: 'org/repo-a',
+        resolved_revision: 'a'.repeat(40), source_url: 'https://github.com/org/repo-a.git',
+      },
+      lifecycle: null,
+    },
   };
   const normalized = normalizePanoramaRows({
     scan: {
@@ -396,6 +775,14 @@ test('每个 identity variant 独立记录 catalog 状态，顶层混合状态�
   assert.equal(byTarget.get(externalPath).catalog_active, CATALOG_ACTIVE_VALUES.absent);
   assert.equal(byTarget.get(externalPath).catalog_conformance, 'unmanaged');
   assert.equal(row.catalog_active, CATALOG_ACTIVE_VALUES.unknown);
+  assert.equal(row.provenance_lifecycle.evidence_state, 'multiple_variants_preserved');
+  assert.equal(row.provenance_lifecycle.variants.length, 2);
+  const lifecycleByEntity = new Map(row.provenance_lifecycle.variants.map((variant) => [variant.entity_id, variant]));
+  const managedView = lifecycleByEntity.get(byTarget.get(managedPath).entity_id);
+  const externalView = lifecycleByEntity.get(byTarget.get(externalPath).entity_id);
+  assert.equal(managedView.observations[0].source.resolved_revision, 'a'.repeat(40));
+  assert.equal(externalView.observations[0].source.resolved_revision, null);
+  assert.notEqual(managedView.entity_id, externalView.entity_id);
 });
 
 test('同名同内容但来自不同仓库仍是需保留的 identity 冲突', () => {
@@ -742,7 +1129,7 @@ exit 9
 `);
     writeFileSync(join(bin, 'skills-refiner'), `#!/usr/bin/env bash
 if [ "$1" = "collection" ]; then
-  printf '%s\\n' '{"schema_version":"skills-refiner.collection.list.v1","collections":[]}'
+  printf '%s\\n' '{"schema_version":"skills-refiner.collection.list.v1","observed_at":"2026-08-22T00:00:02.000Z","collections":[],"catalog_updated_at":"2026-08-22T00:00:01.000Z"}'
 elif [ "$1" = "runtime" ] && [ "$2" = "status" ]; then
   printf '%s\\n' '{"schema_version":"skills-refiner.runtime-status.v1","adapters":{"codex":{"status":"UNVERIFIED"},"claude":{"status":"UNVERIFIED"},"cursor":{"status":"UNVERIFIED"}}}'
 elif [ "$1" = "runtime" ] && [ "$2" = "profile" ]; then

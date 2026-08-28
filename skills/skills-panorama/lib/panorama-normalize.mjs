@@ -318,6 +318,219 @@ function identityDigest(fields) {
   return `sha256:${createHash('sha256').update(JSON.stringify(fields)).digest('hex')}`;
 }
 
+const INSTALLER_TIMESTAMP = /^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[0-1])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?Z$/u;
+
+function validInstallerTimestamp(value) {
+  if (typeof value !== 'string'
+      || value.length > 64
+      || !INSTALLER_TIMESTAMP.test(value)) return false;
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return false;
+  const seconds = value.replace(/\.[0-9]+Z$/u, 'Z');
+  return new Date(parsed).toISOString().replace(/\.[0-9]{3}Z$/u, 'Z') === seconds;
+}
+
+function installerLifecycle(entry) {
+  const value = entry?.installer_receipt;
+  if (!value || typeof value !== 'object'
+      || value.evidence_scope !== 'installer_receipt'
+      || value.evidence_state !== 'receipt_snapshot_observed'
+      || value.timestamp_semantics !== 'installer_declared'
+      || value.identity_binding !== 'receipt_key_matches_frontmatter_name'
+      || value.receipt_skill !== entry?.name
+      || !validInstallerTimestamp(value.installed_at)
+      || !validInstallerTimestamp(value.updated_at)) {
+    return null;
+  }
+  return {
+    installed_at: value.installed_at,
+    updated_at: value.updated_at,
+    timestamp_semantics: 'installer_declared',
+    receipt_history: null,
+  };
+}
+
+function normalizedVersionValue(value) {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function entryVersion(entry) {
+  const value = normalizedVersionValue(entry?.declared_version ?? entry?.metadata_version);
+  return {
+    value,
+    declaration: value === null ? 'not_declared' : 'declared',
+    authority: 'skill_frontmatter',
+  };
+}
+
+function collectionVersion(member) {
+  if (member?.collection_evidence?.evidence_state !== 'controller_verified') return null;
+  const release = member?.collection_evidence?.source?.upstream_release;
+  if (!release || typeof release !== 'object'
+      || !['declared', 'not_declared'].includes(release.status)) return null;
+  const value = release.status === 'declared' ? normalizedVersionValue(release.value) : null;
+  return {
+    value,
+    declaration: value === null ? 'not_declared' : 'declared',
+    authority: 'immutable_artifact_manifest',
+  };
+}
+
+function collectionLifecycle(member) {
+  if (member?.collection_evidence?.identity_consistent !== true) return null;
+  const raw = member?.collection_evidence?.lifecycle;
+  if (!raw || typeof raw !== 'object') return null;
+  const installedAt = validInstallerTimestamp(raw.first_activated_at)
+    ? raw.first_activated_at : null;
+  const updatedAt = validInstallerTimestamp(raw.current_generation_activated_at)
+    ? raw.current_generation_activated_at : null;
+  const history = raw.receipt_history;
+  const historyInstalledAt = validInstallerTimestamp(history?.first_installed_at)
+    ? history.first_installed_at : null;
+  const historyUpdatedAt = validInstallerTimestamp(history?.last_updated_at)
+    ? history.last_updated_at : null;
+  const receiptHistory = historyInstalledAt !== null || historyUpdatedAt !== null ? {
+    evidence_scope: 'collection_aggregate',
+    installed_at: historyInstalledAt,
+    updated_at: historyUpdatedAt,
+    entry_count: Number.isInteger(history?.entry_count) && history.entry_count >= 0
+      ? history.entry_count : null,
+    timestamp_semantics: 'installer_declared_collection_aggregate',
+  } : null;
+  if (installedAt === null && updatedAt === null && receiptHistory === null) return null;
+  return {
+    installed_at: installedAt,
+    updated_at: updatedAt,
+    timestamp_semantics: 'controller_record',
+    receipt_history: receiptHistory,
+  };
+}
+
+function observationContentBinding(entry) {
+  const evidenceKind = entry?.mutation_provenance?.evidence?.kind;
+  if (entry?.mutation_provenance?.kind === 'installed_copy'
+      && evidenceKind === 'content_bound_installer_receipt') return 'content_bound';
+  if (evidenceKind === 'provenance_tree_skipped') return 'tree_unverified';
+  if (evidenceKind === 'provenance_tree_too_large') return 'tree_unverified';
+  return entry?.installer_receipt ? 'receipt_snapshot_only' : 'not_applicable';
+}
+
+function buildProvenanceObservation({ entry = null, member = null, variant }) {
+  const controllerState = member?.collection_evidence?.evidence_state ?? null;
+  const controllerVerified = controllerState === 'controller_verified';
+  const lifecycle = member ? collectionLifecycle(member) : installerLifecycle(entry);
+  const sourceQualified = variant.qualification === 'source_qualified';
+  const provenance = entry?.provenance ?? {};
+  const controllerSource = controllerVerified ? member?.collection_evidence?.source ?? {} : {};
+  const repositoryId = controllerSource.repository_id ?? member?.repository_id ?? provenance.repository_id
+    ?? provenance.source ?? null;
+  const repositoryUrl = controllerSource.source_url ?? member?.repository_url
+    ?? provenance.source_url ?? null;
+  const sourcePath = member?.source_path ?? provenance.source_path
+    ?? entry?.storage_relative_path ?? null;
+  const receiptBound = provenance.claim_kind === 'installer_receipt_claim'
+    && provenance.confidence === 'receipt_bound';
+  const sourceState = member ? controllerState ?? 'index_fallback'
+    : sourceQualified ? 'source_qualified'
+    : receiptBound ? 'receipt_bound'
+      : repositoryId || repositoryUrl ? 'path_qualified' : 'unavailable';
+  const managedVersion = collectionVersion(member);
+  const version = managedVersion ?? (entry ? entryVersion(entry) : {
+    value: null,
+    declaration: 'unknown',
+    authority: 'unavailable',
+  });
+  const receiptHistory = lifecycle?.receipt_history ?? null;
+  return {
+    observed_path: entry?.entry_path ?? member?.member_path ?? null,
+    observed_location: entry?.location ?? null,
+    evidence_scope: {
+      source: controllerVerified ? 'managed_collection_controller'
+        : member ? 'managed_collection_index'
+        : receiptBound ? 'installer_receipt' : 'skill_scan.v7_entry',
+      lifecycle: member && lifecycle ? member.collection_evidence?.evidence_scope ?? 'managed_collection_index'
+        : lifecycle ? 'installer_receipt' : 'not_observed',
+      version: managedVersion ? 'immutable_artifact_manifest'
+        : entry ? 'skill_scan.v7_entry' : 'not_observed',
+    },
+    evidence_state: {
+      source: sourceState,
+      lifecycle: lifecycle?.timestamp_semantics ?? 'unavailable',
+      receipt: receiptHistory ? 'collection_aggregate_observed'
+        : member ? 'not_observed'
+          : lifecycle ? 'receipt_snapshot_observed' : 'not_observed',
+      content_binding: member?.tree_digest ? 'collection_tree_digest'
+        : observationContentBinding(entry),
+      version: version.declaration,
+    },
+    source: {
+      provider: controllerSource.provider ?? member?.source_provider
+        ?? provenance.source_provider ?? null,
+      repository_id: repositoryId,
+      repository_url: repositoryUrl,
+      source_path: sourcePath,
+      // A receipt claim never becomes an immutable revision. Only an identity
+      // already qualified by controller/source evidence may expose one here.
+      resolved_revision: sourceQualified
+        ? controllerSource.resolved_revision ?? member?.resolved_revision
+          ?? provenance.resolved_revision ?? variant.resolved_revision ?? null
+        : null,
+      claim_kind: controllerVerified ? 'controller_record'
+        : member ? 'index_claim' : provenance.claim_kind ?? null,
+      confidence: controllerVerified ? 'controller_verified'
+        : member ? 'controller_unverified' : provenance.confidence ?? null,
+    },
+    version,
+    lifecycle: lifecycle ?? {
+      installed_at: null,
+      updated_at: null,
+      timestamp_semantics: null,
+      receipt_history: null,
+    },
+  };
+}
+
+function buildProvenanceLifecycleView(entries, approvedMembers, variants) {
+  const byVariant = new Map(variants.map((variant) => [variant.entity_id, []]));
+  for (const entry of entries ?? []) {
+    const canonicalTarget = entry.canonical_dir || entry.entry_path || null;
+    const variant = variants.find((candidate) => (
+      candidate.observed_paths.includes(entry.entry_path)
+      || candidate.canonical_targets.includes(canonicalTarget)
+    )) ?? (variants.length === 1 ? variants[0] : null);
+    if (!variant) continue;
+    const member = (approvedMembers ?? []).find(({ member_path: path }) => path === canonicalTarget) ?? null;
+    byVariant.get(variant.entity_id).push(buildProvenanceObservation({ entry, member, variant }));
+  }
+  for (const member of approvedMembers ?? []) {
+    const variant = variants.find((candidate) => (candidate.catalog_members ?? [])
+      .some(({ member_path: path }) => path === member.member_path));
+    if (!variant) continue;
+    const observations = byVariant.get(variant.entity_id);
+    const alreadyObserved = observations.some((observation) => (
+      observation.observed_path === member.member_path
+      && observation.evidence_scope.source.startsWith('managed_collection_')
+    ));
+    if (!alreadyObserved) observations.push(buildProvenanceObservation({ member, variant }));
+  }
+  return {
+    evidence_scope: 'identity_variants',
+    evidence_state: variants.length > 1 ? 'multiple_variants_preserved'
+      : variants.length === 1 ? 'single_variant' : 'unavailable',
+    variants: variants.map((variant) => ({
+      entity_id: variant.entity_id,
+      qualification: variant.qualification,
+      evidence_scope: 'variant_observations',
+      evidence_state: (byVariant.get(variant.entity_id) ?? []).length > 0
+        ? 'observations_preserved' : 'unavailable',
+      observations: (byVariant.get(variant.entity_id) ?? [])
+        .sort((a, b) => String(a.observed_path).localeCompare(String(b.observed_path))),
+    })),
+  };
+}
+
 function catalogStateForVariant({ member, underCollection, catalogState }) {
   if (member) return CATALOG_ACTIVE_VALUES.active;
   if (underCollection) return CATALOG_ACTIVE_VALUES.inactive;
@@ -343,11 +556,16 @@ function buildIdentityVariants(name, entries, approvedMembers, collectionRoots =
     const sourcePath = member?.source_path ?? entry.storage_relative_path ?? null;
     const collectionId = member?.collection_id ?? entry.collection_id ?? null;
     const artifactDigest = member?.tree_digest ?? fingerprint;
-    const sourceQualified = repositoryId && revision && sourcePath;
+    const collectionClaim = Boolean(member || collectionId
+      || entry.provenance?.claim_kind === 'index_claim');
+    const controllerQualified = !collectionClaim
+      || member?.collection_evidence?.evidence_state === 'controller_verified';
+    const sourceQualified = Boolean(repositoryId && revision && sourcePath && controllerQualified);
+    const qualifiedRevision = sourceQualified ? revision : null;
     const entityId = identityDigest(sourceQualified ? [
-      'source', collectionId, repositoryId, revision, sourcePath, name, artifactDigest,
+      'source', collectionId, repositoryId, qualifiedRevision, sourcePath, name, artifactDigest,
     ] : [
-      'path', collectionId, repositoryId, revision, sourcePath, name, artifactDigest, canonicalTarget,
+      'path', collectionId, repositoryId, qualifiedRevision, sourcePath, name, artifactDigest, canonicalTarget,
     ]);
     const key = entityId;
     const underCollection = typeof canonicalTarget === 'string' && collectionRoots.some((root) => (
@@ -360,15 +578,17 @@ function buildIdentityVariants(name, entries, approvedMembers, collectionRoots =
       collection_id: collectionId,
       repository_id: repositoryId,
       repository_url: repositoryUrl,
-      resolved_revision: revision,
+      resolved_revision: qualifiedRevision,
       source_path: sourcePath,
       canonical_target: canonicalTarget,
       canonical_targets: canonicalTarget ? [canonicalTarget] : [],
       content_fingerprint: fingerprint,
       collection_tree_digest: member?.tree_digest ?? null,
-      declared_version: entry.declared_version ?? entry.metadata_version ?? null,
+      declared_version: collectionVersion(member)?.value
+        ?? normalizedVersionValue(entry.declared_version ?? entry.metadata_version),
       source_kind: entry.provenance?.kind ?? null,
-      qualification: repositoryId && revision && sourcePath ? 'source_qualified' : 'path_qualified',
+      qualification: sourceQualified ? 'source_qualified'
+        : collectionClaim ? 'collection_qualified' : 'path_qualified',
       catalog_active: catalogActive,
       catalog_conformance: member ? member.present ? 'active_observed' : 'drift_missing'
         : underCollection ? 'inactive_unindexed' : 'unmanaged',
@@ -384,8 +604,11 @@ function buildIdentityVariants(name, entries, approvedMembers, collectionRoots =
   }
   for (const member of approvedMembers ?? []) {
     if (matchedMembers.has(member.member_path)) continue;
+    const sourceQualified = member?.collection_evidence?.evidence_state === 'controller_verified'
+      && member.repository_id && member.resolved_revision && member.source_path;
+    const qualifiedRevision = sourceQualified ? member.resolved_revision : null;
     const entityId = identityDigest([
-      member.collection_id, member.repository_id, member.resolved_revision, member.source_path,
+      member.collection_id, member.repository_id, qualifiedRevision, member.source_path,
       name, member.tree_digest, member.member_path,
     ]);
     if (!variants.has(entityId)) {
@@ -396,15 +619,15 @@ function buildIdentityVariants(name, entries, approvedMembers, collectionRoots =
         collection_id: member.collection_id ?? null,
         repository_id: member.repository_id ?? null,
         repository_url: member.repository_url ?? null,
-        resolved_revision: member.resolved_revision ?? null,
+        resolved_revision: qualifiedRevision,
         source_path: member.source_path ?? member.relative_path ?? null,
         canonical_target: member.member_path ?? null,
         canonical_targets: member.member_path ? [member.member_path] : [],
         content_fingerprint: null,
         collection_tree_digest: member.tree_digest ?? null,
-        declared_version: null,
+        declared_version: collectionVersion(member)?.value ?? null,
         source_kind: 'managed_collection_catalog',
-        qualification: member.repository_id && member.resolved_revision ? 'source_qualified' : 'collection_qualified',
+        qualification: sourceQualified ? 'source_qualified' : 'collection_qualified',
         catalog_active: CATALOG_ACTIVE_VALUES.active,
         catalog_conformance: member.present ? 'active_stored' : 'drift_missing',
         catalog_members: [member],
@@ -454,6 +677,7 @@ export function normalizeSkillRow(group, ctx) {
     catalog_members: approvedMembers,
     review_signals: buildReviewSignals(entries),
   };
+  const provenance_lifecycle = buildProvenanceLifecycleView(entries, approvedMembers, variants);
   const projected = buildProjected(entries, ctx.agents, ctx.sourceLocation);
   for (const projection of Object.values(projected)) {
     if (!projection.present) continue;
@@ -475,6 +699,7 @@ export function normalizeSkillRow(group, ctx) {
 
   const row = {
     [PREDICATE_KEYS.identity]: identity,
+    provenance_lifecycle,
     [PREDICATE_KEYS.stored]: stored,
     [PREDICATE_KEYS.projected]: projected,
     [PREDICATE_KEYS.catalog_active]: catalog_active,
@@ -506,18 +731,21 @@ export function rowsForMissingApproved(approvedNames, seenNames, ctx) {
         path: null,
       };
     }
+    const variants = buildIdentityVariants(name, [], observations, ctx.collectionRoots, ctx.catalogState);
     rows.push({
       identity: {
         name,
         paths: observations.map((item) => item.member_path).filter(Boolean),
-        identity_status: 'source_qualified',
+        identity_status: variants.length > 1 ? 'ambiguous_name'
+          : variants[0]?.qualification ?? 'unqualified',
         content_fingerprint: null,
         declared_version: null,
         repository_id: [...new Set(observations.map(({ repository_id }) => repository_id).filter(Boolean))].at(0) ?? null,
-        variants: buildIdentityVariants(name, [], observations, ctx.collectionRoots, ctx.catalogState),
+        variants,
         catalog_members: observations,
         review_signals: { risk_indicators: [], hygiene_flags: [] },
       },
+      provenance_lifecycle: buildProvenanceLifecycleView([], observations, variants),
       stored,
       projected,
       catalog_active: CATALOG_ACTIVE_VALUES.active,
@@ -533,7 +761,7 @@ export function rowsForMissingApproved(approvedNames, seenNames, ctx) {
         [],
         observations,
         ctx.sourceLocation,
-        buildIdentityVariants(name, [], observations, ctx.collectionRoots, ctx.catalogState),
+        variants,
       ),
     });
   }
