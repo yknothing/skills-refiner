@@ -296,9 +296,14 @@ function validateActiveControl(active, collectionId) {
   const operationPattern = new RegExp(`^${collectionId}-[0-9a-f]{12}$`, 'u');
   const validCommon = operationPattern.test(active?.operation_id ?? '') && DIGEST.test(active?.plan_hash ?? '');
   if (collectionId === 'prodcraft') {
-    if (!exactObjectKeys(active, ['schema_version', 'operation_id', 'plan_hash'])
-        || active.schema_version !== 'skills-refiner.collection.active.v1' || !validCommon) {
-      collectionControlDrift(collectionId, 'active', 'active.v1 envelope is invalid');
+    const legacy = exactObjectKeys(active, ['schema_version', 'operation_id', 'plan_hash'])
+      && active.schema_version === 'skills-refiner.collection.active.v1';
+    const current = exactObjectKeys(active, ['schema_version', 'collection_id', 'operation_id', 'plan_hash', 'activated_at'])
+      && active.schema_version === 'skills-refiner.collection.active.v2'
+      && active.collection_id === 'prodcraft'
+      && validTimestamp(active.activated_at);
+    if ((!legacy && !current) || !validCommon) {
+      collectionControlDrift(collectionId, 'active', 'ProdCraft active envelope is invalid');
     }
     return;
   }

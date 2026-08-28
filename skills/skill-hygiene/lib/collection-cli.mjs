@@ -65,7 +65,7 @@ function required(options, name) {
 function loadPlan(path) {
   let value;
   try { value = JSON.parse(readFileSync(resolve(path), 'utf8')); } catch (error) { invalid(`cannot read plan: ${error.message}`); }
-  if ([COLLECTION_SCHEMAS.plan, COLLECTION_SCHEMAS.priorPlan].includes(value.schema_version)) validateCollectionPlan(value);
+  if ([COLLECTION_SCHEMAS.plan, COLLECTION_SCHEMAS.priorPlan, COLLECTION_SCHEMAS.olderPlan].includes(value.schema_version)) validateCollectionPlan(value);
   else if ([
     MANAGED_COLLECTION_SCHEMAS.plan, MANAGED_COLLECTION_SCHEMAS.priorPlan,
     MANAGED_COLLECTION_SCHEMAS.olderPlan, MANAGED_COLLECTION_SCHEMAS.legacyPlan,
@@ -107,7 +107,7 @@ function execute(argv) {
     const killPhase = process.env.SKILLS_REFINER_TEST_ALLOW_FAULTS === '1'
       ? process.env.SKILLS_REFINER_TEST_KILL_PHASE ?? null
       : null;
-    return [COLLECTION_SCHEMAS.plan, COLLECTION_SCHEMAS.priorPlan].includes(plan.schema_version)
+    return [COLLECTION_SCHEMAS.plan, COLLECTION_SCHEMAS.priorPlan, COLLECTION_SCHEMAS.olderPlan].includes(plan.schema_version)
       ? applyProdcraftPlan(plan, required(options, '--confirm'), { killPhase })
       : applyManagedPlan(plan, required(options, '--confirm'), { killPhase });
   }

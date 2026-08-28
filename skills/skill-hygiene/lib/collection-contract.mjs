@@ -3,16 +3,18 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import { canonicalJson, sha256Json, validateSha256 } from './cleanup-contract.mjs';
 
 export const COLLECTION_SCHEMAS = Object.freeze({
-  plan: 'skills-refiner.collection.plan.v2',
-  priorPlan: 'skills-refiner.collection.plan.v1',
+  plan: 'skills-refiner.collection.plan.v3',
+  priorPlan: 'skills-refiner.collection.plan.v2',
+  olderPlan: 'skills-refiner.collection.plan.v1',
   index: 'skills-refiner.collection.index.v1',
   operation: 'skills-refiner.collection.operation.v1',
 });
 
 const PLAN_KEYS = new Set([
   'schema_version', 'collection_id', 'home', 'source', 'receipt', 'legacy',
-  'projections', 'target', 'control', 'controller', 'agent_roots', 'created_at', 'plan_hash',
+  'projections', 'predecessor', 'target', 'control', 'controller', 'agent_roots', 'created_at', 'plan_hash',
 ]);
+const LEGACY_PLAN_KEYS = new Set([...PLAN_KEYS].filter((key) => key !== 'predecessor'));
 const INDEX_KEYS = new Set([
   'schema_version', 'collection_id', 'source', 'artifact_digest',
   'public_registry_digest', 'members', 'gateway', 'receipt_snapshot_digest',
@@ -107,21 +109,28 @@ export function computeCollectionPlanHash(plan) {
 }
 
 export function validateCollectionPlan(plan) {
-  exactKeys(plan, PLAN_KEYS, 'plan');
   const current = plan.schema_version === COLLECTION_SCHEMAS.plan;
   const prior = plan.schema_version === COLLECTION_SCHEMAS.priorPlan;
-  if ((!current && !prior) || plan.collection_id !== 'prodcraft') fail('plan identity is invalid');
+  const older = plan.schema_version === COLLECTION_SCHEMAS.olderPlan;
+  exactKeys(plan, current ? PLAN_KEYS : LEGACY_PLAN_KEYS, 'plan');
+  if ((!current && !prior && !older) || plan.collection_id !== 'prodcraft') fail('plan identity is invalid');
+  if (current && plan.predecessor !== null
+      && (!plan.predecessor || typeof plan.predecessor !== 'object'
+        || Array.isArray(plan.predecessor) || !Array.isArray(plan.predecessor.exposures))) {
+    fail('plan.predecessor must be null or a valid object');
+  }
+  const successor = current && plan.predecessor !== null;
   absolutePath(plan.home, 'plan.home');
   timestamp(plan.created_at, 'plan.created_at');
 
   exactKeys(plan.source, new Set([
     'provider', 'repository_id', 'revision', 'root', 'tree_digest', 'registry_digest',
     'curated_index_digest', 'reference_graph_digest', 'members',
-    ...(current ? ['remote_attestation'] : []),
+    ...(current || prior ? ['remote_attestation'] : []),
   ]), 'plan.source');
   if (plan.source.provider !== 'github' || plan.source.repository_id !== 'yknothing/prodcraft') fail('plan.source authority is invalid');
   if (!REVISION.test(plan.source.revision)) fail('plan.source.revision must be a full commit');
-  if (current) remoteAttestation(plan.source.remote_attestation, 'plan.source.remote_attestation');
+  if (current || prior) remoteAttestation(plan.source.remote_attestation, 'plan.source.remote_attestation');
   absolutePath(plan.source.root, 'plan.source.root');
   for (const field of ['tree_digest', 'registry_digest', 'curated_index_digest', 'reference_graph_digest']) digest(plan.source[field], `plan.source.${field}`);
   if (!Array.isArray(plan.source.members) || plan.source.members.length === 0) fail('plan.source.members must be non-empty');
@@ -134,9 +143,12 @@ export function validateCollectionPlan(plan) {
   digest(plan.receipt.entries_digest, 'plan.receipt.entries_digest');
 
   if (!Array.isArray(plan.legacy)) fail('plan.legacy must be an array');
-  if (plan.legacy.length !== 46) fail('plan.legacy must contain the exact 46-entry migration set');
+  if (current
+    ? ((!successor && plan.legacy.length !== 46)
+      || (successor && plan.legacy.length !== 0))
+    : plan.legacy.length !== 46) fail('plan.legacy does not match migration/generation mode');
   const legacyNames = new Set(plan.legacy.map(({ name }) => name));
-  if (legacyNames.size !== 46) fail('plan.legacy contains duplicate names');
+  if (legacyNames.size !== (successor ? 0 : 46)) fail('plan.legacy contains duplicate names');
   for (const [index, entry] of plan.legacy.entries()) {
     exactKeys(entry, new Set(['name', 'path', 'kind', 'tree_digest', 'native_manifest', 'security_metadata_hash', 'receipt_evidence_digest', 'receipt', 'disposition', 'successor']), `plan.legacy[${index}]`);
     string(entry.name, `plan.legacy[${index}].name`);
@@ -161,9 +173,11 @@ export function validateCollectionPlan(plan) {
     if (entry.successor !== null && !plan.source.members.some(({ name }) => name === entry.successor)) fail(`plan.legacy[${index}].successor is absent from source members`);
     if (!entry.receipt.skill_path.endsWith(`/${entry.name}/SKILL.md`)) fail(`plan.legacy[${index}].receipt path does not match its name`);
   }
-  if (plan.legacy.filter(({ disposition }) => disposition === 'replaced').length !== 39
-      || plan.legacy.filter(({ disposition }) => disposition === 'retired_by_owner').length !== 7) fail('plan.legacy disposition counts are invalid');
-  if (plan.legacy.find(({ name }) => name === 'prodcraft')?.successor !== 'pc-prodcraft') fail('plan.legacy prodcraft gateway disposition is invalid');
+  if (!successor) {
+    if (plan.legacy.filter(({ disposition }) => disposition === 'replaced').length !== 39
+        || plan.legacy.filter(({ disposition }) => disposition === 'retired_by_owner').length !== 7) fail('plan.legacy disposition counts are invalid');
+    if (plan.legacy.find(({ name }) => name === 'prodcraft')?.successor !== 'pc-prodcraft') fail('plan.legacy prodcraft gateway disposition is invalid');
+  }
 
   if (!Array.isArray(plan.projections)) fail('plan.projections must be an array');
   const projectionPaths = new Set();
@@ -182,6 +196,9 @@ export function validateCollectionPlan(plan) {
     digest(link.target_digest, `plan.projections[${index}].target_digest`);
     digest(link.native_manifest, `plan.projections[${index}].native_manifest`);
     digest(link.security_metadata_hash, `plan.projections[${index}].security_metadata_hash`);
+  }
+  if (successor && plan.projections.length !== 0) {
+    fail('plan.projections must be empty for a generation replacement');
   }
 
   exactKeys(plan.target, new Set(['collection_root', 'gateway_projection', 'gateway_raw_target', 'agent_gateway_raw_target']), 'plan.target');
@@ -223,20 +240,141 @@ export function validateCollectionPlan(plan) {
     if (agents.has(root.agent) || roots.has(root.root)) fail(`plan.agent_roots[${index}] duplicates an agent or root`);
     agents.add(root.agent);
     roots.add(root.root);
-    if (!plan.projections.some((link) => link.agent === root.agent && link.root === root.root)) fail(`plan.agent_roots[${index}] has no observed projections`);
+    if (successor) {
+      if (!plan.predecessor.exposures.some((link) => link.scope === 'agent' && link.agent === root.agent && link.root === root.root)) {
+        fail(`plan.agent_roots[${index}] has no predecessor exposure`);
+      }
+    } else if (!plan.projections.some((link) => link.agent === root.agent && link.root === root.root)) {
+      fail(`plan.agent_roots[${index}] has no observed projections`);
+    }
   }
   for (const [index, link] of plan.projections.entries()) {
     if (!plan.agent_roots.some((root) => root.agent === link.agent && root.root === link.root)) fail(`plan.projections[${index}] is outside the agent root matrix`);
     const legacy = plan.legacy.find(({ name }) => name === link.name);
     if (link.target_digest !== legacy.tree_digest) fail(`plan.projections[${index}].target digest does not match legacy identity`);
   }
+  if (successor) validatePredecessor(plan);
   digest(plan.plan_hash, 'plan.plan_hash');
   if (computeCollectionPlanHash(plan) !== plan.plan_hash) fail('plan.plan_hash does not match content');
   return plan;
 }
 
+function validatePredecessor(plan) {
+  const predecessor = plan.predecessor;
+  exactKeys(predecessor, new Set([
+    'operation_id', 'plan_hash', 'active_record', 'activated_at', 'first_activated_at',
+    'receipt_history', 'retired_names', 'retired_projections', 'collection', 'exposures',
+  ]), 'plan.predecessor');
+  if (!OPERATION_ID.test(predecessor.operation_id ?? '')) fail('plan.predecessor.operation_id is invalid');
+  digest(predecessor.plan_hash, 'plan.predecessor.plan_hash');
+  if (predecessor.activated_at !== null) timestamp(predecessor.activated_at, 'plan.predecessor.activated_at');
+  if (predecessor.first_activated_at !== null) timestamp(predecessor.first_activated_at, 'plan.predecessor.first_activated_at');
+  if (predecessor.activated_at !== null && predecessor.first_activated_at !== null
+      && Date.parse(predecessor.first_activated_at) > Date.parse(predecessor.activated_at)) {
+    fail('plan.predecessor activation chronology is invalid');
+  }
+  exactKeys(predecessor.active_record,
+    predecessor.active_record?.schema_version === 'skills-refiner.collection.active.v2'
+      ? new Set(['schema_version', 'collection_id', 'operation_id', 'plan_hash', 'activated_at'])
+      : new Set(['schema_version', 'operation_id', 'plan_hash']),
+    'plan.predecessor.active_record');
+  if (!['skills-refiner.collection.active.v1', 'skills-refiner.collection.active.v2'].includes(predecessor.active_record.schema_version)
+      || predecessor.active_record.operation_id !== predecessor.operation_id
+      || predecessor.active_record.plan_hash !== predecessor.plan_hash
+      || (predecessor.active_record.schema_version === 'skills-refiner.collection.active.v1'
+        && predecessor.activated_at !== null)
+      || (predecessor.active_record.schema_version === 'skills-refiner.collection.active.v2'
+        && (predecessor.active_record.collection_id !== 'prodcraft'
+          || predecessor.active_record.activated_at !== predecessor.activated_at))) {
+    fail('plan.predecessor.active_record is invalid');
+  }
+  exactKeys(predecessor.receipt_history,
+    new Set(['entry_count', 'first_installed_at', 'last_updated_at']),
+    'plan.predecessor.receipt_history');
+  if (predecessor.receipt_history.entry_count !== 46) fail('plan.predecessor.receipt_history entry count is invalid');
+  timestamp(predecessor.receipt_history.first_installed_at, 'plan.predecessor.receipt_history.first_installed_at');
+  timestamp(predecessor.receipt_history.last_updated_at, 'plan.predecessor.receipt_history.last_updated_at');
+  if (!Array.isArray(predecessor.retired_names) || predecessor.retired_names.length !== 46
+      || new Set(predecessor.retired_names).size !== 46
+      || predecessor.retired_names.some((name) => typeof name !== 'string'
+        || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name))) {
+    fail('plan.predecessor.retired_names is invalid');
+  }
+  if (!Array.isArray(predecessor.retired_projections)) {
+    fail('plan.predecessor.retired_projections must be an array');
+  }
+  const retiredProjectionPaths = new Set();
+  for (const [index, projection] of predecessor.retired_projections.entries()) {
+    exactKeys(projection, new Set(['agent', 'root', 'name', 'path']), `plan.predecessor.retired_projections[${index}]`);
+    string(projection.agent, `plan.predecessor.retired_projections[${index}].agent`);
+    string(projection.name, `plan.predecessor.retired_projections[${index}].name`);
+    if (!predecessor.retired_names.includes(projection.name)) {
+      fail(`plan.predecessor.retired_projections[${index}].name is not retired`);
+    }
+    absolutePath(projection.root, `plan.predecessor.retired_projections[${index}].root`, plan.home);
+    absolutePath(projection.path, `plan.predecessor.retired_projections[${index}].path`, plan.home);
+    if (projection.path !== join(projection.root, projection.name)
+        || retiredProjectionPaths.has(projection.path)) {
+      fail(`plan.predecessor.retired_projections[${index}] topology is invalid`);
+    }
+    retiredProjectionPaths.add(projection.path);
+  }
+  exactKeys(predecessor.collection,
+    new Set(['path', 'tree_digest', 'native_manifest', 'security_metadata_hash']),
+    'plan.predecessor.collection');
+  if (predecessor.collection.path !== plan.target.collection_root) fail('plan.predecessor.collection path is invalid');
+  for (const field of ['tree_digest', 'native_manifest', 'security_metadata_hash']) {
+    digest(predecessor.collection[field], `plan.predecessor.collection.${field}`);
+  }
+  if (!Array.isArray(predecessor.exposures)
+      || predecessor.exposures.length !== plan.agent_roots.length + 1) {
+    fail('plan.predecessor.exposures is invalid');
+  }
+  const exposurePaths = new Set();
+  for (const [index, exposure] of predecessor.exposures.entries()) {
+    exactKeys(exposure,
+      new Set(['scope', 'agent', 'root', 'path', 'raw_target', 'native_manifest', 'security_metadata_hash']),
+      `plan.predecessor.exposures[${index}]`);
+    if (!['agent', 'global'].includes(exposure.scope)
+        || (exposure.scope === 'agent') !== (typeof exposure.agent === 'string')
+        || (exposure.scope === 'global' && exposure.agent !== null)) {
+      fail(`plan.predecessor.exposures[${index}] scope is invalid`);
+    }
+    absolutePath(exposure.root, `plan.predecessor.exposures[${index}].root`, plan.home);
+    absolutePath(exposure.path, `plan.predecessor.exposures[${index}].path`, plan.home);
+    string(exposure.raw_target, `plan.predecessor.exposures[${index}].raw_target`);
+    for (const field of ['native_manifest', 'security_metadata_hash']) {
+      digest(exposure[field], `plan.predecessor.exposures[${index}].${field}`);
+    }
+    if (exposurePaths.has(exposure.path)) fail(`plan.predecessor.exposures[${index}] path is duplicated`);
+    exposurePaths.add(exposure.path);
+    if (exposure.scope === 'global') {
+      if (exposure.root !== join(plan.home, '.agents/skills')
+          || exposure.path !== plan.target.gateway_projection
+          || exposure.raw_target !== plan.target.gateway_raw_target) {
+        fail(`plan.predecessor.exposures[${index}] global topology is invalid`);
+      }
+    } else {
+      const root = plan.agent_roots.find((entry) => entry.agent === exposure.agent);
+      if (!root || root.root !== exposure.root
+          || exposure.path !== join(root.root, 'pc-prodcraft')
+          || exposure.raw_target !== plan.target.agent_gateway_raw_target) {
+        fail(`plan.predecessor.exposures[${index}] agent topology is invalid`);
+      }
+    }
+  }
+  if (predecessor.exposures.filter(({ scope }) => scope === 'global').length !== 1) {
+    fail('plan.predecessor must contain one global exposure');
+  }
+}
+
 export function buildCollectionPlan(input) {
-  const plan = { schema_version: COLLECTION_SCHEMAS.plan, ...structuredClone(input), plan_hash: `sha256:${'0'.repeat(64)}` };
+  const plan = {
+    schema_version: COLLECTION_SCHEMAS.plan,
+    predecessor: null,
+    ...structuredClone(input),
+    plan_hash: `sha256:${'0'.repeat(64)}`,
+  };
   plan.plan_hash = computeCollectionPlanHash(plan);
   return validateCollectionPlan(plan);
 }

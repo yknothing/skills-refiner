@@ -68,6 +68,7 @@ function input() {
       native_manifest: `sha256:${'f'.repeat(64)}`,
       security_metadata_hash: `sha256:${'1'.repeat(64)}`,
     }],
+    predecessor: null,
     target: {
       collection_root: '/tmp/home/.agents/skills/prodcraft',
       gateway_projection: '/tmp/home/.agents/skills/pc-prodcraft',

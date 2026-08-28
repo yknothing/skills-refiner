@@ -35,7 +35,7 @@ test('collection CLI checks, plans, applies, statuses, and undoes one JSON contr
 
   const planned = run(home, ['collection', 'plan', 'prodcraft', '--source', source, '--revision', revision, '--output', planPath, '--json']);
   assert.equal(planned.status, 0, planned.stderr);
-  assert.equal(planned.response.schema_version, 'skills-refiner.collection.plan.v2');
+  assert.equal(planned.response.schema_version, 'skills-refiner.collection.plan.v3');
   assert.equal(JSON.parse(readFileSync(planPath, 'utf8')).plan_hash, planned.response.plan_hash);
 
   const rejected = run(home, ['collection', 'apply', '--plan', planPath, '--confirm', 'wrong', '--json']);
