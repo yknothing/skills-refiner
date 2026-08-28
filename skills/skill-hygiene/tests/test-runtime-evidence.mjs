@@ -31,6 +31,7 @@ const MEMBERS = {
     'bs-prdefine', 'bs-insight-product', 'bs-prospect-customer', 'bs-ui-master',
     'bs-prose-master', 'bs-sw-master', 'bs-reflect-loop', 'bs-skill-auditor',
     'bs-skill-forge', 'bs-social-card', 'bs-visual-article', 'bs-ppt-master',
+    'bs-uml-master',
   ],
   loopos: [
     'loopos', 'loopos-accept', 'loopos-benchmark', 'loopos-compile', 'loopos-doctor',
@@ -83,6 +84,9 @@ function prodcraftPlanFixture(home, root, indexedMembers) {
     source: {
       provider: 'github', repository_id: 'yknothing/prodcraft', revision: 'b'.repeat(40),
       root: join(home, '.cache', 'prodcraft'), tree_digest: DIGEST,
+      remote_attestation: {
+        scheme: 'origin-tracking-containment.v1', refs: ['refs/remotes/origin/main'],
+      },
       registry_digest: DIGEST, curated_index_digest: DIGEST, reference_graph_digest: DIGEST,
       members: indexedMembers.map(({ name, tree_digest }) => ({
         name, relative_path: `skills/${name}`, tree_digest,
@@ -122,6 +126,9 @@ function managedPlanFixture(home, collectionId, root, indexedMembers, indexedRes
     source: {
       provider: 'github', repository_id: spec.repositoryId, revision: 'b'.repeat(40),
       root: join(home, '.cache', collectionId), tree_digest: DIGEST,
+      remote_attestation: {
+        scheme: 'origin-tracking-containment.v1', refs: ['refs/remotes/origin/main'],
+      },
       manifest_digest: DIGEST, reference_graph_digest: DIGEST,
       members: sourceMembers,
       resources: indexedResources.map(({ relative_path, tree_digest }) => ({
@@ -416,6 +423,8 @@ test('policy derives host-specific expected catalogs from exact INDEX member set
   try {
     const codex = collectRuntimeBinding({ home, adapter: 'codex' });
     assert.deepEqual(codex.expected_names, EXPECTED_CODEX);
+    assert.equal(codex.expected_names.length, 16);
+    assert.equal(codex.expected_names.includes('bs-uml-master'), true);
     assert.match(codex.deployment.collection_control_digest, /^sha256:[0-9a-f]{64}$/u);
     assert.match(codex.collections[0].plan_hash, /^sha256:[0-9a-f]{64}$/u);
     assert.equal(codex.collections[0].control_binding.control_schema, 'prodcraft.v1');

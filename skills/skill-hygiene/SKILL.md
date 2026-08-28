@@ -315,7 +315,7 @@ separate:
 - `CATALOG_ONLY` — a fresh native session enumerated the expected identities;
 - `QUALIFIED` — catalog, body-access, gateway-route, and context predicates all have qualifying evidence.
 
-The default policy exposes all 12 Better Skills members and only the
+The default policy exposes all 13 Better Skills members and only the
 `pc-prodcraft`, `loopos`, and `langcraft` gateways for their collections to
 Codex and Claude. Cursor remains observe-only until a trustworthy native
 catalog/profile mechanism is available. Never infer runtime qualification from

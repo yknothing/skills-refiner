@@ -68,6 +68,7 @@ export function makeSource(root) {
     ['-C', source, 'commit', '-q', '-m', 'fixture'],
     ['-C', source, 'branch', '-M', 'main'],
     ['-C', source, 'remote', 'add', 'origin', 'https://github.com/yknothing/prodcraft.git'],
+    ['-C', source, 'update-ref', 'refs/remotes/origin/main', 'HEAD'],
   ]) {
     const result = spawnSync('/usr/bin/git', args, { encoding: 'utf8', env: environment });
     if (result.status !== 0) throw new Error(`fixture git failed: ${result.stderr}`);

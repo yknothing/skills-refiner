@@ -18,6 +18,9 @@ function input() {
       repository_id: 'yknothing/prodcraft',
       revision: 'a'.repeat(40),
       root: '/tmp/source',
+      remote_attestation: {
+        scheme: 'origin-tracking-containment.v1', refs: ['refs/remotes/origin/main'],
+      },
       tree_digest: `sha256:${'1'.repeat(64)}`,
       registry_digest: `sha256:${'2'.repeat(64)}`,
       curated_index_digest: `sha256:${'3'.repeat(64)}`,

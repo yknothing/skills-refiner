@@ -263,7 +263,7 @@ payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent
 ### 运行时暴露面与证据
 
 物理 collection 解决来源与升级组织问题，但仅靠目录嵌套不会降低 Agent catalog
-或 context 成本。默认 runtime profile 向 Codex 与 Claude 暴露 12 个批准的 Better
+或 context 成本。默认 runtime profile 向 Codex 与 Claude 暴露 13 个批准的 Better
 Skills 成员，以及 `pc-prodcraft`、`loopos`、`langcraft` 三个 gateway。Cursor 在
 缺少可信原生 catalog/profile probe 前保持 observe-only。Profile 不会覆盖同名的
 user-owned 条目。

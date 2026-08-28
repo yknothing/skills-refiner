@@ -62,6 +62,7 @@ export function makeManagedSource(root, collectionId) {
   for (const args of [
     ['init', '-q', source], ['-C', source, 'add', '.'], ['-C', source, 'commit', '-q', '-m', 'fixture'],
     ['-C', source, 'branch', '-M', 'main'], ['-C', source, 'remote', 'add', 'origin', spec.sourceUrl],
+    ['-C', source, 'update-ref', 'refs/remotes/origin/main', 'HEAD'],
   ]) {
     const result = spawnSync('/usr/bin/git', args, { encoding: 'utf8', env });
     if (result.status !== 0) throw new Error(result.stderr);
@@ -73,6 +74,13 @@ export function managedRevision(source) {
   const result = spawnSync('/usr/bin/git', ['-C', source, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
   if (result.status !== 0) throw new Error(result.stderr);
   return result.stdout.trim();
+}
+
+export function attestManagedRevision(source) {
+  const result = spawnSync('/usr/bin/git', [
+    '-C', source, 'update-ref', 'refs/remotes/origin/main', managedRevision(source),
+  ], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(result.stderr);
 }
 
 export function makeManagedHome(root, collectionId = 'better-skills') {

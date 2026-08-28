@@ -16,6 +16,7 @@ import {
   MacosAdapterError, moveCollectionEntryExclusive, replaceCollectionFileCas, unlinkCollectionSymlinkExact,
 } from './cleanup-macos.mjs';
 import { collectionSpec, managedCollectionIds } from './collection-specs.mjs';
+import { originTrackingRefsContaining } from './git-source-attestation.mjs';
 import { observeUpstreamVersion, upstreamVersionEvidence } from './upstream-version.mjs';
 import {
   buildManagedPlan, MANAGED_COLLECTION_SCHEMAS, validateManagedIndex,
@@ -163,6 +164,7 @@ function controllerIdentity(home) {
     new URL('./collection-specs.mjs', import.meta.url),
     new URL('./collection-tree.mjs', import.meta.url),
     new URL('./managed-collection-contract.mjs', import.meta.url),
+    new URL('./git-source-attestation.mjs', import.meta.url),
     new URL('./upstream-version.mjs', import.meta.url),
     new URL('./collection-cli.mjs', import.meta.url),
     new URL('./cleanup-macos.mjs', import.meta.url),
@@ -407,6 +409,10 @@ export function inspectManagedSource({ collectionId, sourceRoot, revision }) {
     ...spec.sharedPaths.map((sourcePath) => join(root, sourcePath)),
   ], { allowMissing: true, excludedPaths: new Set(spec.referenceExclusions) });
   const actions = packagingReferenceActions(root, spec, references);
+  const remoteAttestation = originTrackingRefsContaining(git, revision);
+  if (!remoteAttestation.ok || remoteAttestation.refs.length === 0) {
+    fail('source_revision_not_remote_tracked', 'source revision must be contained by an origin remote-tracking ref');
+  }
   for (const sourcePath of spec.sharedPaths) {
     const resourceRoot = join(root, sourcePath);
     assertRealResource(resourceRoot, `shared resource ${sourcePath}`);
@@ -435,6 +441,9 @@ export function inspectManagedSource({ collectionId, sourceRoot, revision }) {
   }
   return {
     provider: 'github', repository_id: spec.repositoryId, revision, root,
+    remote_attestation: {
+      scheme: 'origin-tracking-containment.v1', refs: remoteAttestation.refs,
+    },
     tree_digest: treeDigest(root), manifest_digest: sha256(readFileSync(manifestPath)),
     reference_graph_digest: references.digest, members, resources,
   };
@@ -900,6 +909,7 @@ function removeCatalogEntry(plan, paths) {
 
 function verifySourceAgainstPlan(plan) {
   const observed = inspectManagedSource({ collectionId: plan.collection_id, sourceRoot: plan.source.root, revision: plan.source.revision });
+  if (!Object.hasOwn(plan.source, 'remote_attestation')) delete observed.remote_attestation;
   if (canonicalJson(observed) !== canonicalJson(plan.source)) fail('source_drift', 'candidate source changed after planning');
 }
 function verifyInstalledAgainstPlan(plan) {

@@ -25,6 +25,7 @@ const MEMBERS = {
     'bs-prdefine', 'bs-insight-product', 'bs-prospect-customer', 'bs-ui-master',
     'bs-prose-master', 'bs-sw-master', 'bs-reflect-loop', 'bs-skill-auditor',
     'bs-skill-forge', 'bs-social-card', 'bs-visual-article', 'bs-ppt-master',
+    'bs-uml-master',
   ],
   loopos: [
     'loopos', 'loopos-accept', 'loopos-benchmark', 'loopos-compile', 'loopos-doctor',
@@ -85,6 +86,9 @@ function prodcraftPlanFixture(home, collectionRoot, indexedMembers) {
     source: {
       provider: 'github', repository_id: 'yknothing/prodcraft', revision: 'b'.repeat(40),
       root: join(home, '.cache', 'prodcraft'), tree_digest: DIGEST,
+      remote_attestation: {
+        scheme: 'origin-tracking-containment.v1', refs: ['refs/remotes/origin/main'],
+      },
       registry_digest: DIGEST, curated_index_digest: DIGEST, reference_graph_digest: DIGEST,
       members: indexedMembers.map(({ name, tree_digest }) => ({
         name, relative_path: `skills/${name}`, tree_digest,
@@ -124,6 +128,9 @@ function managedPlanFixture(home, collectionId, collectionRoot, indexedMembers, 
     source: {
       provider: 'github', repository_id: spec.repositoryId, revision: 'b'.repeat(40),
       root: join(home, '.cache', collectionId), tree_digest: DIGEST,
+      remote_attestation: {
+        scheme: 'origin-tracking-containment.v1', refs: ['refs/remotes/origin/main'],
+      },
       manifest_digest: DIGEST, reference_graph_digest: DIGEST,
       members: sourceMembers,
       resources: indexedResources.map(({ relative_path, tree_digest }) => ({
@@ -347,12 +354,14 @@ test('apply is confirmation-bound, preserves user config bytes, and undo restore
     assert.ok(configured.startsWith(value.config));
     assert.match(configured, /pc-intake\/SKILL\.md/u);
     assert.equal(realpathSync(join(value.home, '.claude', 'skills', 'bs-prdefine')), join(value.home, '.agents', 'skills', 'better-skills', 'bs-prdefine'));
+    assert.equal(realpathSync(join(value.home, '.claude', 'skills', 'bs-uml-master')), join(value.home, '.agents', 'skills', 'better-skills', 'bs-uml-master'));
     assert.equal(statusRuntimeProfile({ home: value.home }).status, 'DEPLOYMENT_READY');
     assert.deepEqual(readFileSync(join(value.home, '.cursor', 'skills', 'keep', 'SKILL.md')), value.cursorSentinel);
     const undone = undoRuntimeProfile({ home: value.home, operationId: applied.operation_id, confirmation: applied.operation_id });
     assert.equal(undone.status, 'RESTORED_PRESTATE');
     assert.equal(readFileSync(join(value.home, '.codex', 'config.toml'), 'utf8'), value.config);
     assert.throws(() => realpathSync(join(value.home, '.claude', 'skills', 'bs-prdefine')));
+    assert.throws(() => realpathSync(join(value.home, '.claude', 'skills', 'bs-uml-master')));
     assert.equal(realpathSync(join(value.home, '.claude', 'skills', 'loopos')), join(value.home, '.agents', 'skills', 'loopos', 'loopos'));
   } finally { cleanup(value); }
 });

@@ -81,6 +81,41 @@ test('source inspection requires exact clean Git HEAD and approved origin', (t) 
   );
 });
 
+test('source inspection rejects a clean local commit absent from origin tracking refs', (t) => {
+  const root = makeRoot();
+  t.after(() => removeRoot(root));
+  const source = makeSource(root);
+  const skillPath = join(source, 'skills/.curated/pc-intake/SKILL.md');
+  writeFileSync(skillPath, `${readFileSync(skillPath, 'utf8')}\nUnpushed local generation.\n`);
+  const committed = spawnSync('/usr/bin/git', [
+    '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-am', 'unpushed local generation',
+  ], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.throws(
+    () => inspectProdcraftSource({ sourceRoot: source, revision: sourceRevision(source) }),
+    /origin remote-tracking ref/u,
+  );
+});
+
+test('remote-tracking attestation drift after planning blocks apply before mutation', (t) => {
+  const root = makeRoot();
+  t.after(() => removeRoot(root));
+  const source = makeSource(root);
+  const fixture = makeLegacyHome(root);
+  const plan = compileProdcraftPlan({
+    home: fixture.home, sourceRoot: source, revision: sourceRevision(source),
+    now: '2026-07-20T00:00:00.000Z',
+  });
+  const removed = spawnSync('/usr/bin/git', [
+    '-C', source, 'update-ref', '-d', 'refs/remotes/origin/main',
+  ], { encoding: 'utf8' });
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.throws(() => applyProdcraftPlan(plan, plan.plan_hash), /origin remote-tracking ref/u);
+  assert.equal(statusProdcraftCollection({ home: fixture.home }).status, 'UNMANAGED');
+  assert.equal(existsSync(join(fixture.skillsRoot, 'intake/SKILL.md')), true);
+});
+
 test('installed-state observation trusts exact receipt ownership and raw projection targets', (t) => {
   const root = makeRoot();
   t.after(() => removeRoot(root));

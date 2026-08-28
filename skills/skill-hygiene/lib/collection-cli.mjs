@@ -1,8 +1,8 @@
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { CollectionContractError, validateCollectionPlan } from './collection-contract.mjs';
-import { ManagedCollectionContractError, validateManagedPlan } from './managed-collection-contract.mjs';
+import { COLLECTION_SCHEMAS, CollectionContractError, validateCollectionPlan } from './collection-contract.mjs';
+import { MANAGED_COLLECTION_SCHEMAS, ManagedCollectionContractError, validateManagedPlan } from './managed-collection-contract.mjs';
 import { managedCollectionIds } from './collection-specs.mjs';
 import {
   applyManagedPlan,
@@ -65,8 +65,12 @@ function required(options, name) {
 function loadPlan(path) {
   let value;
   try { value = JSON.parse(readFileSync(resolve(path), 'utf8')); } catch (error) { invalid(`cannot read plan: ${error.message}`); }
-  if (value.schema_version === 'skills-refiner.collection.plan.v1') validateCollectionPlan(value);
-  else validateManagedPlan(value);
+  if ([COLLECTION_SCHEMAS.plan, COLLECTION_SCHEMAS.priorPlan].includes(value.schema_version)) validateCollectionPlan(value);
+  else if ([
+    MANAGED_COLLECTION_SCHEMAS.plan, MANAGED_COLLECTION_SCHEMAS.priorPlan,
+    MANAGED_COLLECTION_SCHEMAS.olderPlan, MANAGED_COLLECTION_SCHEMAS.legacyPlan,
+  ].includes(value.schema_version)) validateManagedPlan(value);
+  else invalid('unsupported plan schema');
   return value;
 }
 
@@ -103,7 +107,7 @@ function execute(argv) {
     const killPhase = process.env.SKILLS_REFINER_TEST_ALLOW_FAULTS === '1'
       ? process.env.SKILLS_REFINER_TEST_KILL_PHASE ?? null
       : null;
-    return plan.schema_version === 'skills-refiner.collection.plan.v1'
+    return [COLLECTION_SCHEMAS.plan, COLLECTION_SCHEMAS.priorPlan].includes(plan.schema_version)
       ? applyProdcraftPlan(plan, required(options, '--confirm'), { killPhase })
       : applyManagedPlan(plan, required(options, '--confirm'), { killPhase });
   }

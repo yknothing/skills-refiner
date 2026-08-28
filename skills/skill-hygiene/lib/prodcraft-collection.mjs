@@ -33,6 +33,7 @@ import {
 } from './collection-contract.mjs';
 import { canonicalJson } from './cleanup-contract.mjs';
 import { computeTreeDigest } from './collection-tree.mjs';
+import { originTrackingRefsContaining } from './git-source-attestation.mjs';
 import { observeUpstreamVersion, upstreamVersionEvidence } from './upstream-version.mjs';
 import {
   createCollectionFileExclusive,
@@ -111,6 +112,7 @@ function controllerIdentity(home) {
     new URL('./collection-tree.mjs', import.meta.url),
     new URL('./collection-cli.mjs', import.meta.url),
     new URL('./collection-contract.mjs', import.meta.url),
+    new URL('./git-source-attestation.mjs', import.meta.url),
     new URL('./upstream-version.mjs', import.meta.url),
     new URL('./cleanup-macos.mjs', import.meta.url),
     new URL('../native/cleanup-macos-helper.c', import.meta.url),
@@ -278,11 +280,18 @@ export function inspectProdcraftSource({ sourceRoot, revision }) {
     fail('source_origin_mismatch', 'source origin must be the approved yknothing/prodcraft repository');
   }
   upstreamVersionEvidence(root, { path: 'manifest.yml', format: 'yaml_root_version' });
+  const remoteAttestation = originTrackingRefsContaining(git, revision);
+  if (!remoteAttestation.ok || remoteAttestation.refs.length === 0) {
+    fail('source_revision_not_remote_tracked', 'source revision must be contained by an origin remote-tracking ref');
+  }
   return {
     provider: 'github',
     repository_id: RECEIPT_SOURCE,
     revision,
     root,
+    remote_attestation: {
+      scheme: 'origin-tracking-containment.v1', refs: remoteAttestation.refs,
+    },
     tree_digest: treeDigest(root),
     registry_digest: sha256(registryBytes),
     curated_index_digest: sha256(indexBytes),
@@ -564,6 +573,7 @@ function releaseLock(paths, lock) {
 
 function verifySourceAgainstPlan(plan) {
   const observed = inspectProdcraftSource({ sourceRoot: plan.source.root, revision: plan.source.revision });
+  if (!Object.hasOwn(plan.source, 'remote_attestation')) delete observed.remote_attestation;
   if (canonicalJson(observed) !== canonicalJson(plan.source)) fail('source_drift', 'candidate source changed after planning');
 }
 

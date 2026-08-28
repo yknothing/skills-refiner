@@ -3,7 +3,8 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import { canonicalJson, sha256Json, validateSha256 } from './cleanup-contract.mjs';
 
 export const COLLECTION_SCHEMAS = Object.freeze({
-  plan: 'skills-refiner.collection.plan.v1',
+  plan: 'skills-refiner.collection.plan.v2',
+  priorPlan: 'skills-refiner.collection.plan.v1',
   index: 'skills-refiner.collection.index.v1',
   operation: 'skills-refiner.collection.operation.v1',
 });
@@ -89,6 +90,15 @@ function validateMember(member, path, sourceRelative = true) {
   digest(member.tree_digest, `${path}.tree_digest`);
 }
 
+function remoteAttestation(value, path) {
+  exactKeys(value, new Set(['scheme', 'refs']), path);
+  if (value.scheme !== 'origin-tracking-containment.v1' || !Array.isArray(value.refs)
+      || value.refs.length === 0 || new Set(value.refs).size !== value.refs.length
+      || value.refs.some((ref) => !/^refs\/remotes\/origin\/(?!HEAD$)[A-Za-z0-9._/-]+$/u.test(ref))
+      || [...value.refs].sort((left, right) => left.localeCompare(right, 'en'))
+        .some((ref, index) => ref !== value.refs[index])) fail(`${path} is invalid`);
+}
+
 export function computeCollectionPlanHash(plan) {
   object(plan, 'plan');
   canonicalJson(plan);
@@ -98,13 +108,20 @@ export function computeCollectionPlanHash(plan) {
 
 export function validateCollectionPlan(plan) {
   exactKeys(plan, PLAN_KEYS, 'plan');
-  if (plan.schema_version !== COLLECTION_SCHEMAS.plan || plan.collection_id !== 'prodcraft') fail('plan identity is invalid');
+  const current = plan.schema_version === COLLECTION_SCHEMAS.plan;
+  const prior = plan.schema_version === COLLECTION_SCHEMAS.priorPlan;
+  if ((!current && !prior) || plan.collection_id !== 'prodcraft') fail('plan identity is invalid');
   absolutePath(plan.home, 'plan.home');
   timestamp(plan.created_at, 'plan.created_at');
 
-  exactKeys(plan.source, new Set(['provider', 'repository_id', 'revision', 'root', 'tree_digest', 'registry_digest', 'curated_index_digest', 'reference_graph_digest', 'members']), 'plan.source');
+  exactKeys(plan.source, new Set([
+    'provider', 'repository_id', 'revision', 'root', 'tree_digest', 'registry_digest',
+    'curated_index_digest', 'reference_graph_digest', 'members',
+    ...(current ? ['remote_attestation'] : []),
+  ]), 'plan.source');
   if (plan.source.provider !== 'github' || plan.source.repository_id !== 'yknothing/prodcraft') fail('plan.source authority is invalid');
   if (!REVISION.test(plan.source.revision)) fail('plan.source.revision must be a full commit');
+  if (current) remoteAttestation(plan.source.remote_attestation, 'plan.source.remote_attestation');
   absolutePath(plan.source.root, 'plan.source.root');
   for (const field of ['tree_digest', 'registry_digest', 'curated_index_digest', 'reference_graph_digest']) digest(plan.source[field], `plan.source.${field}`);
   if (!Array.isArray(plan.source.members) || plan.source.members.length === 0) fail('plan.source.members must be non-empty');

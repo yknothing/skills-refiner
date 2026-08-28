@@ -49,8 +49,14 @@ const definitions = {
       'bs-prdefine', 'bs-insight-product', 'bs-prospect-customer', 'bs-ui-master',
       'bs-prose-master', 'bs-sw-master', 'bs-reflect-loop', 'bs-skill-auditor',
       'bs-skill-forge', 'bs-social-card', 'bs-visual-article', 'bs-ppt-master',
+      'bs-uml-master',
     ].map((name) => ({ name, sourcePath: `skills/${name}` })),
     compatibleMemberProfiles: [
+      [
+        'bs-prdefine', 'bs-insight-product', 'bs-prospect-customer', 'bs-ui-master',
+        'bs-prose-master', 'bs-sw-master', 'bs-reflect-loop', 'bs-skill-auditor',
+        'bs-skill-forge', 'bs-social-card', 'bs-visual-article', 'bs-ppt-master',
+      ].map((name) => ({ name, sourcePath: `skills/${name}` })),
       [
         'bs-article-illustrate', 'bs-dev-flow', 'bs-first-customer-finder',
         'bs-prose-craft', 'bs-requirements-engineering', 'bs-skill-bootstrap',

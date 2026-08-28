@@ -275,7 +275,7 @@ again—review the new evidence first.
 
 Physical collections organize source-owned Skills, but nesting alone does not
 reduce an Agent's catalog or context cost. The default runtime profile exposes
-the 12 approved Better Skills members plus the `pc-prodcraft`, `loopos`, and
+the 13 approved Better Skills members plus the `pc-prodcraft`, `loopos`, and
 `langcraft` gateways to Codex and Claude. Cursor remains observe-only until a
 native catalog/profile probe is available. The profile never rewrites a
 same-name user-owned entry.

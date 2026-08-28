@@ -35,7 +35,7 @@ test('collection CLI checks, plans, applies, statuses, and undoes one JSON contr
 
   const planned = run(home, ['collection', 'plan', 'prodcraft', '--source', source, '--revision', revision, '--output', planPath, '--json']);
   assert.equal(planned.status, 0, planned.stderr);
-  assert.equal(planned.response.schema_version, 'skills-refiner.collection.plan.v1');
+  assert.equal(planned.response.schema_version, 'skills-refiner.collection.plan.v2');
   assert.equal(JSON.parse(readFileSync(planPath, 'utf8')).plan_hash, planned.response.plan_hash);
 
   const rejected = run(home, ['collection', 'apply', '--plan', planPath, '--confirm', 'wrong', '--json']);
@@ -74,11 +74,11 @@ test('collection CLI dispatches managed collections and management-center list',
 
   const checked = run(home, ['collection', 'check', 'better-skills', '--source', source, '--revision', revision, '--json']);
   assert.equal(checked.status, 0, checked.stderr);
-  assert.equal(checked.response.source.members.length, 12);
+  assert.equal(checked.response.source.members.length, 13);
 
   const planned = run(home, ['collection', 'plan', 'better-skills', '--source', source, '--revision', revision, '--output', planPath, '--json']);
   assert.equal(planned.status, 0, planned.stderr);
-  assert.equal(planned.response.schema_version, 'skills-refiner.managed-collection.plan.v4');
+  assert.equal(planned.response.schema_version, 'skills-refiner.managed-collection.plan.v5');
 
   const applied = run(home, ['collection', 'apply', '--plan', planPath, '--confirm', planned.response.plan_hash, '--json']);
   assert.equal(applied.status, 0, applied.stdout + applied.stderr);
