@@ -1,0 +1,33 @@
+{
+  "schema_version": "skills-refiner.runtime-policy.v1",
+  "profile_id": "default",
+  "evidence_max_age_hours": 24,
+  "unmanaged_skills": "preserve",
+  "collections": {
+    "prodcraft": {
+      "codex": { "catalog_mode": "gateway", "gateway": "pc-prodcraft" },
+      "claude": { "catalog_mode": "gateway", "gateway": "pc-prodcraft" },
+      "cursor": { "catalog_mode": "members", "mutation_policy": "observe_only_until_runtime_probe" }
+    },
+    "better-skills": {
+      "codex": { "catalog_mode": "members" },
+      "claude": { "catalog_mode": "members" },
+      "cursor": { "catalog_mode": "members", "mutation_policy": "observe_only_until_runtime_probe" }
+    },
+    "loopos": {
+      "codex": { "catalog_mode": "gateway", "gateway": "loopos" },
+      "claude": { "catalog_mode": "gateway", "gateway": "loopos" },
+      "cursor": { "catalog_mode": "members", "mutation_policy": "observe_only_until_runtime_probe" }
+    },
+    "langcraft": {
+      "codex": { "catalog_mode": "gateway", "gateway": "langcraft" },
+      "claude": { "catalog_mode": "gateway", "gateway": "langcraft" },
+      "cursor": { "catalog_mode": "members", "mutation_policy": "observe_only_until_runtime_probe" }
+    }
+  },
+  "claims": {
+    "filesystem_nesting_saves_context": "vetoed",
+    "runtime_qualified_requires": ["catalog", "body_access", "route_if_gateway"],
+    "cross_repository_same_name_default_disposition": "preserve"
+  }
+}

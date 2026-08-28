@@ -167,6 +167,40 @@ test('apply publishes the physical collection, index, locator, and bounded proje
   assert.equal(status.source.upstream_release.extraction, 'yaml_root_version');
 });
 
+test('ProdCraft controller audits the exact released lock and rejects symlinked operation views', (t) => {
+  const root = makeRoot();
+  t.after(() => removeRoot(root));
+  const source = makeSource(root);
+  const fixture = makeLegacyHome(root);
+  const plan = compileProdcraftPlan({ home: fixture.home, sourceRoot: source, revision: sourceRevision(source), now: '2026-07-20T00:00:00.000Z' });
+  const applied = applyProdcraftPlan(plan, plan.plan_hash);
+  const lockPath = join(fixture.home, '.agents/skill-control/collection-mutation.lock');
+  assert.equal(existsSync(lockPath), false);
+  const auditRoot = join(fixture.home, '.agents/skill-control/lock-audit');
+  const releases = readdirSync(auditRoot).filter((name) => name.endsWith('.released.json'));
+  assert.equal(releases.length, 1);
+  assert.equal(lstatSync(join(auditRoot, releases[0])).mode & 0o077, 0);
+
+  const operationRoot = join(fixture.home, `.agents/skill-control/collections/prodcraft/operations/${applied.operation_id}`);
+  const operationPath = join(operationRoot, 'operation.json');
+  renameSync(operationPath, join(operationRoot, 'operation.real.json'));
+  symlinkSync('operation.real.json', operationPath);
+  const status = statusProdcraftCollection({ home: fixture.home });
+  assert.equal(status.status, 'DRIFTED');
+  assert.equal(status.issues.includes('OPERATION_MISSING_OR_INVALID'), true);
+
+  unlinkSync(operationPath);
+  renameSync(join(operationRoot, 'operation.real.json'), operationPath);
+  const replacement = JSON.parse(readFileSync(operationPath, 'utf8'));
+  replacement.plan_hash = `sha256:${'0'.repeat(64)}`;
+  const replacementPath = join(operationRoot, 'operation.replacement.json');
+  writeFileSync(replacementPath, `${JSON.stringify(replacement, null, 2)}\n`, { mode: 0o600 });
+  renameSync(replacementPath, operationPath);
+  const replacedStatus = statusProdcraftCollection({ home: fixture.home });
+  assert.equal(replacedStatus.status, 'DRIFTED');
+  assert.equal(replacedStatus.issues.includes('OPERATION_IDENTITY_DRIFT'), true);
+});
+
 test('status skips a planned Agent projection after that Agent root is removed', (t) => {
   const { fixture, plan } = plannedFixture(t);
   applyProdcraftPlan(plan, plan.plan_hash);

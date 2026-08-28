@@ -354,7 +354,7 @@ else
     scan_collisions=$(metric "$scan_json_tmp" '.name_collisions | length')
     flagged_skills=$(metric "$scan_json_tmp" '[.skills[] | select(.flags | length > 0)] | length')
     load_blockers=$(metric "$scan_json_tmp" '.runtime_load_blockers | length')
-    security_flags=$(metric "$scan_json_tmp" '[.skills[] | select(any(.flags[]?; . == "pipe_to_shell" or . == "dangerous_cmd" or . == "possible_secret"))] | length')
+    security_flags=$(metric "$scan_json_tmp" '[.skills[] | select((.risk_indicators // []) | length > 0)] | length')
     backup_flags=$(metric "$scan_json_tmp" '[.skills[] | select(any(.flags[]?; startswith("backup")))] | length')
     canonical_count=$(metric "$scan_json_tmp" '[.skills[] | select(.location == ".agents/skills")] | length')
     native_count=$(metric "$scan_json_tmp" '([.skills[] | select(.location != ".agents/skills")] | length)')

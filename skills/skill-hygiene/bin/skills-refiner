@@ -4,6 +4,7 @@ set -o pipefail
 SCRIPT_PARENT="${BASH_SOURCE[0]%/*}"
 [ "$SCRIPT_PARENT" = "${BASH_SOURCE[0]}" ] && SCRIPT_PARENT=.
 SCRIPT_DIR="$(cd "$SCRIPT_PARENT" && pwd)"
+COMMAND_KIND="${1:-}"
 JSON_REQUESTED=false
 for arg in "$@"; do
     [ "$arg" = "--json" ] && JSON_REQUESTED=true
@@ -64,7 +65,11 @@ bootstrap_error() {
         setup_bootstrap_error unsupported none node_runtime_unavailable 3
     fi
     if $JSON_REQUESTED; then
-        printf '%s\n' '{"schema_version":"skills-refiner.cleanup.error.v1","status":"unsupported","overall_status":"unsupported","error_code":"node_runtime_unavailable","mutation_occurred":false,"mutation_outcome":"unchanged","transaction_has_mutated":false,"committed_transaction_ids":[]}'
+        if [ "$COMMAND_KIND" = "runtime" ]; then
+            printf '%s\n' '{"schema_version":"skills-refiner.runtime-error.v1","status":"unsupported","error_code":"node_runtime_unavailable","diagnostic":"runtime commands require Node.js major 24","mutation_occurred":false}'
+        else
+            printf '%s\n' '{"schema_version":"skills-refiner.cleanup.error.v1","status":"unsupported","overall_status":"unsupported","error_code":"node_runtime_unavailable","mutation_occurred":false,"mutation_outcome":"unchanged","transaction_has_mutated":false,"committed_transaction_ids":[]}'
+        fi
     fi
     echo "[ERROR] cleanup requires Node.js major 24" >&2
     exit 3
@@ -81,6 +86,10 @@ fi
 
 if [ "${1:-}" = "collection" ]; then
     exec "$NODE_BIN" "$SCRIPT_DIR/../lib/collection-cli.mjs" "$@"
+fi
+
+if [ "${1:-}" = "runtime" ]; then
+    exec "$NODE_BIN" "$SCRIPT_DIR/../lib/runtime-cli.mjs" "$@"
 fi
 
 exec "$NODE_BIN" "$SCRIPT_DIR/../lib/cleanup-cli.mjs" "$@"

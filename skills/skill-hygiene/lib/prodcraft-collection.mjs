@@ -2,10 +2,12 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   closeSync,
+  constants,
   copyFileSync,
   cpSync,
   existsSync,
   fsyncSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -16,7 +18,6 @@ import {
   realpathSync,
   renameSync,
   rmSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,11 +35,13 @@ import { canonicalJson } from './cleanup-contract.mjs';
 import { computeTreeDigest } from './collection-tree.mjs';
 import { observeUpstreamVersion, upstreamVersionEvidence } from './upstream-version.mjs';
 import {
+  createCollectionFileExclusive,
   createCollectionSymlinkExclusive,
   ensureMacosHelper,
   inspectCollectionEntry,
   MacosAdapterError,
   moveCollectionEntryExclusive,
+  replaceCollectionFileCas,
   unlinkCollectionSymlinkExact,
 } from './cleanup-macos.mjs';
 
@@ -128,6 +131,45 @@ function controllerIdentity(home) {
 
 function readJson(path, code) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch (error) { fail(code, `cannot read JSON ${path}: ${error.message}`); }
+}
+
+function readPrivateSnapshot(home, path, code) {
+  assertSafeManagedPath(home, path);
+  let descriptor;
+  try { descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (error) {
+    fail(code, `cannot open private control file ${path}: ${error.message}`, 'recovery_required');
+  }
+  try {
+    const before = fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.uid !== BigInt(process.getuid()) || (before.mode & 0o077n) !== 0n
+        || before.nlink !== 1n || before.size < 0n || before.size > 64n * 1024n * 1024n) {
+      fail(code, `control file must be an owner-private singly-linked real file: ${path}`, 'recovery_required');
+    }
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+        || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+        || BigInt(bytes.length) !== before.size) {
+      fail(code, `control file changed while being read: ${path}`, 'recovery_required');
+    }
+    assertSafeManagedPath(home, path);
+    let linked;
+    try { linked = lstatSync(path, { bigint: true }); } catch (error) {
+      fail(code, `control file disappeared while being read: ${path}: ${error.message}`, 'recovery_required');
+    }
+    if (linked.isSymbolicLink() || linked.dev !== before.dev || linked.ino !== before.ino
+        || linked.size !== before.size || linked.mtimeNs !== before.mtimeNs || linked.ctimeNs !== before.ctimeNs) {
+      fail(code, `control file path changed while being read: ${path}`, 'recovery_required');
+    }
+    return { bytes, device: String(before.dev), inode: String(before.ino), digest: sha256(bytes) };
+  } finally { try { closeSync(descriptor); } catch {} }
+}
+
+function readPrivateJson(home, path, code) {
+  const snapshot = readPrivateSnapshot(home, path, code);
+  try { return { ...snapshot, value: JSON.parse(snapshot.bytes.toString('utf8')) }; } catch (error) {
+    fail(code, `cannot parse JSON ${path}: ${error.message}`, 'recovery_required');
+  }
 }
 
 function assertAbsoluteRealDirectory(path, label) {
@@ -468,29 +510,56 @@ function writeOperation(paths, plan, state, { mutationOccurred = false, errorCod
     error_code: errorCode,
   };
   validateOperationRecord(record);
-  durableJson(paths.operationPath, record);
+  const bytes = jsonBytes(record);
+  if (!lstatExists(paths.operationPath)) {
+    createCollectionFileExclusive({ home: plan.home, path: paths.operationPath, targetDigest: sha256(bytes), bytes });
+  } else {
+    const current = readPrivateJson(plan.home, paths.operationPath, 'invalid_operation');
+    validateOperationRecord(current.value);
+    if (current.value.operation_id !== paths.id || current.value.plan_hash !== plan.plan_hash) {
+      fail('invalid_operation', 'operation current view does not match its plan', 'recovery_required');
+    }
+    replaceCollectionFileCas({
+      home: plan.home, path: paths.operationPath, expectedDigest: current.digest,
+      targetDigest: sha256(bytes), bytes,
+    });
+  }
   return record;
 }
 
 function acquireLock(paths, plan) {
   assertSafeManagedPath(plan.home, paths.lockPath);
   mkdirSync(dirname(paths.lockPath), { recursive: true, mode: 0o700 });
-  let descriptor;
+  const bytes = Buffer.from(`${JSON.stringify({ operation_id: paths.id, plan_hash: plan.plan_hash, pid: process.pid })}\n`);
+  const auditRoot = join(plan.home, '.agents/skill-control/lock-audit');
+  assertSafeManagedPath(plan.home, join(auditRoot, 'entry'));
+  mkdirSync(auditRoot, { recursive: true, mode: 0o700 });
+  let created = false;
   try {
-    descriptor = openSync(paths.lockPath, 'wx', 0o600);
-    writeFileSync(descriptor, `${JSON.stringify({ operation_id: paths.id, plan_hash: plan.plan_hash, pid: process.pid })}\n`);
-    fsyncSync(descriptor);
-    return descriptor;
+    const creation = createCollectionFileExclusive({ home: plan.home, path: paths.lockPath, targetDigest: sha256(bytes), bytes });
+    created = true;
+    const identity = inspectCollectionEntry({ home: plan.home, path: paths.lockPath });
+    if (identity.device !== creation.device || identity.inode !== creation.inode) {
+      fail('mutation_lock_identity_changed', 'collection lock changed immediately after exclusive creation', 'recovery_required');
+    }
+    return {
+      home: plan.home, path: paths.lockPath, ...identity,
+      releaseDestination: join(auditRoot, `${paths.id}-${identity.device}-${identity.inode}.released.json`),
+    };
   } catch (error) {
-    if (descriptor !== undefined) closeSync(descriptor);
+    if (created && error instanceof ProdcraftCollectionError) throw error;
+    if (created) fail('mutation_lock_identity_unknown', `cannot bind collection lock identity: ${error.message}`, 'recovery_required');
     fail('mutation_lock_unavailable', `collection mutation lock is unavailable: ${error.message}`);
   }
 }
 
-function releaseLock(paths, descriptor) {
-  try { closeSync(descriptor); } finally {
-    try { unlinkSync(paths.lockPath); } catch (error) { fail('mutation_lock_release_failed', error.message, 'recovery_required'); }
-  }
+function releaseLock(paths, lock) {
+  try {
+    moveCollectionEntryExclusive({
+      home: lock.home, source: lock.path, destination: lock.releaseDestination,
+      expectedManifest: lock.manifest_hash, expectedDevice: lock.device, expectedInode: lock.inode,
+    });
+  } catch (error) { fail('mutation_lock_release_failed', error.message, 'recovery_required'); }
 }
 
 function verifySourceAgainstPlan(plan) {
@@ -934,7 +1003,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
   let expectedIndex = null;
   let observedOperation = null;
   try {
-    observedOperation = readJson(paths.operationPath, 'invalid_operation');
+    observedOperation = readPrivateJson(plan.home, paths.operationPath, 'invalid_operation').value;
     validateOperationRecord(observedOperation);
     if (observedOperation.operation_id !== paths.id || observedOperation.plan_hash !== plan.plan_hash) issues.push('OPERATION_IDENTITY_DRIFT');
     if (requireCommitted && observedOperation.state !== OPERATION_STATES.committed) issues.push(`OPERATION_NOT_COMMITTED:${observedOperation.state}`);
@@ -1078,9 +1147,9 @@ function loadActivePlan(home) {
   const controlRoot = join(home, '.agents/skill-control/collections/prodcraft');
   const activePath = join(controlRoot, 'active.json');
   if (!lstatExists(activePath)) return null;
-  const active = readJson(activePath, 'invalid_active_generation');
+  const active = readPrivateJson(home, activePath, 'invalid_active_generation').value;
   const planPath = join(controlRoot, 'operations', active.operation_id, 'plan.json');
-  const plan = readJson(planPath, 'invalid_active_plan');
+  const plan = readPrivateJson(home, planPath, 'invalid_active_plan').value;
   validateCollectionPlan(plan);
   if (active.plan_hash !== plan.plan_hash || active.operation_id !== operationId(plan)) fail('invalid_active_generation', 'active generation does not match its plan');
   return plan;
@@ -1089,10 +1158,10 @@ function loadActivePlan(home) {
 function loadOperationPlan(home, id) {
   if (!/^prodcraft-[0-9a-f]{12}$/u.test(id)) fail('invalid_operation_id', 'invalid ProdCraft operation id');
   const root = join(home, '.agents/skill-control/collections/prodcraft/operations', id);
-  const plan = readJson(join(root, 'plan.json'), 'invalid_operation_plan');
+  const plan = readPrivateJson(home, join(root, 'plan.json'), 'invalid_operation_plan').value;
   validateCollectionPlan(plan);
   if (operationId(plan) !== id) fail('invalid_operation_plan', 'operation id does not match plan authorization');
-  const operation = readJson(join(root, 'operation.json'), 'invalid_operation');
+  const operation = readPrivateJson(home, join(root, 'operation.json'), 'invalid_operation').value;
   validateOperationRecord(operation);
   if (operation.operation_id !== id || operation.plan_hash !== plan.plan_hash) fail('invalid_operation', 'operation record does not match plan');
   return { plan, operation };
@@ -1156,11 +1225,21 @@ function isolateStaleCollectionLock(plan, paths) {
   assertSafeManagedPath(plan.home, paths.lockPath);
   const stat = lstatSync(paths.lockPath);
   if (stat.isSymbolicLink() || !stat.isFile()) fail('unsafe_stale_lock', 'collection lock is not a real file', 'recovery_required');
-  const lock = readJson(paths.lockPath, 'invalid_stale_lock');
+  const snapshot = readPrivateJson(plan.home, paths.lockPath, 'invalid_stale_lock');
+  const lock = snapshot.value;
   if (lock.operation_id !== paths.id || lock.plan_hash !== plan.plan_hash || processIsAlive(lock.pid)) {
     fail('live_or_foreign_lock', 'collection lock is live or belongs to another operation', 'recovery_required');
   }
-  unlinkSync(paths.lockPath);
+  const identity = inspectCollectionEntry({ home: plan.home, path: paths.lockPath });
+  if (identity.device !== snapshot.device || identity.inode !== snapshot.inode) fail('lock_identity_changed', 'collection lock changed during stale-lock validation', 'recovery_required');
+  const auditRoot = join(plan.home, '.agents/skill-control/lock-audit');
+  assertSafeManagedPath(plan.home, join(auditRoot, 'entry'));
+  mkdirSync(auditRoot, { recursive: true, mode: 0o700 });
+  moveCollectionEntryExclusive({
+    home: plan.home, source: paths.lockPath,
+    destination: join(auditRoot, `${paths.id}-${identity.device}-${identity.inode}.stale.json`),
+    expectedManifest: identity.manifest_hash, expectedDevice: identity.device, expectedInode: identity.inode,
+  });
 }
 
 export function recoverProdcraftOperation({ home, operationId: requestedId, confirmation }) {
@@ -1171,7 +1250,7 @@ export function recoverProdcraftOperation({ home, operationId: requestedId, conf
   const lock = acquireLock(paths, plan);
   try {
     if (lstatExists(paths.activePath)) {
-      const active = readJson(paths.activePath, 'invalid_active_generation');
+      const active = readPrivateJson(home, paths.activePath, 'invalid_active_generation').value;
       if (active.operation_id === paths.id) rmSync(paths.activePath, { force: true });
       else fail('foreign_active_generation', 'another active generation exists', 'recovery_required');
     }

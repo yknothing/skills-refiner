@@ -945,6 +945,8 @@ enum identity_result {
     IDENTITY_AUTHORING_SOURCE = 5
 };
 
+static int hash_regular_fd(int fd, char output[SHA256_HEX_BYTES], size_t maximum);
+
 static enum identity_result calculate_entry_identity(int root_fd, const char *leaf,
                                                      const struct stat *leaf_status,
                                                      entry_identity *identity,
@@ -957,6 +959,9 @@ static enum identity_result calculate_entry_identity(int root_fd, const char *le
     } else if (S_ISLNK(leaf_status->st_mode)) {
         identity->kind = "symlink";
         entry_fd = openat(root_fd, leaf, O_RDONLY | O_SYMLINK);
+    } else if (S_ISREG(leaf_status->st_mode)) {
+        identity->kind = "file";
+        entry_fd = openat(root_fd, leaf, O_RDONLY | O_NOFOLLOW);
     } else {
         return IDENTITY_UNSUPPORTED;
     }
@@ -991,7 +996,7 @@ static enum identity_result calculate_entry_identity(int root_fd, const char *le
             0U,
             reject_git_marker
         );
-    } else if (result == 0) {
+    } else if (result == 0 && S_ISLNK(identity->snapshot.st_mode)) {
         unsigned char target[PATH_MAX + 1U];
         ssize_t target_length = readlinkat(root_fd, leaf, (char *)target, PATH_MAX);
         if (target_length < 0 || (size_t)target_length > PATH_MAX) result = -1;
@@ -1000,6 +1005,10 @@ static enum identity_result calculate_entry_identity(int root_fd, const char *le
             identity->raw_target_base64 = base64_encode(target, (size_t)target_length);
             if (identity->raw_target_base64 == NULL) result = -1;
         }
+    } else if (result == 0) {
+        char content_hash[SHA256_HEX_BYTES];
+        if (hash_regular_fd(entry_fd, content_hash, MAX_INPUT_BYTES) != 0) result = -1;
+        else hash_bytes(&manifest, content_hash, strlen(content_hash));
     }
     struct stat after;
     struct stat path_after;
@@ -4234,13 +4243,19 @@ static int collection_symlink_exclusive_v1(const char *home_path, const char *pa
     }
     char observed[PATH_MAX + 1U];
     ssize_t observed_length = readlinkat(parent_fd, leaf, observed, PATH_MAX);
+    struct stat observed_status;
     int durable = observed_length == (ssize_t)target_length
         && memcmp(observed, raw_target, target_length) == 0
+        && fstatat(parent_fd, leaf, &observed_status, AT_SYMLINK_NOFOLLOW) == 0
+        && S_ISLNK(observed_status.st_mode)
         && fsync(parent_fd) == 0;
     close(parent_fd);
     if (!durable) return emit_recovery_required("collection_symlink_recovery_required");
-    printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"collection-symlink-exclusive-v1\"}\n",
-           HELPER_PROTOCOL);
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"collection-symlink-exclusive-v1\","
+           "\"device\":\"%llu\",\"inode\":\"%llu\"}\n",
+           HELPER_PROTOCOL, (unsigned long long)observed_status.st_dev,
+           (unsigned long long)observed_status.st_ino);
     return 0;
 }
 
@@ -4269,6 +4284,279 @@ static int collection_unlink_symlink_v1(const char *home_path, const char *paren
     if (!result) return emit_recovery_required("collection_unlink_recovery_required");
     printf("{\"protocol\":\"%s\",\"status\":\"ok\",\"operation\":\"collection-unlink-symlink-v1\"}\n",
            HELPER_PROTOCOL);
+    return 0;
+}
+
+static int collection_unlink_symlink_identity_v1(
+    const char *home_path,
+    const char *parent_relative,
+    const char *leaf,
+    const char *raw_target,
+    const char *expected_device,
+    const char *expected_inode
+) {
+    if (!valid_component(leaf)) return emit_error("invalid_collection_symlink");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int parent_fd = open_relative_directory(home_fd, parent_relative, 0, 0);
+    char observed[PATH_MAX + 1U];
+    ssize_t observed_length = parent_fd < 0 ? -1 : readlinkat(parent_fd, leaf, observed, PATH_MAX);
+    struct stat observed_status;
+    char actual_device[32];
+    char actual_inode[32];
+    int identity_available = parent_fd >= 0
+        && fstatat(parent_fd, leaf, &observed_status, AT_SYMLINK_NOFOLLOW) == 0
+        && S_ISLNK(observed_status.st_mode);
+    if (identity_available) {
+        (void)snprintf(actual_device, sizeof(actual_device), "%llu", (unsigned long long)observed_status.st_dev);
+        (void)snprintf(actual_inode, sizeof(actual_inode), "%llu", (unsigned long long)observed_status.st_ino);
+    }
+    size_t expected_length = strlen(raw_target);
+    if (!identity_available || observed_length != (ssize_t)expected_length
+        || memcmp(observed, raw_target, expected_length) != 0
+        || strcmp(actual_device, expected_device) != 0
+        || strcmp(actual_inode, expected_inode) != 0
+        || collection_directory_still_bound(home_fd, parent_relative, parent_fd) != 0) {
+        if (parent_fd >= 0) close(parent_fd);
+        close(home_fd);
+        return emit_error("collection_symlink_identity_changed");
+    }
+    close(home_fd);
+    int result = unlinkat(parent_fd, leaf, 0) == 0 && fsync(parent_fd) == 0;
+    close(parent_fd);
+    if (!result) return emit_recovery_required("collection_unlink_recovery_required");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"collection-unlink-symlink-identity-v1\"}\n", HELPER_PROTOCOL);
+    return 0;
+}
+
+static int collection_create_file_exclusive_v1(
+    const char *home_path,
+    const char *parent_relative,
+    const char *leaf,
+    const char *target_digest
+) {
+    if (!valid_component(leaf) || !valid_sha256_identifier(target_digest)) {
+        return emit_error("invalid_file_create");
+    }
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int parent_fd = open_relative_directory(home_fd, parent_relative, 1, 0);
+    if (parent_fd < 0 || collection_directory_still_bound(home_fd, parent_relative, parent_fd) != 0) {
+        if (parent_fd >= 0) close(parent_fd);
+        close(home_fd);
+        return emit_error("unsafe_file_parent");
+    }
+    close(home_fd);
+    unsigned char *target = NULL;
+    size_t target_length = 0U;
+    if (read_bounded_stdin(&target, &target_length) != 0) {
+        close(parent_fd);
+        return emit_error("file_create_input_invalid");
+    }
+    sha256_context target_context;
+    unsigned char target_bytes_digest[32];
+    char target_hash[SHA256_HEX_BYTES];
+    sha256_init(&target_context);
+    sha256_update(&target_context, target, target_length);
+    sha256_final(&target_context, target_bytes_digest);
+    digest_hex(target_bytes_digest, target_hash);
+    if (strcmp(target_digest + 7U, target_hash) != 0) {
+        free(target);
+        close(parent_fd);
+        return emit_error("file_create_target_digest_mismatch");
+    }
+    int descriptor = openat(parent_fd, leaf, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+    if (descriptor < 0) {
+        free(target);
+        close(parent_fd);
+        return emit_error(errno == EEXIST ? "file_create_destination_exists" : "file_create_failed");
+    }
+    int result = 0;
+    size_t written = 0U;
+    while (written < target_length) {
+        ssize_t count = write(descriptor, target + written, target_length - written);
+        if (count <= 0) {
+            result = -1;
+            break;
+        }
+        written += (size_t)count;
+    }
+    struct stat created_status;
+    memset(&created_status, 0, sizeof(created_status));
+    if (result == 0 && (fsync(descriptor) != 0 || fstat(descriptor, &created_status) != 0
+        || !S_ISREG(created_status.st_mode) || created_status.st_uid != getuid()
+        || (created_status.st_mode & 0022) != 0 || created_status.st_nlink != 1)) result = -1;
+    if (close(descriptor) != 0) result = -1;
+    crash_at_test_seam("after_collection_file_create");
+    int observed_fd = openat(parent_fd, leaf, O_RDONLY | O_NOFOLLOW);
+    struct stat observed_status;
+    char observed_hash[SHA256_HEX_BYTES];
+    int postcondition = observed_fd >= 0 && fstat(observed_fd, &observed_status) == 0
+        && observed_status.st_dev == created_status.st_dev
+        && observed_status.st_ino == created_status.st_ino
+        && hash_regular_fd(observed_fd, observed_hash, MAX_INPUT_BYTES) == 0
+        && strcmp(target_digest + 7U, observed_hash) == 0;
+    if (observed_fd >= 0) close(observed_fd);
+    if (result == 0 && (!postcondition || fsync(parent_fd) != 0)) result = -1;
+    free(target);
+    close(parent_fd);
+    if (result != 0) return emit_recovery_required("file_create_recovery_required");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"collection-create-file-exclusive-v1\","
+           "\"digest\":\"%s\",\"device\":\"%llu\",\"inode\":\"%llu\"}\n",
+           HELPER_PROTOCOL, target_digest, (unsigned long long)created_status.st_dev,
+           (unsigned long long)created_status.st_ino);
+    return 0;
+}
+
+static int collection_create_directory_exclusive_v1(
+    const char *home_path,
+    const char *parent_relative,
+    const char *leaf
+) {
+    if (!valid_component(leaf)) return emit_error("invalid_directory_create");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int parent_fd = open_relative_directory(home_fd, parent_relative, 1, 0);
+    if (parent_fd < 0 || collection_directory_still_bound(home_fd, parent_relative, parent_fd) != 0) {
+        if (parent_fd >= 0) close(parent_fd);
+        close(home_fd);
+        return emit_error("unsafe_directory_parent");
+    }
+    close(home_fd);
+    if (mkdirat(parent_fd, leaf, 0700) != 0) {
+        close(parent_fd);
+        return emit_error(errno == EEXIST ? "directory_create_destination_exists" : "directory_create_failed");
+    }
+    crash_at_test_seam("after_collection_directory_create");
+    int created_fd = openat(parent_fd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    struct stat created_status;
+    int postcondition = created_fd >= 0 && fstat(created_fd, &created_status) == 0
+        && S_ISDIR(created_status.st_mode) && created_status.st_uid == getuid()
+        && (created_status.st_mode & 0022) == 0 && fsync(created_fd) == 0
+        && fsync(parent_fd) == 0;
+    if (created_fd >= 0) close(created_fd);
+    close(parent_fd);
+    if (!postcondition) return emit_recovery_required("directory_create_recovery_required");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"collection-create-directory-exclusive-v1\","
+           "\"device\":\"%llu\",\"inode\":\"%llu\"}\n",
+           HELPER_PROTOCOL, (unsigned long long)created_status.st_dev,
+           (unsigned long long)created_status.st_ino);
+    return 0;
+}
+
+static int collection_replace_file_cas_v1(
+    const char *home_path,
+    const char *parent_relative,
+    const char *leaf,
+    const char *expected_digest,
+    const char *target_digest
+) {
+    if (!valid_component(leaf) || !valid_sha256_identifier(expected_digest)
+        || !valid_sha256_identifier(target_digest)) return emit_error("invalid_file_cas");
+    int home_fd = open_absolute_directory(home_path);
+    if (home_fd < 0 || verify_directory_fd(home_fd, 0) != 0) {
+        if (home_fd >= 0) close(home_fd);
+        return emit_error("unsafe_home");
+    }
+    int parent_fd = open_relative_directory(home_fd, parent_relative, 0, 0);
+    if (parent_fd < 0 || collection_directory_still_bound(home_fd, parent_relative, parent_fd) != 0) {
+        if (parent_fd >= 0) close(parent_fd);
+        close(home_fd);
+        return emit_error("unsafe_file_parent");
+    }
+    close(home_fd);
+    int current_fd = openat(parent_fd, leaf, O_RDONLY | O_NOFOLLOW);
+    struct stat current_status;
+    char current_hash[SHA256_HEX_BYTES];
+    int current_valid = current_fd >= 0 && fstat(current_fd, &current_status) == 0
+        && S_ISREG(current_status.st_mode) && current_status.st_uid == getuid()
+        && (current_status.st_mode & 0022) == 0 && current_status.st_nlink == 1
+        && hash_regular_fd(current_fd, current_hash, MAX_INPUT_BYTES) == 0;
+    if (current_fd >= 0) close(current_fd);
+    if (!current_valid || strcmp(expected_digest + 7U, current_hash) != 0) {
+        close(parent_fd);
+        return emit_error(current_valid ? "file_cas_mismatch" : "unsafe_file_destination");
+    }
+    unsigned char *target = NULL;
+    size_t target_length = 0U;
+    if (read_bounded_stdin(&target, &target_length) != 0) {
+        close(parent_fd);
+        return emit_error("file_cas_input_invalid");
+    }
+    sha256_context target_context;
+    unsigned char target_bytes_digest[32];
+    char target_hash[SHA256_HEX_BYTES];
+    sha256_init(&target_context);
+    sha256_update(&target_context, target, target_length);
+    sha256_final(&target_context, target_bytes_digest);
+    digest_hex(target_bytes_digest, target_hash);
+    if (strcmp(target_digest + 7U, target_hash) != 0) {
+        free(target);
+        close(parent_fd);
+        return emit_error("file_cas_target_digest_mismatch");
+    }
+    char temporary[NAME_MAX + 1U];
+    int temporary_length = snprintf(
+        temporary, sizeof(temporary), ".skills-refiner-file-%ld-%08x",
+        (long)getpid(), arc4random()
+    );
+    int temporary_fd = temporary_length < 0 || (size_t)temporary_length >= sizeof(temporary)
+        ? -1 : openat(parent_fd, temporary, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600);
+    int temporary_created = temporary_fd >= 0;
+    int result = 0;
+    int published = 0;
+    if (temporary_fd < 0 || fchmod(temporary_fd, current_status.st_mode & 0777) != 0) result = -1;
+    size_t written = 0U;
+    while (result == 0 && written < target_length) {
+        ssize_t count = write(temporary_fd, target + written, target_length - written);
+        if (count <= 0) result = -1;
+        else written += (size_t)count;
+    }
+    if (temporary_fd >= 0) {
+        int durable = result == 0 && fsync(temporary_fd) == 0;
+        int closed = close(temporary_fd) == 0;
+        if (!durable || !closed) result = -1;
+    }
+    struct stat revalidated;
+    int recheck_fd = result == 0 ? openat(parent_fd, leaf, O_RDONLY | O_NOFOLLOW) : -1;
+    char recheck_hash[SHA256_HEX_BYTES];
+    int recheck_ok = recheck_fd >= 0 && fstat(recheck_fd, &revalidated) == 0
+        && same_object_snapshot(&current_status, &revalidated)
+        && hash_regular_fd(recheck_fd, recheck_hash, MAX_INPUT_BYTES) == 0
+        && strcmp(expected_digest + 7U, recheck_hash) == 0;
+    if (recheck_fd >= 0) close(recheck_fd);
+    if (result == 0 && !recheck_ok) result = -2;
+    if (result == 0 && renameat(parent_fd, temporary, parent_fd, leaf) == 0) published = 1;
+    else if (result == 0) result = -1;
+    if (published) crash_at_test_seam("after_collection_file_cas_rename");
+    int observed_fd = published ? openat(parent_fd, leaf, O_RDONLY | O_NOFOLLOW) : -1;
+    char observed_hash[SHA256_HEX_BYTES];
+    int postcondition = observed_fd >= 0
+        && hash_regular_fd(observed_fd, observed_hash, MAX_INPUT_BYTES) == 0
+        && strcmp(target_digest + 7U, observed_hash) == 0;
+    if (observed_fd >= 0) close(observed_fd);
+    if (published && (!postcondition || fsync(parent_fd) != 0)) result = -3;
+    if (temporary_created && !published) unlinkat(parent_fd, temporary, 0);
+    free(target);
+    close(parent_fd);
+    if (result == -2) return emit_error("file_cas_mismatch");
+    if (result != 0 && published) return emit_recovery_required("file_cas_recovery_required");
+    if (result != 0) return emit_error("file_cas_publish_failed");
+    printf("{\"protocol\":\"%s\",\"status\":\"ok\","
+           "\"operation\":\"collection-replace-file-cas-v1\","
+           "\"digest\":\"%s\"}\n", HELPER_PROTOCOL, target_digest);
     return 0;
 }
 
@@ -4419,6 +4707,26 @@ int main(int argument_count, char **arguments) {
     }
     if (strcmp(command, "collection-unlink-symlink-v1") == 0 && argument_count == 6) {
         return collection_unlink_symlink_v1(arguments[2], arguments[3], arguments[4], arguments[5]);
+    }
+    if (strcmp(command, "collection-unlink-symlink-identity-v1") == 0 && argument_count == 8) {
+        return collection_unlink_symlink_identity_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6], arguments[7]
+        );
+    }
+    if (strcmp(command, "collection-create-file-exclusive-v1") == 0 && argument_count == 6) {
+        return collection_create_file_exclusive_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5]
+        );
+    }
+    if (strcmp(command, "collection-create-directory-exclusive-v1") == 0 && argument_count == 5) {
+        return collection_create_directory_exclusive_v1(
+            arguments[2], arguments[3], arguments[4]
+        );
+    }
+    if (strcmp(command, "collection-replace-file-cas-v1") == 0 && argument_count == 7) {
+        return collection_replace_file_cas_v1(
+            arguments[2], arguments[3], arguments[4], arguments[5], arguments[6]
+        );
     }
     return emit_error("unsupported_command");
 }

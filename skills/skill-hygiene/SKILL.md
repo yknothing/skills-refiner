@@ -303,6 +303,76 @@ ownership. Its digest and old ProdCraft receipts are evidence; they are not the
 desired-state writer. Recovery copies and same-device quarantine remain until a
 separate, explicit retention decision.
 
+## Managing runtime exposure and evidence
+
+Physical collection layout is not runtime isolation. Codex may recursively
+discover nested members, so context reduction requires a host-specific runtime
+profile and a fresh native catalog observation. Keep these truth layers
+separate:
+
+- `FILESYSTEM_READY` — the approved collection bytes and control generation are exact;
+- `DEPLOYMENT_READY` — the host profile/config/projections match policy;
+- `CATALOG_ONLY` — a fresh native session enumerated the expected identities;
+- `QUALIFIED` — catalog, body-access, gateway-route, and context predicates all have qualifying evidence.
+
+The default policy exposes all 12 Better Skills members and only the
+`pc-prodcraft`, `loopos`, and `langcraft` gateways for their collections to
+Codex and Claude. Cursor remains observe-only until a trustworthy native
+catalog/profile mechanism is available. Never infer runtime qualification from
+filesystem layout or source code inspection.
+
+Use owner-private temporary files, inspect the exact profile plan, and confirm
+only the returned `plan_hash`:
+
+```bash
+SESSION_DIR=$(mktemp -d /tmp/skills-refiner-runtime.XXXXXX) || exit 1
+chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
+PROFILE_PLAN="$SESSION_DIR/profile-plan.json"
+EVIDENCE="$SESSION_DIR/runtime-evidence.json"
+
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" runtime profile status --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" runtime profile plan \
+  --output "$PROFILE_PLAN" --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" runtime profile apply \
+  --plan "$PROFILE_PLAN" --confirm 'sha256:...' --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" runtime probe \
+  --adapter codex --output "$EVIDENCE" --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" runtime record \
+  --evidence "$EVIDENCE" --confirm 'sha256:...' --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" runtime status --json
+```
+
+Probe and record deliberately return nonzero while evidence is only
+catalog-level; exit `10` means incomplete/unqualified evidence as well as
+blocked drift at this boundary. It does not mean a successfully confirmed
+record write was rolled back. Evidence is exact-schema, content-addressed, and
+bound to the active collection generation, actual collection/config bytes,
+host, executable identity, and derived native output digests. Raw prompts,
+transcripts, URL credentials, SSH hosts, and arbitrary extra fields are not
+evidence and must never be persisted.
+
+Only the active, attested profile operation owns its managed Codex block and
+Claude projections. A marker without the active operation is unowned. External
+Codex preferences for unrelated Skill names or paths are preserved; a
+semantically equivalent managed path, or syntax whose ownership cannot be
+resolved safely, fails closed. A same-path external projection is user-owned
+and blocks mutation.
+Undo/recover require the exact operation id twice:
+
+```bash
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" runtime profile undo \
+  'runtime-profile-............' --confirm 'runtime-profile-............' --json
+SKILLS_REFINER_NODE_BIN="$NODE24" bash "$LAUNCHER" runtime profile recover \
+  'runtime-profile-............' --confirm 'runtime-profile-............' --json
+```
+
+After any apply, start a fresh Agent session before probing; do not reuse a
+pre-change catalog. Run Panorama after recording evidence so filesystem,
+deployment, catalog, body, route, and context remain visible as independent
+facts. The full authority and recovery model is archived in
+ADR-0008 in the source repository; an independently installed Skill does not
+depend on that document at runtime.
+
 ## Understanding the Skill Topology
 
 Standard installation model:
@@ -341,6 +411,7 @@ Options:
 - `--stale-days N` — Override stale threshold (default: 180 days)
 - `--json` — Output JSON to stdout only; no report file is written
 - `--no-write` — Show the terminal report without writing `~/.agents/skills-report/scan-*.json`
+- `--skip-provenance-tree` — Skip content-bound Git tree reconstruction only when a deliberately truncated provenance result is acceptable. The default full scan uses a canonical-content cache and should remain the normal governance path.
 
 The script outputs structured data. Your job is to **interpret** it.
 
@@ -357,8 +428,10 @@ Key facts now include:
 - `openai` — bounded `agents/openai.yaml` facts: file presence, implicit-invocation policy, and tool dependency count; not runtime behavior proof
 - `normalized_content_sha256` — local normalized content identity for same-name comparison without network access. Canary blocks, CRLF, and BOM are excluded from this hash, so it will differ from a raw `sha256sum` of the file whenever a canary is injected; compare normalized values with normalized values.
 - `freshness` — mtime, age, stale threshold, and `is_stale` as a signal
-- `provenance` — local source signals such as canonical-global, symlink-distribution, native-agent, and git remote when directly available
-- `risk_indicators` — structured review-required security signals
+- `provenance` — local source signals such as canonical-global, symlink-distribution, native-agent, and git remote when directly available. Repository/revision fields found only in a collection INDEX remain `index_claim` / `controller_unverified`; the scanner never lets an INDEX certify itself.
+- `metadata.scan_efficiency` — per-scan canonical parse/cache-hit counts, useful for proving that aliases reused a securely identity-bound parse rather than being reparsed
+- `risk_indicators` — structured, redacted review-required security signals with detector subtype, canonical file, line number, execution scope, and snippet digest
+- `storage_relative_path` / `discovery_depth` / `collection_id` — direct entries plus bounded members declared by a managed collection `INDEX.json`; arbitrary nested documentation is not promoted into inventory
 - `name_collisions` — same-name real directories with distinct canonical paths, versions, or content hashes
 - `extra_frontmatter_keys` — non-core frontmatter keys as names only, not full values
 

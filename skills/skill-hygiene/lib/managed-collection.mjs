@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
-  closeSync, copyFileSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync,
+  closeSync, constants, copyFileSync, cpSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
   mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync,
   renameSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
@@ -12,8 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { canonicalJson } from './cleanup-contract.mjs';
 import { computeTreeDigest } from './collection-tree.mjs';
 import {
-  createCollectionSymlinkExclusive, ensureMacosHelper, inspectCollectionEntry,
-  MacosAdapterError, moveCollectionEntryExclusive, unlinkCollectionSymlinkExact,
+  createCollectionFileExclusive, createCollectionSymlinkExclusive, ensureMacosHelper, inspectCollectionEntry,
+  MacosAdapterError, moveCollectionEntryExclusive, replaceCollectionFileCas, unlinkCollectionSymlinkExact,
 } from './cleanup-macos.mjs';
 import { collectionSpec, managedCollectionIds } from './collection-specs.mjs';
 import { observeUpstreamVersion, upstreamVersionEvidence } from './upstream-version.mjs';
@@ -60,6 +60,45 @@ function resourceDigest(path, { deployed = false } = {}) {
 function lstatExists(path) { try { lstatSync(path); return true; } catch { return false; } }
 function readJson(path, code) { try { return JSON.parse(readFileSync(path, 'utf8')); } catch (error) { fail(code, `cannot read JSON ${path}: ${error.message}`); } }
 function jsonBytes(value) { return Buffer.from(`${JSON.stringify(value, null, 2)}\n`); }
+
+function readPrivateSnapshot(home, path, code) {
+  assertSafeManagedPath(home, path);
+  let descriptor;
+  try { descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (error) {
+    fail(code, `cannot open private control file ${path}: ${error.message}`, 'recovery_required');
+  }
+  try {
+    const before = fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.uid !== BigInt(process.getuid()) || (before.mode & 0o077n) !== 0n
+        || before.nlink !== 1n || before.size < 0n || before.size > 64n * 1024n * 1024n) {
+      fail(code, `control file must be an owner-private singly-linked real file: ${path}`, 'recovery_required');
+    }
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor, { bigint: true });
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+        || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+        || BigInt(bytes.length) !== before.size) {
+      fail(code, `control file changed while being read: ${path}`, 'recovery_required');
+    }
+    assertSafeManagedPath(home, path);
+    let linked;
+    try { linked = lstatSync(path, { bigint: true }); } catch (error) {
+      fail(code, `control file disappeared while being read: ${path}: ${error.message}`, 'recovery_required');
+    }
+    if (linked.isSymbolicLink() || linked.dev !== before.dev || linked.ino !== before.ino
+        || linked.size !== before.size || linked.mtimeNs !== before.mtimeNs || linked.ctimeNs !== before.ctimeNs) {
+      fail(code, `control file path changed while being read: ${path}`, 'recovery_required');
+    }
+    return { bytes, device: String(before.dev), inode: String(before.ino), digest: sha256(bytes) };
+  } finally { try { closeSync(descriptor); } catch {} }
+}
+
+function readPrivateJson(home, path, code) {
+  const snapshot = readPrivateSnapshot(home, path, code);
+  try { return { ...snapshot, value: JSON.parse(snapshot.bytes.toString('utf8')) }; } catch (error) {
+    fail(code, `cannot parse JSON ${path}: ${error.message}`, 'recovery_required');
+  }
+}
 
 function contained(home, path) {
   const rel = relative(home, path);
@@ -631,7 +670,7 @@ function observeManagedPredecessor({ plan, home, duringUpgrade = false, candidat
   if (status.status !== 'FILESYSTEM_READY' && !safelyAdoptable) {
     fail('predecessor_drift', `active generation is not upgradeable: ${status.issues.join(', ')}`);
   }
-  const activeRecord = readJson(paths.activePath, 'invalid_active_generation');
+  const activeRecord = readPrivateJson(home, paths.activePath, 'invalid_active_generation').value;
   if (catalog.value === null) fail('predecessor_drift', 'active generation has no catalog entry');
   const native = nativeIdentity(home, plan.target.collection_root);
   const exposures = [];
@@ -734,34 +773,61 @@ function writeOperation(paths, plan, state, { mutationOccurred = false, errorCod
     mutation_occurred: mutationOccurred, error_code: errorCode,
   };
   validateManagedOperation(record);
-  durableJson(paths.operationPath, record);
+  const bytes = jsonBytes(record);
+  if (!lstatExists(paths.operationPath)) {
+    createCollectionFileExclusive({ home: plan.home, path: paths.operationPath, targetDigest: sha256(bytes), bytes });
+  } else {
+    const current = readPrivateJson(plan.home, paths.operationPath, 'invalid_operation');
+    validateManagedOperation(current.value);
+    if (current.value.operation_id !== paths.id || current.value.plan_hash !== plan.plan_hash) {
+      fail('invalid_operation', 'operation current view does not match its plan', 'recovery_required');
+    }
+    replaceCollectionFileCas({
+      home: plan.home, path: paths.operationPath, expectedDigest: current.digest,
+      targetDigest: sha256(bytes), bytes,
+    });
+  }
   return record;
 }
 
 function acquireLock(paths, plan) {
   assertSafeManagedPath(plan.home, paths.lockPath);
   mkdirSync(dirname(paths.lockPath), { recursive: true, mode: 0o700 });
-  let descriptor;
+  const bytes = Buffer.from(`${JSON.stringify({ operation_id: paths.id, plan_hash: plan.plan_hash, pid: process.pid })}\n`);
+  const auditRoot = join(plan.home, '.agents/skill-control/lock-audit');
+  assertSafeManagedPath(plan.home, join(auditRoot, 'entry'));
+  mkdirSync(auditRoot, { recursive: true, mode: 0o700 });
+  let created = false;
   try {
-    descriptor = openSync(paths.lockPath, 'wx', 0o600);
-    writeFileSync(descriptor, `${JSON.stringify({ operation_id: paths.id, plan_hash: plan.plan_hash, pid: process.pid })}\n`);
-    fsyncSync(descriptor);
-    return descriptor;
+    const creation = createCollectionFileExclusive({ home: plan.home, path: paths.lockPath, targetDigest: sha256(bytes), bytes });
+    created = true;
+    const identity = inspectCollectionEntry({ home: plan.home, path: paths.lockPath });
+    if (identity.device !== creation.device || identity.inode !== creation.inode) {
+      fail('mutation_lock_identity_changed', 'collection lock changed immediately after exclusive creation', 'recovery_required');
+    }
+    return {
+      home: plan.home, path: paths.lockPath, ...identity,
+      releaseDestination: join(auditRoot, `${paths.id}-${identity.device}-${identity.inode}.released.json`),
+    };
   } catch (error) {
-    if (descriptor !== undefined) closeSync(descriptor);
+    if (created && error instanceof ManagedCollectionError) throw error;
+    if (created) fail('mutation_lock_identity_unknown', `cannot bind collection lock identity: ${error.message}`, 'recovery_required');
     fail('mutation_lock_unavailable', `collection mutation lock is unavailable: ${error.message}`);
   }
 }
-function releaseLock(paths, descriptor) {
-  try { closeSync(descriptor); } finally {
-    try { unlinkSync(paths.lockPath); } catch (error) { fail('mutation_lock_release_failed', error.message, 'recovery_required'); }
-  }
+function releaseLock(paths, lock) {
+  try {
+    moveCollectionEntryExclusive({
+      home: lock.home, source: lock.path, destination: lock.releaseDestination,
+      expectedManifest: lock.manifest_hash, expectedDevice: lock.device, expectedInode: lock.inode,
+    });
+  } catch (error) { fail('mutation_lock_release_failed', error.message, 'recovery_required'); }
 }
 
 function emptyCatalog() { return { schema_version: CATALOG_SCHEMA, updated_at: new Date(0).toISOString(), collections: {} }; }
-function loadCatalog(path) {
+function loadCatalog(home, path) {
   if (!lstatExists(path)) return emptyCatalog();
-  const catalog = readJson(path, 'invalid_collection_catalog');
+  const catalog = readPrivateJson(home, path, 'invalid_collection_catalog').value;
   if (catalog.schema_version !== CATALOG_SCHEMA || !catalog.collections || typeof catalog.collections !== 'object') fail('invalid_collection_catalog', 'collection catalog schema is invalid');
   return catalog;
 }
@@ -780,7 +846,7 @@ function catalogEntryForPlan(plan, paths, { firstActivatedAt, currentActivatedAt
   };
 }
 function publishCatalog(plan, paths, activatedAt) {
-  const catalog = loadCatalog(paths.catalogPath);
+  const catalog = loadCatalog(plan.home, paths.catalogPath);
   const previous = catalog.collections[plan.collection_id];
   catalog.updated_at = activatedAt;
   catalog.collections[plan.collection_id] = catalogEntryForPlan(plan, paths, {
@@ -799,8 +865,8 @@ function rebuildCatalogFromControls(home) {
     const plan = loadPlanFromControl(home, collectionId);
     if (plan === null) continue;
     const paths = operationPaths(plan);
-    const operation = readJson(paths.operationPath, 'invalid_operation');
-    const active = readJson(paths.activePath, 'invalid_active_generation');
+    const operation = readPrivateJson(home, paths.operationPath, 'invalid_operation').value;
+    const active = readPrivateJson(home, paths.activePath, 'invalid_active_generation').value;
     validateManagedOperation(operation);
     if (operation.state !== OPERATION_STATES.committed) fail('catalog_rebuild_blocked', `cannot rebuild catalog from non-committed ${collectionId}`);
     validateActiveRecord(active, plan, 'catalog_rebuild_blocked');
@@ -816,14 +882,14 @@ function rebuildCatalogFromControls(home) {
 }
 function removeActiveIfOwned(plan, paths) {
   if (!lstatExists(paths.activePath)) return;
-  const active = readJson(paths.activePath, 'invalid_active_generation');
+  const active = readPrivateJson(plan.home, paths.activePath, 'invalid_active_generation').value;
   if (active.collection_id !== plan.collection_id || active.operation_id !== paths.id || active.plan_hash !== plan.plan_hash) {
     fail('active_generation_conflict', 'active generation is not owned by the rolling-back operation', 'recovery_required');
   }
   unlinkSync(paths.activePath);
 }
 function removeCatalogEntry(plan, paths) {
-  const catalog = loadCatalog(paths.catalogPath);
+  const catalog = loadCatalog(plan.home, paths.catalogPath);
   const current = catalog.collections[plan.collection_id];
   if (!current || current.operation_id !== paths.id || current.plan_hash !== plan.plan_hash) fail('catalog_conflict', 'catalog active generation changed', 'recovery_required');
   delete catalog.collections[plan.collection_id];
@@ -1046,7 +1112,7 @@ function restorePredecessorControl(plan, paths) {
   if (plan.predecessor === null) {
     removeActiveIfOwned(plan, paths);
     if (lstatExists(paths.catalogPath)) {
-      const catalog = loadCatalog(paths.catalogPath);
+      const catalog = loadCatalog(plan.home, paths.catalogPath);
       if (catalog.collections[plan.collection_id]?.operation_id === paths.id) {
         delete catalog.collections[plan.collection_id];
         catalog.updated_at = new Date().toISOString();
@@ -1057,13 +1123,13 @@ function restorePredecessorControl(plan, paths) {
     return;
   }
   if (lstatExists(paths.activePath)) {
-    const active = readJson(paths.activePath, 'invalid_active_generation');
+    const active = readPrivateJson(plan.home, paths.activePath, 'invalid_active_generation').value;
     const currentOwned = active.operation_id === paths.id && active.plan_hash === plan.plan_hash;
     const predecessorOwned = canonicalJson(active) === canonicalJson(plan.predecessor.active_record);
     if (!currentOwned && !predecessorOwned) fail('active_generation_conflict', 'active generation changed during rollback', 'recovery_required');
   }
   durableJson(paths.activePath, plan.predecessor.active_record);
-  const catalog = loadCatalog(paths.catalogPath);
+  const catalog = loadCatalog(plan.home, paths.catalogPath);
   const current = catalog.collections[plan.collection_id];
   if (current && current.operation_id !== paths.id && current.operation_id !== plan.predecessor.operation_id) fail('catalog_conflict', 'catalog generation changed during rollback', 'recovery_required');
   catalog.collections[plan.collection_id] = plan.predecessor.catalog_entry;
@@ -1216,7 +1282,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
   if (orphanedCatalog) issues.push('ORPHANED_CATALOG');
   if (orphanedControl) issues.push('ORPHANED_CONTROL');
   try {
-    const operation = readJson(paths.operationPath, 'invalid_operation');
+    const operation = readPrivateJson(plan.home, paths.operationPath, 'invalid_operation').value;
     validateManagedOperation(operation);
     if (operation.operation_id !== paths.id || operation.plan_hash !== plan.plan_hash) issues.push('OPERATION_IDENTITY_DRIFT');
     if (requireCommitted && operation.state !== OPERATION_STATES.committed) issues.push(`OPERATION_NOT_COMMITTED:${operation.state}`);
@@ -1330,10 +1396,10 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
 function loadPlanFromControl(home, collectionId) {
   const activePath = join(home, '.agents/skill-control/collections', collectionId, 'active.json');
   if (!lstatExists(activePath)) return null;
-  const active = readJson(activePath, 'invalid_active_generation');
+  const active = readPrivateJson(home, activePath, 'invalid_active_generation').value;
   validateActiveEnvelope(active, collectionId);
   const path = join(home, '.agents/skill-control/collections', collectionId, 'operations', active.operation_id, 'plan.json');
-  const plan = readJson(path, 'invalid_active_plan');
+  const plan = readPrivateJson(home, path, 'invalid_active_plan').value;
   validateManagedPlan(plan);
   validateActiveRecord(active, plan);
   return plan;
@@ -1360,7 +1426,7 @@ function validateActiveRecord(active, plan, code = 'invalid_active_generation') 
 }
 function catalogEntry(home, collectionId) {
   const path = join(home, 'Library/Application Support/skills-refiner/catalog.json');
-  const catalog = loadCatalog(path);
+  const catalog = loadCatalog(home, path);
   return { path, catalog, value: catalog.collections[collectionId] ?? null };
 }
 function pendingManagedOperation(home, collectionId, { activeOperationId = null } = {}) {
@@ -1375,8 +1441,8 @@ function pendingManagedOperation(home, collectionId, { activeOperationId = null 
   for (const id of ids) {
     const root = join(operationsRoot, id);
     try {
-      const plan = readJson(join(root, 'plan.json'), 'invalid_operation_plan');
-      const operation = readJson(join(root, 'operation.json'), 'invalid_operation');
+      const plan = readPrivateJson(home, join(root, 'plan.json'), 'invalid_operation_plan').value;
+      const operation = readPrivateJson(home, join(root, 'operation.json'), 'invalid_operation').value;
       validateManagedPlan(plan);
       validateManagedOperation(operation);
       if (operation.operation_id !== id || operation.plan_hash !== plan.plan_hash || operationId(plan) !== id) fail('invalid_operation', 'operation identity is inconsistent');
@@ -1410,7 +1476,7 @@ function catalogIdentityIssues(home, plan, paths, catalog) {
       || Number.isNaN(Date.parse(entry.lifecycle?.first_activated_at))
       || Number.isNaN(Date.parse(entry.lifecycle?.current_generation_activated_at));
   if (lstatExists(paths.activePath)) {
-    const active = readJson(paths.activePath, 'invalid_active_generation');
+    const active = readPrivateJson(home, paths.activePath, 'invalid_active_generation').value;
     validateActiveRecord(active, plan);
     const expectedFirstActivatedAt = plan.predecessor?.catalog_entry.lifecycle.first_activated_at ?? active.activated_at;
     lifecycleDrift ||= entry.lifecycle?.first_activated_at !== expectedFirstActivatedAt
@@ -1420,7 +1486,7 @@ function catalogIdentityIssues(home, plan, paths, catalog) {
   const viewPath = join(home, '.agents/skill-control/catalog.json');
   if (!lstatExists(viewPath)) issues.push('CATALOG_VIEW_MISSING');
   else {
-    try { if (canonicalJson(readJson(viewPath, 'invalid_collection_catalog_view')) !== canonicalJson(catalog)) issues.push('CATALOG_VIEW_DRIFT'); }
+    try { if (canonicalJson(readPrivateJson(home, viewPath, 'invalid_collection_catalog_view').value) !== canonicalJson(catalog)) issues.push('CATALOG_VIEW_DRIFT'); }
     catch { issues.push('CATALOG_VIEW_INVALID'); }
   }
   return issues;
@@ -1455,7 +1521,7 @@ export function statusManagedCollection({ collectionId, home }) {
     orphanedControl = true;
     if (!new RegExp(`^${collectionId}-[0-9a-f]{12}$`, 'u').test(catalog.value.operation_id ?? '')) fail('catalog_conflict', 'catalog operation id is invalid', 'recovery_required');
     const canonicalRecoveryPlan = join(home, 'Library/Application Support/skills-refiner/recovery/operations', catalog.value.operation_id, 'plan.json');
-    plan = readJson(canonicalRecoveryPlan, 'missing_recovery_plan');
+    plan = readPrivateJson(home, canonicalRecoveryPlan, 'missing_recovery_plan').value;
     validateManagedPlan(plan);
   } else if (catalog.value === null) orphanedCatalog = true;
   else if (catalog.value.operation_id !== operationId(plan) || catalog.value.plan_hash !== plan.plan_hash) fail('catalog_conflict', 'catalog and control generation disagree', 'recovery_required');
@@ -1472,7 +1538,7 @@ export function statusManagedCollection({ collectionId, home }) {
 }
 
 export function listManagedCollections({ home }) {
-  const catalog = loadCatalog(join(home, 'Library/Application Support/skills-refiner/catalog.json'));
+  const catalog = loadCatalog(home, join(home, 'Library/Application Support/skills-refiner/catalog.json'));
   return {
     schema_version: 'skills-refiner.collection.list.v1', observed_at: new Date().toISOString(),
     collections: managedCollectionIds().map((collectionId) => statusManagedCollection({ collectionId, home })),
@@ -1487,8 +1553,8 @@ function loadOperation(home, id) {
   if (!collectionId) fail('invalid_operation_id', 'unknown collection operation id');
   const root = join(home, '.agents/skill-control/collections', collectionId, 'operations', id);
   let plan;
-  try { plan = readJson(join(root, 'plan.json'), 'invalid_operation_plan'); } catch {
-    plan = readJson(join(home, 'Library/Application Support/skills-refiner/recovery/operations', id, 'plan.json'), 'invalid_operation_plan');
+  try { plan = readPrivateJson(home, join(root, 'plan.json'), 'invalid_operation_plan').value; } catch {
+    plan = readPrivateJson(home, join(home, 'Library/Application Support/skills-refiner/recovery/operations', id, 'plan.json'), 'invalid_operation_plan').value;
   }
   validateManagedPlan(plan);
   if (operationId(plan) !== id) fail('invalid_operation_plan', 'operation id does not match plan');
@@ -1499,16 +1565,26 @@ function isolateStaleLock(plan, paths) {
   if (!lstatExists(paths.lockPath)) return;
   const stat = lstatSync(paths.lockPath);
   if (stat.isSymbolicLink() || !stat.isFile()) fail('unsafe_stale_lock', 'collection lock is not a real file', 'recovery_required');
-  const lock = readJson(paths.lockPath, 'invalid_stale_lock');
+  const snapshot = readPrivateJson(plan.home, paths.lockPath, 'invalid_stale_lock');
+  const lock = snapshot.value;
   if (lock.operation_id !== paths.id || lock.plan_hash !== plan.plan_hash || processIsAlive(lock.pid)) fail('live_or_foreign_lock', 'collection lock is live or foreign', 'recovery_required');
-  unlinkSync(paths.lockPath);
+  const identity = inspectCollectionEntry({ home: plan.home, path: paths.lockPath });
+  if (identity.device !== snapshot.device || identity.inode !== snapshot.inode) fail('lock_identity_changed', 'collection lock changed during stale-lock validation', 'recovery_required');
+  const auditRoot = join(plan.home, '.agents/skill-control/lock-audit');
+  assertSafeManagedPath(plan.home, join(auditRoot, 'entry'));
+  mkdirSync(auditRoot, { recursive: true, mode: 0o700 });
+  moveCollectionEntryExclusive({
+    home: plan.home, source: paths.lockPath,
+    destination: join(auditRoot, `${paths.id}-${identity.device}-${identity.inode}.stale.json`),
+    expectedManifest: identity.manifest_hash, expectedDevice: identity.device, expectedInode: identity.inode,
+  });
 }
 
 export function recoverManagedOperation({ home, operationId: requestedId, confirmation }) {
   const plan = loadOperation(home, requestedId);
   const paths = operationPaths(plan);
   if (confirmation !== paths.id) fail('confirmation_mismatch', 'recover confirmation must equal operation id');
-  const existingOperation = readJson(paths.operationPath, 'invalid_operation');
+  const existingOperation = readPrivateJson(home, paths.operationPath, 'invalid_operation').value;
   validateManagedOperation(existingOperation);
   if (existingOperation.state === OPERATION_STATES.rolledBack) {
     const current = statusManagedCollection({ collectionId: plan.collection_id, home });
@@ -1555,7 +1631,7 @@ export function repairManagedCollection({ collectionId, home, confirmation }) {
       rebuildCatalogFromControls(home);
       repaired.push('catalog');
     } else if (before.issues.some((issue) => ['CATALOG_VIEW_MISSING', 'CATALOG_VIEW_DRIFT', 'CATALOG_VIEW_INVALID'].includes(issue))) {
-      const catalog = loadCatalog(paths.catalogPath);
+      const catalog = loadCatalog(plan.home, paths.catalogPath);
       durableJson(paths.catalogViewPath, catalog);
       repaired.push('catalog_view');
     }

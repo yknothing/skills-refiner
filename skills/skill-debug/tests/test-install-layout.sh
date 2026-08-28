@@ -245,7 +245,7 @@ run_tests() {
     echo ""
 
     echo -e "${BOLD}── T3 Schema Contract ──${NC}"
-    assert_jq "scan schema is v5" "$scan_json" '.metadata.schema_version == "skill-scan.v5" and .metadata.runtime_validation_mode == "static-preflight"'
+    assert_jq "scan schema is v6" "$scan_json" '.metadata.schema_version == "skill-scan.v6" and .metadata.runtime_validation_mode == "static-preflight"'
     assert_jq "scan declares hash normalization" "$scan_json" '.metadata.hash_normalization == "strip-canary-crlf-bom.v1"'
     assert_jq "probe schema is v3" "$probe_json" '.schema_version == "skill-probe.v3"'
     assert_jq "scan has no content_sha256 key" "$scan_json" '[.. | objects | select(has("content_sha256"))] | length == 0'

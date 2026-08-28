@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -219,6 +219,7 @@ test('catalog deletion, index, artifact, resource, quarantine, and recovery drif
   let status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
   assert.equal(status.issues.includes('ORPHANED_CATALOG'), true);
   writeFileSync(catalogPath, catalogBytes);
+  chmodSync(catalogPath, 0o600);
 
   const collection = join(fixture.skillsRoot, 'better-skills');
   const indexPath = join(collection, 'INDEX.json');
@@ -610,6 +611,38 @@ test('global mutation lock contention leaves no phantom operation', (t) => {
   const operationId = `better-skills-${plan.plan_hash.slice(7, 19)}`;
   assert.equal(existsSync(join(fixture.home, `.agents/skill-control/collections/better-skills/operations/${operationId}`)), false);
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'UNMANAGED');
+});
+
+test('managed controller audits the exact released lock and rejects symlinked operation views', (t) => {
+  const { fixture, plan } = planned(t);
+  const applied = applyManagedPlan(plan, plan.plan_hash);
+  const lockPath = join(fixture.home, '.agents/skill-control/collection-mutation.lock');
+  assert.equal(existsSync(lockPath), false);
+  const auditRoot = join(fixture.home, '.agents/skill-control/lock-audit');
+  const releases = readdirSync(auditRoot).filter((name) => name.endsWith('.released.json'));
+  assert.equal(releases.length, 1);
+  assert.equal(lstatSync(join(auditRoot, releases[0])).mode & 0o077, 0);
+
+  const operationRoot = join(fixture.home, `.agents/skill-control/collections/better-skills/operations/${applied.operation_id}`);
+  const operationPath = join(operationRoot, 'operation.json');
+  renameSync(operationPath, join(operationRoot, 'operation.real.json'));
+  symlinkSync('operation.real.json', operationPath);
+  assert.throws(
+    () => statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }),
+    (error) => error.code === 'invalid_operation' && error.status === 'recovery_required',
+  );
+
+  unlinkSync(operationPath);
+  renameSync(join(operationRoot, 'operation.real.json'), operationPath);
+  const replacement = JSON.parse(readFileSync(operationPath, 'utf8'));
+  replacement.plan_hash = `sha256:${'0'.repeat(64)}`;
+  const replacementPath = join(operationRoot, 'operation.replacement.json');
+  writeFileSync(replacementPath, `${JSON.stringify(replacement, null, 2)}\n`, { mode: 0o600 });
+  renameSync(replacementPath, operationPath);
+  assert.throws(
+    () => statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }),
+    (error) => error.code === 'invalid_operation',
+  );
 });
 
 for (const phase of MANAGED_APPLY_FAULT_PHASES) {

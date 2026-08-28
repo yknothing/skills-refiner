@@ -922,6 +922,8 @@ export function moveCollectionEntryExclusive({
   source,
   destination,
   expectedManifest = null,
+  expectedDevice = null,
+  expectedInode = null,
 } = {}) {
   const verifiedHome = safePath(home, 'home');
   const sourceEntry = collectionPathParts(verifiedHome, source, 'source');
@@ -930,8 +932,10 @@ export function moveCollectionEntryExclusive({
   const identity = invokeHelper(helper, [
     'collection-inspect-v1', verifiedHome, sourceEntry.parentRelative, sourceEntry.leaf,
   ]);
-  if (expectedManifest !== null
-      && (!SHA256_IDENTIFIER.test(expectedManifest) || identity.manifest_hash !== expectedManifest)) {
+  if ((expectedManifest !== null
+        && (!SHA256_IDENTIFIER.test(expectedManifest) || identity.manifest_hash !== expectedManifest))
+      || (expectedDevice !== null && identity.device !== expectedDevice)
+      || (expectedInode !== null && identity.inode !== expectedInode)) {
     fail('blocked', 'collection_identity_changed');
   }
   return invokeHelper(helper, [
@@ -977,6 +981,110 @@ export function unlinkCollectionSymlinkExact({
   return invokeHelper(helper, [
     'collection-unlink-symlink-v1', verifiedHome, entry.parentRelative, entry.leaf, rawTarget,
   ], { mutationMayHaveOccurred: true });
+}
+
+export function unlinkCollectionSymlinkIdentityExact({
+  home = process.env.HOME,
+  path,
+  rawTarget,
+  device,
+  inode,
+} = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const entry = collectionPathParts(verifiedHome, path, 'path');
+  if (typeof rawTarget !== 'string' || rawTarget.length === 0 || CONTROL_CHARACTERS.test(rawTarget)
+      || typeof device !== 'string' || !/^\d+$/u.test(device)
+      || typeof inode !== 'string' || !/^\d+$/u.test(inode)) {
+    fail('blocked', 'invalid_collection_symlink_identity');
+  }
+  const helper = ensureMacosHelper({ home: verifiedHome });
+  return invokeHelper(helper, [
+    'collection-unlink-symlink-identity-v1',
+    verifiedHome,
+    entry.parentRelative,
+    entry.leaf,
+    rawTarget,
+    device,
+    inode,
+  ], { mutationMayHaveOccurred: true });
+}
+
+export function createCollectionFileExclusive({
+  home = process.env.HOME,
+  path,
+  targetDigest,
+  bytes,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const entry = collectionPathParts(verifiedHome, path, 'path');
+  if (!SHA256_IDENTIFIER.test(targetDigest ?? '')
+      || !(typeof bytes === 'string' || Buffer.isBuffer(bytes))) {
+    fail('blocked', 'invalid_file_create_contract');
+  }
+  const helper = ensureMacosHelper({ home: verifiedHome });
+  const response = invokeHelper(helper, [
+    'collection-create-file-exclusive-v1',
+    verifiedHome,
+    entry.parentRelative,
+    entry.leaf,
+    targetDigest,
+  ], { input: bytes, mutationMayHaveOccurred: true, testEnvironment });
+  if (response.operation !== 'collection-create-file-exclusive-v1'
+      || response.digest !== targetDigest
+      || typeof response.device !== 'string' || !/^\d+$/u.test(response.device)
+      || typeof response.inode !== 'string' || !/^\d+$/u.test(response.inode)) {
+    fail('recovery_required', 'file_create_postcondition_failed', undefined, { mutationMayHaveOccurred: true });
+  }
+  return response;
+}
+
+export function createCollectionDirectoryExclusive({
+  home = process.env.HOME,
+  path,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const entry = collectionPathParts(verifiedHome, path, 'path');
+  const helper = ensureMacosHelper({ home: verifiedHome });
+  const response = invokeHelper(helper, [
+    'collection-create-directory-exclusive-v1',
+    verifiedHome,
+    entry.parentRelative,
+    entry.leaf,
+  ], { mutationMayHaveOccurred: true, testEnvironment });
+  if (response.operation !== 'collection-create-directory-exclusive-v1'
+      || typeof response.device !== 'string' || !/^\d+$/u.test(response.device)
+      || typeof response.inode !== 'string' || !/^\d+$/u.test(response.inode)) {
+    fail('recovery_required', 'directory_create_postcondition_failed', undefined, { mutationMayHaveOccurred: true });
+  }
+  return response;
+}
+
+export function replaceCollectionFileCas({
+  home = process.env.HOME,
+  path,
+  expectedDigest,
+  targetDigest,
+  bytes,
+} = {}, testEnvironment = {}) {
+  const verifiedHome = safePath(home, 'home');
+  const entry = collectionPathParts(verifiedHome, path, 'path');
+  if (!SHA256_IDENTIFIER.test(expectedDigest ?? '') || !SHA256_IDENTIFIER.test(targetDigest ?? '')
+      || !(typeof bytes === 'string' || Buffer.isBuffer(bytes))) {
+    fail('blocked', 'invalid_file_cas_contract');
+  }
+  const helper = ensureMacosHelper({ home: verifiedHome });
+  const response = invokeHelper(helper, [
+    'collection-replace-file-cas-v1',
+    verifiedHome,
+    entry.parentRelative,
+    entry.leaf,
+    expectedDigest,
+    targetDigest,
+  ], { input: bytes, mutationMayHaveOccurred: true, testEnvironment });
+  if (response.operation !== 'collection-replace-file-cas-v1' || response.digest !== targetDigest) {
+    fail('recovery_required', 'file_cas_postcondition_failed', undefined, { mutationMayHaveOccurred: true });
+  }
+  return response;
 }
 
 function validateMutationIdentity(executionIdentity) {
