@@ -379,6 +379,27 @@ for (const legacySchema of [
       operation_id: first.operation_id,
       plan_hash: legacyPlan.plan_hash,
     }, null, 2)}\n`);
+    const recoveryRoot = join(
+      fixture.home,
+      `Library/Application Support/skills-refiner/recovery/operations/${first.operation_id}`,
+    );
+    rmSync(join(recoveryRoot, 'plan.json'));
+    const recoveryManifestPath = join(recoveryRoot, 'manifest.json');
+    const historicalManifest = JSON.parse(readFileSync(recoveryManifestPath, 'utf8'));
+    delete historicalManifest.predecessor_digest;
+    writeFileSync(recoveryManifestPath, `${JSON.stringify(historicalManifest, null, 2)}\n`);
+    const historicalStatus = statusProdcraftCollection({ home: fixture.home });
+    assert.equal(historicalStatus.status, 'FILESYSTEM_READY', historicalStatus.issues.join(', '));
+    assert.equal(historicalStatus.issues.includes('RECOVERY_PLAN_MISSING_OR_INVALID'), false);
+    assert.equal(historicalStatus.issues.includes('RECOVERY_MANIFEST_DRIFT'), false);
+
+    writeFileSync(join(recoveryRoot, 'plan.json'), '{}\n');
+    const invalidHistoricalPlan = statusProdcraftCollection({ home: fixture.home });
+    assert.equal(invalidHistoricalPlan.status, 'DRIFTED');
+    assert.equal(invalidHistoricalPlan.issues.includes('RECOVERY_PLAN_MISSING_OR_INVALID'), true);
+    rmSync(join(recoveryRoot, 'plan.json'));
+    assert.equal(statusProdcraftCollection({ home: fixture.home }).status, 'FILESYSTEM_READY');
+
     const revision = advanceProdcraftSource(source, `successor-of-${legacySchema.at(-1)}`);
     const successor = compileProdcraftPlan({
       home: fixture.home,

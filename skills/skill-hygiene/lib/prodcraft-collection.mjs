@@ -1138,6 +1138,17 @@ function expectedRecoveryManifest(plan, paths) {
   };
 }
 
+function expectedHistoricalRecoveryManifest(plan, paths) {
+  const manifest = expectedRecoveryManifest(plan, paths);
+  delete manifest.predecessor_digest;
+  return manifest;
+}
+
+const HISTORICAL_RECOVERY_EVIDENCE_SCHEMAS = new Set([
+  'skills-refiner.collection.plan.v1',
+  'skills-refiner.collection.plan.v2',
+]);
+
 function exactManagedSymlink(path, rawTarget) {
   try { return lstatSync(path).isSymbolicLink() && readlinkSync(path) === rawTarget; } catch { return false; }
 }
@@ -1872,23 +1883,29 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     if (observedOperation.operation_id !== paths.id || observedOperation.plan_hash !== plan.plan_hash) issues.push('OPERATION_IDENTITY_DRIFT');
     if (requireCommitted && observedOperation.state !== OPERATION_STATES.committed) issues.push(`OPERATION_NOT_COMMITTED:${observedOperation.state}`);
   } catch { issues.push('OPERATION_MISSING_OR_INVALID'); }
-  try {
-    const recoveryPlan = readPrivateJson(
-      plan.home,
-      paths.recoveryPlanPath,
-      'invalid_recovery_plan',
-    ).value;
-    validateCollectionPlan(recoveryPlan);
-    if (canonicalJson(recoveryPlan) !== canonicalJson(plan)) issues.push('RECOVERY_PLAN_DRIFT');
-  } catch { issues.push('RECOVERY_PLAN_MISSING_OR_INVALID'); }
+  const historicalRecoveryEvidence = HISTORICAL_RECOVERY_EVIDENCE_SCHEMAS.has(plan.schema_version);
+  if (!historicalRecoveryEvidence || lstatExists(paths.recoveryPlanPath)) {
+    try {
+      const recoveryPlan = readPrivateJson(
+        plan.home,
+        paths.recoveryPlanPath,
+        'invalid_recovery_plan',
+      ).value;
+      validateCollectionPlan(recoveryPlan);
+      if (canonicalJson(recoveryPlan) !== canonicalJson(plan)) issues.push('RECOVERY_PLAN_DRIFT');
+    } catch { issues.push('RECOVERY_PLAN_MISSING_OR_INVALID'); }
+  }
   try {
     const recoveryManifest = readPrivateJson(
       plan.home,
       join(paths.recoveryOperationRoot, 'manifest.json'),
       'invalid_recovery_manifest',
     ).value;
-    if (canonicalJson(recoveryManifest)
-        !== canonicalJson(expectedRecoveryManifest(plan, paths))) {
+    const observedManifest = canonicalJson(recoveryManifest);
+    const currentManifest = canonicalJson(expectedRecoveryManifest(plan, paths));
+    const historicalManifest = canonicalJson(expectedHistoricalRecoveryManifest(plan, paths));
+    if (observedManifest !== currentManifest
+        && (!historicalRecoveryEvidence || observedManifest !== historicalManifest)) {
       issues.push('RECOVERY_MANIFEST_DRIFT');
     }
   } catch { issues.push('RECOVERY_MANIFEST_MISSING_OR_INVALID'); }
