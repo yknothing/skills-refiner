@@ -15,8 +15,9 @@ import {
   parseClaudeInitCatalog, parseCodexPromptCatalog, parseCodexPromptCatalogEntries, probeRuntime,
 } from '../lib/runtime-adapters.mjs';
 import {
-  collectRuntimeBinding, computeEvidenceId, DEFAULT_RUNTIME_POLICY, recordRuntimeEvidence, runtimeStatus,
-  resolveRuntimeExecutable, runRuntimeExecutable, validateRuntimeEvidence,
+  collectRuntimeBinding, computeEvidenceId, currentRuntimeAdapterVersion, DEFAULT_RUNTIME_POLICY,
+  recordRuntimeEvidence, runtimeStatus,
+  resolveRuntimeExecutable, runRuntimeExecutable, runtimeEntityId, sha256, validateRuntimeEvidence,
 } from '../lib/runtime-evidence.mjs';
 import { validateCodexCandidate } from '../lib/runtime-profile.mjs';
 
@@ -299,6 +300,15 @@ function codexPrompt(names, home = null) {
   }]);
 }
 
+function legacyEvidence(current) {
+  const legacy = structuredClone(current);
+  legacy.schema_version = 'skills-refiner.runtime-evidence.v1';
+  legacy.probe.probe_contract_version = 'skills-refiner.runtime-probe.v1';
+  delete legacy.probe_result;
+  legacy.evidence_id = computeEvidenceId(legacy);
+  return legacy;
+}
+
 function rewriteJson(path, update) {
   const value = JSON.parse(readFileSync(path, 'utf8'));
   update(value);
@@ -362,6 +372,43 @@ test('Claude parser extracts native system.init.skills from a mixed JSONL stream
   ].join('\n'));
   assert.deepEqual(parsed.names, ['langcraft', 'loopos']);
   assert.equal(parsed.runtimeVersion, '2.1.250');
+});
+
+test('Claude parser requires one complete init event and never unions partial catalogs', () => {
+  const split = [
+    JSON.stringify({ type: 'system', subtype: 'init', skills: EXPECTED_CODEX.slice(0, 8), claude_code_version: '2.1.249' }),
+    JSON.stringify({ type: 'system', subtype: 'init', skills: EXPECTED_CODEX.slice(8), claude_code_version: '2.1.250' }),
+  ].join('\n');
+  assert.throws(() => parseClaudeInitCatalog(split), /exactly one Claude system\.init/u);
+  assert.throws(
+    () => parseClaudeInitCatalog(JSON.stringify({
+      type: 'system', subtype: 'init', skills: ['loopos', 'loopos'],
+      claude_code_version: '2.1.250',
+    })),
+    /system\.init\.skills is invalid/u,
+  );
+  assert.throws(
+    () => parseClaudeInitCatalog(JSON.stringify({
+      type: 'system', subtype: 'init', skills: ['loopos'],
+      claude_code_version: '2.1.250\ntoken=do-not-persist',
+    })),
+    /system\.init\.skills is invalid/u,
+  );
+
+  const home = fixtureHome();
+  try {
+    const evidence = probeRuntime({
+      home, adapter: 'claude', versionResolver: () => '2.1.250 (Claude Code)',
+      runner: () => ({ status: 1, stdout: split, stderr: '' }),
+    });
+    validateRuntimeEvidence(evidence);
+    assert.deepEqual(evidence.probe_result.decoding, {
+      outcome: 'invalid', error_code: 'init_count_mismatch',
+    });
+    assert.equal(evidence.observations.catalog.probe_outcome, 'blocked');
+    assert.equal(evidence.observations.catalog.recursion_observed, 'unverified');
+    assert.equal(evidence.observations.catalog.observed_count, 0);
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test('policy derives host-specific expected catalogs from exact INDEX member sets', () => {
@@ -496,6 +543,176 @@ test('Codex evidence separates metadata discovery from desired-policy drift and 
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('Codex probe v2 separates an EPERM execution failure from downstream decoding and redacts stderr', () => {
+  const home = fixtureHome();
+  const secret = 'token=do-not-persist';
+  const stderr = `${secret}\nError: Operation not permitted (os error 1)\n`;
+  try {
+    const evidence = probeRuntime({
+      home,
+      adapter: 'codex',
+      runner: () => ({ status: 1, stdout: '', stderr }),
+    });
+    validateRuntimeEvidence(evidence);
+    assert.equal(evidence.schema_version, 'skills-refiner.runtime-evidence.v2');
+    assert.equal(evidence.probe.probe_contract_version, 'skills-refiner.runtime-probe.v2');
+    assert.deepEqual(evidence.probe_result, {
+      execution: {
+        outcome: 'exit_nonzero', exit_code: 1, signal: null, failure_class: 'permission_denied',
+      },
+      decoding: { outcome: 'invalid', error_code: 'not_json' },
+    });
+    assert.equal(evidence.observations.catalog.probe_outcome, 'blocked');
+    assert.equal(evidence.observations.catalog.recursion_observed, 'unverified');
+    assert.deepEqual(evidence.limitations, ['catalog metadata does not prove body access or instruction compliance']);
+    assert.equal(evidence.evidence.stderr_sha256, sha256(stderr));
+    assert.equal(JSON.stringify(evidence).includes(secret), false);
+    assert.equal(JSON.stringify(evidence).includes('Operation not permitted'), false);
+
+    recordRuntimeEvidence({ home, evidence, confirmation: evidence.evidence_id });
+    const status = runtimeStatus({ home }).adapters.codex;
+    assert.equal(status.status, 'BLOCKED');
+    assert.equal(status.reason, 'probe_execution_permission_denied');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('Codex nonzero but parseable output preserves observations without becoming catalog proof', () => {
+  const home = fixtureHome();
+  try {
+    const evidence = probeRuntime({
+      home,
+      adapter: 'codex',
+      runner: () => ({ status: 7, stdout: codexPrompt(EXPECTED_CODEX, home), stderr: 'failed late' }),
+    });
+    validateRuntimeEvidence(evidence);
+    assert.equal(evidence.probe_result.execution.outcome, 'exit_nonzero');
+    assert.equal(evidence.probe_result.decoding.outcome, 'parsed');
+    assert.deepEqual(evidence.observations.catalog.observed_names, EXPECTED_CODEX);
+    assert.equal(evidence.observations.catalog.probe_outcome, 'blocked');
+    assert.equal(evidence.observations.catalog.result, 'blocked');
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('an observed managed name cannot be hidden by deleting its entity evidence', () => {
+  const home = fixtureHome();
+  try {
+    const observedNames = [...EXPECTED_CODEX, 'pc-intake'].sort();
+    const evidence = probeRuntime({
+      home,
+      adapter: 'codex',
+      runner: () => ({ status: 0, stdout: codexPrompt(observedNames, home), stderr: '' }),
+    });
+    assert.equal(evidence.observations.catalog.policy_conformance, 'fail');
+    assert.deepEqual(evidence.observations.catalog.unexpected_managed, ['pc-intake']);
+
+    const forged = structuredClone(evidence);
+    forged.observations.catalog.observed_managed_entities = forged.observations.catalog.observed_managed_entities
+      .filter(({ name }) => name !== 'pc-intake');
+    forged.observations.catalog.observed_entities_digest = sha256(JSON.stringify(
+      forged.observations.catalog.observed_managed_entities,
+    ));
+    forged.observations.catalog.unexpected_managed = [];
+    forged.observations.catalog.unexpected_managed_entities = [];
+    forged.observations.catalog.identity_conformance = 'pass';
+    forged.observations.catalog.policy_conformance = 'pass';
+    forged.effective_predicates.policy_conformant = 'pass';
+    forged.evidence_id = computeEvidenceId(forged);
+    assert.throws(
+      () => validateRuntimeEvidence(forged),
+      (error) => error.code === 'invalid_runtime_evidence',
+    );
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('probe v2 classifies execution failures and successful-command decoding independently', () => {
+  const home = fixtureHome();
+  try {
+    const cases = [
+      [{ status: 0, stdout: 'not json', stderr: '' }, 'exit_zero', 'none', 'invalid', 'not_json', 'blocked'],
+      [{ status: null, stdout: '', stderr: '', error: { code: 'ENOENT', message: 'secret path' } }, 'spawn_error', 'not_found', 'invalid', 'not_json', 'unsupported'],
+      [{ status: null, stdout: '', stderr: '', error: { code: 'EACCES', message: 'secret path' } }, 'spawn_error', 'permission_denied', 'invalid', 'not_json', 'blocked'],
+      [{ status: null, stdout: '', stderr: '', error: { code: 'ETIMEDOUT', message: 'secret path' } }, 'spawn_error', 'timeout', 'invalid', 'not_json', 'blocked'],
+      [{ status: null, stdout: '', stderr: '', error: { code: 'ENOBUFS', message: 'secret path' } }, 'spawn_error', 'output_limit', 'invalid', 'not_json', 'blocked'],
+      [{ status: null, signal: 'SIGTERM', stdout: '', stderr: '' }, 'signaled', 'unknown', 'invalid', 'not_json', 'blocked'],
+      [{ status: Number.MAX_SAFE_INTEGER, stdout: '', stderr: '' }, 'spawn_error', 'unknown', 'invalid', 'not_json', 'blocked'],
+    ];
+    for (const [result, outcome, failureClass, decodeOutcome, decodeError, probeOutcome] of cases) {
+      const evidence = probeRuntime({
+        home, adapter: 'codex', versionResolver: () => 'codex-cli 1.0.0', runner: () => result,
+      });
+      validateRuntimeEvidence(evidence);
+      assert.equal(evidence.probe_result.execution.outcome, outcome);
+      assert.equal(evidence.probe_result.execution.failure_class, failureClass);
+      assert.equal(evidence.probe_result.decoding.outcome, decodeOutcome);
+      assert.equal(evidence.probe_result.decoding.error_code, decodeError);
+      assert.equal(evidence.observations.catalog.probe_outcome, probeOutcome);
+      assert.equal(JSON.stringify(evidence).includes('secret path'), false);
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('probe producer rejects catalogs outside the exact bounded v2 schema', () => {
+  const home = fixtureHome();
+  try {
+    for (const names of [
+      Array.from({ length: 4097 }, (_, index) => `skill-${String(index).padStart(4, '0')}`),
+      ['skill-valid', `skill-${'a'.repeat(600)}`],
+    ]) {
+      assert.throws(
+        () => probeRuntime({
+          home,
+          adapter: 'codex',
+          versionResolver: () => 'codex-cli 1.0.0',
+          runner: () => ({ status: 0, stdout: codexPrompt(names, home), stderr: '' }),
+        }),
+        (error) => error.code === 'invalid_runtime_evidence',
+      );
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('Claude unsupported evidence cannot bypass build and auth cross-binding', () => {
+  const home = fixtureHome();
+  try {
+    const evidence = probeRuntime({
+      home,
+      adapter: 'claude',
+      versionResolver: () => '2.1.250 (Claude Code)',
+      runner: () => ({ status: null, stdout: '', stderr: '', error: { code: 'ENOENT' } }),
+    });
+    assert.equal(evidence.observations.catalog.probe_outcome, 'unsupported');
+    assert.equal(evidence.probe.runtime_build, 'unobserved');
+    assert.equal(evidence.probe.auth_state, 'blocked');
+
+    for (const mutate of [
+      (value) => { value.probe.runtime_build = '2.1.250'; },
+      (value) => { value.probe.auth_state = 'post_init_nonzero'; },
+    ]) {
+      const forged = structuredClone(evidence);
+      mutate(forged);
+      forged.evidence_id = computeEvidenceId(forged);
+      assert.throws(
+        () => validateRuntimeEvidence(forged),
+        (error) => error.code === 'invalid_runtime_evidence',
+      );
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('historical runtime evidence v1 remains valid, recordable, and readable', () => {
+  const home = fixtureHome();
+  try {
+    const current = probeRuntime({
+      home, adapter: 'codex',
+      runner: () => ({ status: 0, stdout: codexPrompt(EXPECTED_CODEX, home), stderr: '' }),
+    });
+    const historical = legacyEvidence(current);
+    assert.doesNotThrow(() => validateRuntimeEvidence(historical));
+    recordRuntimeEvidence({ home, evidence: historical, confirmation: historical.evidence_id });
+    assert.equal(runtimeStatus({ home }).adapters.codex.status, 'CATALOG_ONLY');
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test('record is confirmation-bound and status becomes stale when runtime config changes', () => {
@@ -787,7 +1004,7 @@ test('Claude CLI version and native init build are distinct bindings', () => {
     const runner = () => ({
       status: 1,
       stdout: `${JSON.stringify({ type: 'system', subtype: 'init', skills: EXPECTED_CODEX, claude_code_version: '2.1.250' })}\n`,
-      stderr: 'authentication_failed',
+      stderr: 'Operation not permitted (os error 1)',
     });
     const evidence = probeRuntime({
       home,
@@ -797,10 +1014,86 @@ test('Claude CLI version and native init build are distinct bindings', () => {
     });
     assert.equal(evidence.probe.adapter_version, '2.1.250 (Claude Code)');
     assert.equal(evidence.probe.runtime_build, '2.1.250');
+    assert.equal(evidence.probe_result.execution.outcome, 'exit_nonzero');
+    assert.equal(evidence.probe_result.execution.failure_class, 'permission_denied');
+    assert.equal(evidence.probe_result.decoding.outcome, 'parsed');
+    assert.equal(evidence.observations.catalog.probe_outcome, 'pass');
+    assert.equal(evidence.probe.auth_state, 'post_init_nonzero');
     assert.equal(evidence.observations.catalog.identity_conformance, 'unverified');
+
+    for (const forgedAuthState of ['available', 'blocked']) {
+      const forged = structuredClone(evidence);
+      forged.probe.auth_state = forgedAuthState;
+      forged.evidence_id = computeEvidenceId(forged);
+      assert.throws(
+        () => validateRuntimeEvidence(forged),
+        (error) => error.code === 'invalid_runtime_evidence',
+      );
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('Claude name-only evidence cannot self-promote to canonical identity proof', () => {
+  const home = fixtureHome();
+  try {
+    const evidence = probeRuntime({
+      home,
+      adapter: 'claude',
+      versionResolver: () => '2.1.250 (Claude Code)',
+      runner: () => ({
+        status: 0,
+        stdout: `${JSON.stringify({
+          type: 'system', subtype: 'init', skills: EXPECTED_CODEX, claude_code_version: '2.1.250',
+        })}\n`,
+        stderr: '',
+      }),
+    });
+    const binding = collectRuntimeBinding({ home, adapter: 'claude' });
+    const byName = new Map(binding.expected_entities.map((entity) => [entity.name, entity]));
+    const forged = structuredClone(evidence);
+    forged.observations.catalog.observed_managed_entities = forged.observations.catalog.observed_managed_entities
+      .map(({ name }) => {
+        const entity = byName.get(name);
+        const canonicalPath = realpathSync(entity.skill_file);
+        return {
+          name,
+          catalog_path: entity.skill_file,
+          canonical_path: canonicalPath,
+          entity_id: runtimeEntityId(entity, canonicalPath),
+          collection_id: entity.collection_id,
+          match_status: 'matched',
+        };
+      });
+    forged.observations.catalog.observed_entities_digest = sha256(JSON.stringify(
+      forged.observations.catalog.observed_managed_entities,
+    ));
+    forged.observations.catalog.identity_capability = 'canonical_path';
+    forged.observations.catalog.identity_conformance = 'pass';
+    forged.observations.catalog.missing_expected_entities = [];
+    forged.observations.catalog.unexpected_managed_entities = [];
+    forged.observations.catalog.unmatched_managed_entities = [];
+    forged.observations.catalog.wrong_identity = [];
+    forged.evidence_id = computeEvidenceId(forged);
+    assert.throws(
+      () => validateRuntimeEvidence(forged),
+      (error) => error.code === 'invalid_runtime_evidence',
+    );
+
+    for (const field of [
+      'recursion_observed', 'symlink_following_observed',
+      'description_truncated', 'context_budget_pressure',
+    ]) {
+      const forgedObservation = structuredClone(evidence);
+      forgedObservation.observations.catalog[field] = true;
+      forgedObservation.evidence_id = computeEvidenceId(forgedObservation);
+      assert.throws(
+        () => validateRuntimeEvidence(forgedObservation),
+        (error) => error.code === 'invalid_runtime_evidence',
+      );
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
 test('minimal self-hashed evidence cannot forge a catalog-only success', () => {
@@ -847,13 +1140,45 @@ test('runtime executable resolution binds one absolute identity and detects in-c
   }
 });
 
+test('runtime version failure never promotes stderr into adapter_version or diagnostics', () => {
+  const root = mkdtempSync(join(tmpdir(), 'skills-runtime-version-redaction-'));
+  const executable = join(root, 'codex');
+  const secret = 'token=version-secret';
+  try {
+    writeFileSync(executable, '#!/bin/sh\nprintf "fixture-version\\n"\n', { mode: 0o700 });
+    const identity = resolveRuntimeExecutable('codex', { env: { PATH: root } });
+    assert.throws(
+      () => currentRuntimeAdapterVersion('codex', identity, () => ({
+        status: 1, stdout: '', stderr: `${secret}\nOperation not permitted`,
+      })),
+      (error) => error.code === 'runtime_version_probe_failed'
+        && error.message === 'codex: version probe failed'
+        && !error.message.includes(secret),
+    );
+    assert.throws(
+      () => currentRuntimeAdapterVersion('codex', identity, () => ({
+        status: 0, stdout: `codex-cli 1.0.0\n${secret}\n`, stderr: '',
+      })),
+      (error) => error.code === 'runtime_version_probe_failed'
+        && error.message === 'codex: version probe failed'
+        && !error.message.includes(secret),
+    );
+    assert.equal(
+      currentRuntimeAdapterVersion('codex', identity, () => ({
+        status: 0, stdout: 'codex-cli 1.0.0\n', stderr: '',
+      })),
+      'codex-cli 1.0.0',
+    );
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('runtime probe uses and records one resolved executable identity', () => {
   const home = fixtureHome();
   const binRoot = join(home, '.runtime-bin');
   const executable = join(binRoot, 'codex');
   try {
     mkdirSync(binRoot, { recursive: true });
-    writeFileSync(executable, '#!/bin/sh\nprintf "fixture-version\\n"\n', { mode: 0o700 });
+    writeFileSync(executable, '#!/bin/sh\nprintf "codex-cli 1.0.0\\n"\n', { mode: 0o700 });
     const identity = resolveRuntimeExecutable('codex', { env: { PATH: binRoot } });
     const invoked = [];
     const evidence = probeRuntime({
@@ -866,7 +1191,7 @@ test('runtime probe uses and records one resolved executable identity', () => {
       },
     });
     assert.deepEqual(evidence.probe.executable_identity, identity);
-    assert.equal(evidence.probe.adapter_version, 'fixture-version');
+    assert.equal(evidence.probe.adapter_version, 'codex-cli 1.0.0');
     assert.deepEqual(invoked, [{
       command: identity.path,
       args: ['debug', 'prompt-input', 'Runtime catalog probe. Do not execute tools.'],
@@ -882,7 +1207,7 @@ test('record and status revalidate the exact probed executable identity', () => 
   const executable = join(binRoot, 'codex');
   try {
     mkdirSync(binRoot, { recursive: true });
-    writeFileSync(executable, '#!/bin/sh\nprintf "fixture-version\\n"\n', { mode: 0o700 });
+    writeFileSync(executable, '#!/bin/sh\nprintf "codex-cli 1.0.0\\n"\n', { mode: 0o700 });
     const identity = resolveRuntimeExecutable('codex', { env: { PATH: binRoot } });
     const executableResolver = () => identity;
     const evidence = probeRuntime({
@@ -895,7 +1220,7 @@ test('record and status revalidate the exact probed executable identity', () => 
       home, evidence, confirmation: evidence.evidence_id, executableResolver,
     }).status, 'RECORDED');
 
-    writeFileSync(executable, '#!/bin/sh\nprintf "replacement-version\\n"\n', { mode: 0o700 });
+    writeFileSync(executable, '#!/bin/sh\nprintf "codex-cli 1.0.1\\n"\n', { mode: 0o700 });
     const status = runtimeStatus({
       home,
       executableResolver: (adapter) => resolveRuntimeExecutable(
@@ -916,7 +1241,7 @@ test('Codex profile candidate validation runs version and prompt against one ide
   const executable = join(binRoot, 'codex');
   try {
     mkdirSync(binRoot, { recursive: true });
-    writeFileSync(executable, '#!/bin/sh\nprintf "fixture-version\\n"\n', { mode: 0o700 });
+    writeFileSync(executable, '#!/bin/sh\nprintf "codex-cli 1.0.0\\n"\n', { mode: 0o700 });
     const identity = resolveRuntimeExecutable('codex', { env: { PATH: binRoot } });
     const invoked = [];
     const result = validateCodexCandidate({
@@ -927,7 +1252,7 @@ test('Codex profile candidate validation runs version and prompt against one ide
       executableResolver: () => identity,
       runner: (command, args) => {
         invoked.push({ command, args });
-        if (args[0] === '--strict-config') return { status: 0, stdout: 'fixture-version\n', stderr: '' };
+        if (args[0] === '--strict-config') return { status: 0, stdout: 'codex-cli 1.0.0\n', stderr: '' };
         return { status: 0, stdout: codexPrompt(EXPECTED_CODEX, home), stderr: '' };
       },
     });
@@ -951,6 +1276,7 @@ test('runtime evidence exact schema rejects root and nested raw transcript field
       (value) => { value.raw_prompt = 'secret prompt transcript'; },
       (value) => { value.evidence.stdout_raw = 'secret stdout transcript'; },
       (value) => { value.probe.host_environment.raw_environment = 'secret'; },
+      (value) => { value.probe_result.execution.stderr_raw = 'secret stderr transcript'; },
     ]) {
       const forged = structuredClone(evidence);
       mutate(forged);
@@ -986,6 +1312,47 @@ test('runtime evidence rejects contradictory predicates and unbounded free text'
     unbounded.evidence_id = computeEvidenceId(unbounded);
     assert.throws(
       () => validateRuntimeEvidence(unbounded),
+      (error) => error.code === 'invalid_runtime_evidence',
+    );
+
+    for (const [adapterVersion, runtimeBuild] of [
+      ['codex-cli 1.0.0\ntoken=do-not-persist', 'codex-cli 1.0.0\ntoken=do-not-persist'],
+      ['codex-cli 1.0.0', 'token=do-not-persist'],
+    ]) {
+      const forgedVersion = structuredClone(evidence);
+      forgedVersion.probe.adapter_version = adapterVersion;
+      forgedVersion.probe.runtime_build = runtimeBuild;
+      forgedVersion.evidence_id = computeEvidenceId(forgedVersion);
+      assert.throws(
+        () => validateRuntimeEvidence(forgedVersion),
+        (error) => error.code === 'invalid_runtime_evidence',
+      );
+    }
+
+    const contradictoryProbeResult = structuredClone(evidence);
+    contradictoryProbeResult.probe_result.execution = {
+      outcome: 'exit_nonzero', exit_code: 1, signal: null, failure_class: 'unknown',
+    };
+    contradictoryProbeResult.evidence_id = computeEvidenceId(contradictoryProbeResult);
+    assert.throws(
+      () => validateRuntimeEvidence(contradictoryProbeResult),
+      (error) => error.code === 'invalid_runtime_evidence',
+    );
+
+    const unboundedExitCode = structuredClone(evidence);
+    unboundedExitCode.probe_result.execution = {
+      outcome: 'exit_nonzero', exit_code: Number.MAX_SAFE_INTEGER,
+      signal: null, failure_class: 'unknown',
+    };
+    unboundedExitCode.observations.catalog.probe_outcome = 'blocked';
+    unboundedExitCode.observations.catalog.result = 'blocked';
+    unboundedExitCode.observations.catalog.policy_conformance = 'blocked';
+    unboundedExitCode.observations.catalog.identity_conformance = 'unverified';
+    unboundedExitCode.effective_predicates.metadata_discoverable = 'blocked';
+    unboundedExitCode.effective_predicates.policy_conformant = 'blocked';
+    unboundedExitCode.evidence_id = computeEvidenceId(unboundedExitCode);
+    assert.throws(
+      () => validateRuntimeEvidence(unboundedExitCode),
       (error) => error.code === 'invalid_runtime_evidence',
     );
   } finally {

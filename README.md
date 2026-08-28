@@ -313,6 +313,21 @@ qualification. Accordingly, `runtime record` returns exit `10` after a
 successful `RECORDED` result that is still incomplete/unqualified; this is not
 a persistence failure.
 
+New probes emit `skills-refiner.runtime-evidence.v2` with independent, bounded
+`probe_result.execution` and `probe_result.decoding` facts. A nonzero Codex
+process therefore cannot be reduced to a downstream JSON parse error, and even
+parseable output remains blocked after a nonzero Codex exit. Claude retains its
+documented ability to use a complete parsed `system.init` event as catalog
+evidence even when the process later exits nonzero; v2 calls that state
+`post_init_nonzero` and does not guess that authentication caused the exit. Raw
+probe streams and native exception messages are never copied into runtime
+evidence; probe diagnostics retain only allowlisted classifications and stream
+digests, and unexpected CLI failures use a fixed diagnostic. Evidence necessarily retains bounded structured paths for executable,
+configuration, discovery, and catalog identity; share output redacts them.
+Adapter version discovery accepts only bounded stdout from a successful
+`--version` process and never falls back to stderr. Historical v1 evidence
+remains readable and recordable.
+
 Use the exact operation id for reversible deployment changes:
 
 ```bash
@@ -341,7 +356,7 @@ stderr. Exit codes are stable at this boundary:
 | `21` | Restore/transaction conflict |
 | `130` | Interactive interruption |
 
-Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, and `skill-scan.v7` are schema versions, not product release numbers. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v6 introduced bounded `INDEX.json` collection-member inventory, identity-bound canonical-content caching, and redacted risk evidence while preserving v5's conservative runtime semantics and compatibility order. Scan v7 adds a content-bound `installer_receipt_claim` without inventing an immutable revision; INDEX-only repository/revision values remain unverified claims. Cleanup accepts historical v5/v6 evidence and current v7 evidence.
+Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, `skill-scan.v7`, and `skills-refiner.runtime-evidence.v2` are schema versions, not product release numbers. Runtime evidence v2 separates sanitized execution outcome from decoder outcome while continuing to accept historical v1 records. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v6 introduced bounded `INDEX.json` collection-member inventory, identity-bound canonical-content caching, and redacted risk evidence while preserving v5's conservative runtime semantics and compatibility order. Scan v7 adds a content-bound `installer_receipt_claim` without inventing an immutable revision; INDEX-only repository/revision values remain unverified claims. Cleanup accepts historical v5/v6 evidence and current v7 evidence.
 
 Managed third-party collection versions are a separate namespace: skills-refiner reports only values extracted from an approved immutable upstream artifact, together with source path/digest, or `not_declared`. It never derives a third-party release version from these local schema/product numbers.
 

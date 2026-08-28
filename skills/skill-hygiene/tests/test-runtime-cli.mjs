@@ -9,9 +9,9 @@ import { exitCodeForRuntimeResult, runRuntimeCli } from '../lib/runtime-cli.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LAUNCHER = join(HERE, '..', 'bin', 'skills-refiner');
 
-function evidence(probeOutcome, policyConformance) {
+function evidence(probeOutcome, policyConformance, schemaVersion = 'skills-refiner.runtime-evidence.v2') {
   return {
-    schema_version: 'skills-refiner.runtime-evidence.v1',
+    schema_version: schemaVersion,
     observations: { catalog: { probe_outcome: probeOutcome, policy_conformance: policyConformance } },
     effective_predicates: { runtime_qualified: false },
   };
@@ -22,6 +22,9 @@ test('runtime CLI exit codes never treat catalog-only observation as runtime qua
   assert.equal(exitCodeForRuntimeResult(evidence('pass', 'fail')), 10);
   assert.equal(exitCodeForRuntimeResult(evidence('blocked', 'blocked')), 10);
   assert.equal(exitCodeForRuntimeResult(evidence('unsupported', 'unsupported')), 3);
+  assert.equal(exitCodeForRuntimeResult(evidence(
+    'blocked', 'blocked', 'skills-refiner.runtime-evidence.v1',
+  )), 10);
   assert.equal(exitCodeForRuntimeResult({
     schema_version: 'skills-refiner.runtime-status.v1',
     adapters: { codex: { status: 'CATALOG_ONLY' }, claude: { status: 'CATALOG_ONLY' } },

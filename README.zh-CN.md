@@ -298,6 +298,17 @@ access 或 gateway route 证据时必须保留 `UNVERIFIED`；成功落盘 evide
 catalog-only 提升为 runtime qualification。因此，`runtime record` 在成功返回但仍
 不完整/未资格化的 `RECORDED` 结果上返回退出码 `10`；这不表示持久化失败。
 
+新 probe 生成 `skills-refiner.runtime-evidence.v2`，以有界的
+`probe_result.execution` 与 `probe_result.decoding` 分别记录执行和解码事实。这样，
+Codex 非零退出不会再被简化成下游 JSON parse error；即使输出可解析，非零 Codex
+退出仍保持 blocked。Claude 继续允许把完整、可解析的 `system.init` 用作 catalog
+证据，即使进程随后非零退出；v2 将其称为 `post_init_nonzero`，不会猜测退出一定由
+认证导致。runtime evidence 不会复制 probe raw stream 或 native exception message；
+probe 诊断只保留 allowlist 分类与流摘要，非预期 CLI failure 使用固定 diagnostic；为了绑定 executable、configuration、discovery 与 catalog
+identity，evidence 必须保留有界的结构化路径，share 输出再负责脱敏。adapter version
+discovery 只接受成功 `--version` 进程的有界 stdout，绝不回退到 stderr。历史 v1
+evidence 仍可读取和 record。
+
 可逆 deployment 变更使用精确 operation id：
 
 ```bash
@@ -324,7 +335,7 @@ rmdir -- "$SESSION_DIR"
 | `21` | restore/transaction 冲突 |
 | `130` | 交互被中断 |
 
-版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v7` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v6 在保留 v5 保守运行时语义与 `skills + skill_links + broken_symlinks` 顺序契约的同时，引入有界 `INDEX.json` collection member inventory、identity-bound canonical-content cache 与脱敏风险证据。Scan v7 新增内容绑定的 `installer_receipt_claim`，但不会猜造不可变 revision；仅来自 INDEX 的 repository/revision 仍是未验证声明。Cleanup 同时接受历史 v5/v6 与当前 v7 evidence。
+版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v7`、`skills-refiner.runtime-evidence.v2` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Runtime evidence v2 分离脱敏后的执行结果与 decoder 结果，同时继续接受历史 v1 record。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v6 在保留 v5 保守运行时语义与 `skills + skill_links + broken_symlinks` 顺序契约的同时，引入有界 `INDEX.json` collection member inventory、identity-bound canonical-content cache 与脱敏风险证据。Scan v7 新增内容绑定的 `installer_receipt_claim`，但不会猜造不可变 revision；仅来自 INDEX 的 repository/revision 仍是未验证声明。Cleanup 同时接受历史 v5/v6 与当前 v7 evidence。
 
 受管第三方 collection 的版本属于另一命名空间：skills-refiner 只报告 approved immutable upstream artifact 中严格提取的值及其 source path/digest，或明确返回 `not_declared`；不会用这些本地 product/schema 版本推导第三方 release version。
 

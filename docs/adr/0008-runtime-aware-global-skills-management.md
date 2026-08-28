@@ -200,6 +200,16 @@ profile apply 只证明磁盘 deployment；运行中的 Agent 可能缓存旧 ca
 
 - 原生 probe 只保存结构化派生事实与 stdout/stderr digest，不保存 raw prompt/transcript。
 - evidence schema 必须 exact-key、bounded，并拒绝额外 raw 字段。
+- 新 probe 使用 `runtime-evidence.v2` / `runtime-probe.v2`，分别记录 allowlist 化的 execution 与 decoding
+  结果；非零 Codex 退出即使输出可解析也不得晋升为 catalog proof。Claude 只可保留“已解析到完整
+  `system.init` 后发生非零退出”的 catalog 例外，并以 `post_init_nonzero` 明示未知退出原因。历史 v1
+  evidence 继续可验证、record 与 status，不强制迁移。
+- v2 producer 在 stdout/`--output` 前必须通过同一 exact validator；validator 必须绑定 adapter-specific
+  version/build、identity capability、context/topology 可达状态，并闭合 `observed_names` 与受管 entity 集合，
+  防止 self-hash 把 name-only、unknown 或 policy failure 提升为更高权威证明。
+- probe stderr 只参与摘要和低权威 allowlist 诊断分类；probe 原文与 native exception message 不得进入 evidence，
+  非预期 CLI failure 使用固定 diagnostic。executable/config/discovery/catalog identity 所需的有界结构化路径必须保留，share 输出负责脱敏。adapter
+  version discovery 只接受成功 `--version` 进程的有界 stdout，不得回退到 stderr。
 - 分享报告必须移除 HOME、用户名、URL userinfo/query/fragment、SSH user/host 与本机绝对路径。
 - 同一用户可自行编辑本机文件，因此 evidence 提供的是可验证的一致性与防误用，不声称抵抗已完全控制该账户的恶意伪造。需要更高信任等级时必须引入宿主签名/系统证明，不能用自哈希 JSON 冒充。
 
@@ -261,7 +271,7 @@ controller record；不能修改或“补全”第三方 lock 来制造来源权
 
 1. scanner 的受管 INDEX strict validation、rogue member/resource、同名跨仓 identity 与隐私回归测试通过。
 2. runtime profile 的 CAS/race/SIGKILL/apply/undo/recover/no-op/ownership/journal 测试通过。
-3. runtime evidence exact schema、control generation binding、config symlink、stale/future、foreign identity 测试通过。
+3. runtime evidence v2 exact schema、v1 compatibility、execution/decoding 分类与脱敏、control generation binding、config symlink、stale/future、foreign identity 测试通过。
 4. Panorama v2 的 partial/degraded、per-variant、runtime matrix、redaction 与 safe output 测试通过。
 5. 五个仓库 Skills 完成 frontmatter、description budget、引用文件与 installed-layout gates。
 6. 在真实 HOME 只生成并人工审核 exact plan hash 后 apply；fresh Codex/Claude/Cursor probe 不得复用旧会话。

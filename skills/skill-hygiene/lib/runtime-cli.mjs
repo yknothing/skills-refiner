@@ -55,7 +55,8 @@ function freshRuntimeStatus(home, policyPath) {
 }
 
 export function exitCodeForRuntimeResult(value) {
-  if (value?.schema_version === 'skills-refiner.runtime-evidence.v1') {
+  if (['skills-refiner.runtime-evidence.v1', 'skills-refiner.runtime-evidence.v2']
+    .includes(value?.schema_version)) {
     if (value.observations?.catalog?.probe_outcome === 'unsupported') return 3;
     return value.effective_predicates?.runtime_qualified === true ? 0 : 10;
   }
@@ -165,7 +166,7 @@ function errorPayload(error) {
     schema_version: 'skills-refiner.runtime-error.v1',
     status,
     error_code: error instanceof MacosAdapterError ? error.reason : known ? error.code : 'unexpected_error',
-    diagnostic: error.message,
+    diagnostic: known ? error.message : 'unexpected runtime failure',
     mutation_occurred: error instanceof MacosAdapterError ? error.mutationMayHaveOccurred : status === 'recovery_required',
   };
 }

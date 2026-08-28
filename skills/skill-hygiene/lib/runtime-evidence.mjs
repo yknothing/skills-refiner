@@ -22,9 +22,11 @@ import {
 
 export const RUNTIME_SCHEMAS = Object.freeze({
   policy: 'skills-refiner.runtime-policy.v1',
-  evidence: 'skills-refiner.runtime-evidence.v1',
+  evidence: 'skills-refiner.runtime-evidence.v2',
   status: 'skills-refiner.runtime-status.v1',
 });
+
+const LEGACY_RUNTIME_EVIDENCE_SCHEMA = 'skills-refiner.runtime-evidence.v1';
 
 export const RUNTIME_ADAPTERS = Object.freeze(['codex', 'claude', 'cursor']);
 export const COLLECTION_IDS = Object.freeze(['prodcraft', 'better-skills', 'loopos', 'langcraft']);
@@ -40,6 +42,12 @@ const MAX_EVIDENCE_ITEMS = 4096;
 const MAX_EVIDENCE_TEXT = 4096;
 const MAX_LIMITATION_TEXT = 1024;
 const RUNTIME_SKILL_NAME = /^[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?$/u;
+const NATIVE_RUNTIME_VERSION = /^[0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)?$/u;
+const RUNTIME_ADAPTER_VERSION = Object.freeze({
+  codex: /^codex-cli [0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)?$/u,
+  claude: /^[0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)? \(Claude Code\)$/u,
+  cursor: /^[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9.-]+)?$/u,
+});
 
 export class RuntimeEvidenceError extends Error {
   constructor(code, message, status = 'blocked') {
@@ -722,13 +730,23 @@ export function currentRuntimeAdapterVersion(
   if (executable.command !== runtimeExecutableName(adapter)) {
     fail('runtime_executable_binding_mismatch', `${adapter}: executable command does not match adapter`, 'invalid');
   }
-  const result = runRuntimeExecutable(
-    executable,
-    ['--version'],
-    { encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024 },
-    runner,
-  );
-  return String(result.stdout || result.stderr || '').trim().slice(0, 300) || 'unknown';
+  let result;
+  try {
+    result = runRuntimeExecutable(
+      executable,
+      ['--version'],
+      { encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024 },
+      runner,
+    );
+  } catch {
+    fail('runtime_version_probe_failed', `${executable.command}: version probe failed`);
+  }
+  const version = String(result.stdout ?? '').trim();
+  if (result.error || result.status !== 0 || !boundedString(version, 300)
+      || !RUNTIME_ADAPTER_VERSION[adapter].test(version)) {
+    fail('runtime_version_probe_failed', `${executable.command}: version probe failed`);
+  }
+  return version;
 }
 
 export function computeEvidenceId(evidence) {
@@ -803,13 +821,21 @@ function expectedCommandContract(adapter) {
   return ['cursor-agent', 'status'];
 }
 
-function validProbe(value) {
+function validProbe(value, evidenceSchema) {
+  const expectedContract = evidenceSchema === LEGACY_RUNTIME_EVIDENCE_SCHEMA
+    ? 'skills-refiner.runtime-probe.v1' : 'skills-refiner.runtime-probe.v2';
+  const currentVersionShape = evidenceSchema === LEGACY_RUNTIME_EVIDENCE_SCHEMA
+    || (value && RUNTIME_ADAPTER_VERSION[value.adapter_id]?.test(value.adapter_version)
+      && (value.adapter_id === 'claude'
+        ? value.runtime_build === 'unobserved' || NATIVE_RUNTIME_VERSION.test(value.runtime_build)
+        : value.runtime_build === value.adapter_version));
   if (!exactObjectKeys(value, [
     'adapter_id', 'adapter_version', 'runtime_build', 'probe_contract_version', 'executable_identity',
     'host_environment', 'command_contract', 'session_kind', 'cwd', 'auth_state', 'sandbox_mode',
   ]) || !RUNTIME_ADAPTERS.includes(value.adapter_id)
-      || value.probe_contract_version !== 'skills-refiner.runtime-probe.v1'
+      || value.probe_contract_version !== expectedContract
       || !boundedString(value.adapter_version, 300) || !boundedString(value.runtime_build, 300)
+      || !currentVersionShape
       || !validRuntimeExecutableIdentity(value.executable_identity)
       || value.executable_identity.command !== runtimeExecutableName(value.adapter_id)
       || !validHostEnvironment(value.host_environment)
@@ -820,12 +846,15 @@ function validProbe(value) {
   const expectedSession = value.adapter_id === 'codex' ? 'native_prompt_render'
     : value.adapter_id === 'claude' ? 'fresh_no_persistence' : 'native_status_only';
   const authStates = value.adapter_id === 'codex' ? ['not_required_for_prompt_render']
-    : value.adapter_id === 'claude' ? ['available', 'authentication_blocked_after_init', 'blocked']
+    : value.adapter_id === 'claude'
+      ? evidenceSchema === LEGACY_RUNTIME_EVIDENCE_SCHEMA
+        ? ['available', 'authentication_blocked_after_init', 'blocked']
+        : ['available', 'post_init_nonzero', 'blocked']
       : ['not_logged_in', 'blocked'];
   return value.session_kind === expectedSession && authStates.includes(value.auth_state);
 }
 
-function validLimitations(adapter, value) {
+function validLimitations(adapter, value, evidenceSchema) {
   if (!Array.isArray(value) || value.length < 1 || value.length > 3
       || value.some((item) => !boundedString(item, MAX_LIMITATION_TEXT))) return false;
   if (adapter === 'cursor') {
@@ -837,12 +866,110 @@ function validLimitations(adapter, value) {
   const terminal = adapter === 'codex'
     ? 'catalog metadata does not prove body access or instruction compliance'
     : 'system.init proves metadata enumeration only; body access is unverified';
+  if (evidenceSchema !== LEGACY_RUNTIME_EVIDENCE_SCHEMA) {
+    return canonicalJson(value) === canonicalJson([terminal]);
+  }
   if (value.at(-1) !== terminal || value.length > 2) return false;
   if (value.length === 1) return true;
   const parseError = value[0];
   return adapter === 'codex'
     ? /^parse_error:(?:codex prompt-input output is not JSON|codex prompt-input output must be an array|expected exactly one Codex skills catalog, observed \d+|Codex skills catalog was not found)$/u.test(parseError)
     : parseError === 'parse_error:Claude system.init.skills was not found';
+}
+
+function validProbeResult(adapter, value) {
+  if (!exactObjectKeys(value, ['execution', 'decoding'])
+      || !exactObjectKeys(value.execution, ['outcome', 'exit_code', 'signal', 'failure_class'])
+      || !exactObjectKeys(value.decoding, ['outcome', 'error_code'])) return false;
+  const execution = value.execution;
+  const failureClasses = ['none', 'permission_denied', 'not_found', 'timeout', 'output_limit', 'unknown'];
+  if (!failureClasses.includes(execution.failure_class)) return false;
+  if (execution.outcome === 'exit_zero') {
+    if (execution.exit_code !== 0 || execution.signal !== null || execution.failure_class !== 'none') return false;
+  } else if (execution.outcome === 'exit_nonzero') {
+    if (!Number.isSafeInteger(execution.exit_code) || execution.exit_code <= 0
+        || execution.exit_code > 255
+        || execution.signal !== null || !['permission_denied', 'unknown'].includes(execution.failure_class)) return false;
+  } else if (execution.outcome === 'spawn_error') {
+    if (execution.exit_code !== null || execution.signal !== null || execution.failure_class === 'none') return false;
+  } else if (execution.outcome === 'signaled') {
+    if (execution.exit_code !== null || typeof execution.signal !== 'string'
+        || !/^SIG[A-Z0-9]{1,24}$/u.test(execution.signal)
+        || execution.failure_class !== 'unknown') return false;
+  } else return false;
+
+  const decoding = value.decoding;
+  if (adapter === 'cursor') {
+    return decoding.outcome === 'not_applicable' && decoding.error_code === null;
+  }
+  if (decoding.outcome === 'parsed') return decoding.error_code === null;
+  const allowed = adapter === 'codex'
+    ? ['not_json', 'wrong_shape', 'catalog_count_mismatch', 'catalog_missing', 'unknown']
+    : ['init_missing', 'init_count_mismatch', 'init_invalid', 'unknown'];
+  return decoding.outcome === 'invalid' && allowed.includes(decoding.error_code);
+}
+
+function validV2ProbeSemantics(evidence) {
+  const adapter = evidence.probe.adapter_id;
+  const execution = evidence.probe_result.execution;
+  const decoding = evidence.probe_result.decoding;
+  const catalog = evidence.observations.catalog;
+  if (decoding.outcome === 'invalid'
+      && (catalog.observed_count !== 0 || catalog.observed_names.length !== 0
+        || catalog.observed_managed_entities.length !== 0)) return false;
+  if (adapter === 'codex') {
+    if (catalog.identity_capability !== 'canonical_path'
+        || catalog.observed_managed_entities.some(({ match_status: status }) => status === 'name_only')
+        || (decoding.outcome === 'parsed'
+          ? typeof catalog.recursion_observed !== 'boolean'
+          : catalog.recursion_observed !== 'unverified')
+        || catalog.symlink_following_observed !== 'unverified'
+        || ![true, 'unverified'].includes(catalog.context_budget_pressure)
+        || catalog.description_truncated !== (
+          catalog.context_budget_pressure === true ? true : 'unverified'
+        )) {
+      return false;
+    }
+  } else if (adapter === 'claude') {
+    const expectedCapability = catalog.probe_outcome === 'pass' ? 'name_only' : 'none';
+    if (catalog.identity_capability !== expectedCapability
+        || catalog.identity_conformance !== 'unverified'
+        || [
+          catalog.recursion_observed, catalog.symlink_following_observed,
+          catalog.description_truncated, catalog.context_budget_pressure,
+        ].some((value) => value !== 'unverified')
+        || catalog.observed_managed_entities.some((entity) => (
+          !catalog.managed_universe.includes(entity.name) || entity.catalog_path !== null
+          || entity.canonical_path !== null || entity.entity_id !== null
+          || entity.collection_id !== null || entity.match_status !== 'name_only'
+        ))) return false;
+  } else if (catalog.identity_capability !== 'none'
+      || catalog.identity_conformance !== 'unverified'
+      || catalog.observed_count !== 0 || catalog.observed_names.length !== 0
+      || catalog.observed_managed_entities.length !== 0
+      || [
+        catalog.recursion_observed, catalog.symlink_following_observed,
+        catalog.description_truncated, catalog.context_budget_pressure,
+      ].some((value) => value !== 'unverified')) return false;
+  if (adapter === 'claude') {
+    if (decoding.outcome === 'parsed') {
+      if (!NATIVE_RUNTIME_VERSION.test(evidence.probe.runtime_build)) return false;
+    } else if (evidence.probe.runtime_build !== 'unobserved') return false;
+    const expectedAuth = decoding.outcome === 'parsed' && execution.outcome === 'exit_zero'
+      ? 'available'
+      : decoding.outcome === 'parsed' && execution.outcome === 'exit_nonzero'
+        ? 'post_init_nonzero' : 'blocked';
+    if (evidence.probe.auth_state !== expectedAuth) return false;
+  }
+  let expected;
+  if (execution.failure_class === 'not_found') expected = 'unsupported';
+  else if (adapter === 'codex') {
+    expected = execution.outcome === 'exit_zero' && decoding.outcome === 'parsed' ? 'pass' : 'blocked';
+  } else if (adapter === 'claude') {
+    expected = ['exit_zero', 'exit_nonzero'].includes(execution.outcome)
+      && decoding.outcome === 'parsed' ? 'pass' : 'blocked';
+  } else expected = 'blocked';
+  return evidence.observations.catalog.probe_outcome === expected;
 }
 
 function validObservationEnvelope(value) {
@@ -939,6 +1066,12 @@ function validateCatalogSelfConsistency(catalog) {
     fail('invalid_runtime_evidence', 'catalog evidence is internally inconsistent', 'invalid');
   }
   const observed = new Set(catalog.observed_names);
+  const managedUniverse = new Set(catalog.managed_universe);
+  const observedManagedNames = new Set(catalog.observed_managed_entities.map(({ name }) => name));
+  if (catalog.observed_managed_entities.some(({ name }) => !observed.has(name))
+      || catalog.observed_names.some((name) => managedUniverse.has(name) && !observedManagedNames.has(name))) {
+    fail('invalid_runtime_evidence', 'managed catalog observations are not closed over observed names', 'invalid');
+  }
   const expected = new Set(catalog.expected_names);
   const present = catalog.expected_names.filter((name) => observed.has(name));
   const missing = catalog.expected_names.filter((name) => !observed.has(name));
@@ -951,7 +1084,8 @@ function validateCatalogSelfConsistency(catalog) {
   const unexpectedEntities = [...observedIds].filter((id) => !expectedIds.has(id)).sort();
   const unmatchedEntities = catalog.observed_managed_entities
     .filter(({ match_status }) => match_status === 'unmatched').map(({ entity_id }) => entity_id).sort();
-  const expectedIdentity = catalog.identity_capability === 'canonical_path'
+  const expectedIdentity = catalog.probe_outcome !== 'pass' ? 'unverified'
+    : catalog.identity_capability === 'canonical_path'
     ? missingEntities.length === 0 && unexpectedEntities.length === 0 && unmatchedEntities.length === 0 ? 'pass' : 'fail'
     : 'unverified';
   const expectedResult = catalog.probe_outcome === 'pass' && missing.length === 0
@@ -1031,7 +1165,8 @@ function validateCatalogAgainstBinding(evidence, binding) {
   const counts = new Map();
   for (const entity of binding.expected_entities) counts.set(entity.name, (counts.get(entity.name) ?? 0) + 1);
   const ambiguous = [...counts].filter(([, count]) => count > 1).map(([name]) => name).sort();
-  const expectedIdentity = catalog.identity_capability === 'canonical_path'
+  const expectedIdentity = catalog.probe_outcome !== 'pass' ? 'unverified'
+    : catalog.identity_capability === 'canonical_path'
     ? missingEntities.length === 0 && unexpectedEntities.length === 0 && unmatchedEntities.length === 0 ? 'pass' : 'fail'
     : 'unverified';
   const expectedPolicy = catalog.probe_outcome === 'pass'
@@ -1052,19 +1187,26 @@ function validateCatalogAgainstBinding(evidence, binding) {
 export function validateRuntimeEvidence(evidence) {
   const catalog = evidence?.observations?.catalog;
   const adapter = evidence?.probe?.adapter_id;
-  if (!exactObjectKeys(evidence, [
+  const schema = evidence?.schema_version;
+  const legacy = schema === LEGACY_RUNTIME_EVIDENCE_SCHEMA;
+  const current = schema === RUNTIME_SCHEMAS.evidence;
+  const rootKeys = [
     'schema_version', 'evidence_id', 'observed_at', 'probe', 'artifact_binding', 'deployment_binding',
     'observations', 'evidence', 'limitations', 'effective_predicates',
-  ])
-      || evidence.schema_version !== RUNTIME_SCHEMAS.evidence
+  ];
+  if (current) rootKeys.splice(rootKeys.indexOf('limitations'), 0, 'probe_result');
+  if (!exactObjectKeys(evidence, rootKeys)
+      || (!legacy && !current)
       || Buffer.byteLength(canonicalJson(evidence)) > MAX_EVIDENCE_BYTES
       || !validTimestamp(evidence.observed_at)
-      || !validProbe(evidence.probe)
+      || !validProbe(evidence.probe, schema)
       || !validArtifactBinding(evidence.artifact_binding)
       || !validDeploymentBinding(evidence.deployment_binding, adapter)
       || !validObservationEnvelope(evidence.observations)
       || !validEvidenceMetadata(evidence.evidence, adapter, evidence.probe.command_contract)
-      || !validLimitations(adapter, evidence.limitations)
+      || !validLimitations(adapter, evidence.limitations, schema)
+      || (current && (!validProbeResult(adapter, evidence.probe_result)
+        || !validV2ProbeSemantics(evidence)))
       || !validEffectivePredicates(evidence.effective_predicates, catalog)
       || !DIGEST.test(evidence.evidence_id ?? '')
       || computeEvidenceId(evidence) !== evidence.evidence_id) {
@@ -1173,6 +1315,31 @@ function collectionEvidenceBinding(collections) {
 function sameRuntimeExecutable(left, right) {
   return validRuntimeExecutableIdentity(left) && validRuntimeExecutableIdentity(right)
     && canonicalJson(left) === canonicalJson(right);
+}
+
+function runtimeProbeReason(evidence) {
+  if (evidence.schema_version === RUNTIME_SCHEMAS.evidence) {
+    const { execution, decoding } = evidence.probe_result;
+    const failureReasons = {
+      permission_denied: 'probe_execution_permission_denied',
+      not_found: 'probe_executable_not_found',
+      timeout: 'probe_execution_timeout',
+      output_limit: 'probe_output_limit',
+    };
+    if (failureReasons[execution.failure_class]) return failureReasons[execution.failure_class];
+    if (execution.outcome === 'exit_nonzero') return 'probe_exit_nonzero';
+    if (execution.outcome === 'signaled') return 'probe_signaled';
+    if (execution.outcome === 'spawn_error') return 'probe_spawn_error';
+    if (decoding.outcome === 'invalid') return `probe_decode_${decoding.error_code}`;
+  } else {
+    const parseError = evidence.limitations.find((item) => item.startsWith('parse_error:'));
+    if (parseError?.includes('not JSON')) return 'probe_decode_not_json';
+    if (parseError?.includes('must be an array')) return 'probe_decode_wrong_shape';
+    if (parseError?.includes('exactly one Codex skills catalog')) return 'probe_decode_catalog_count_mismatch';
+    if (parseError?.includes('catalog was not found')) return 'probe_decode_catalog_missing';
+    if (parseError?.includes('system.init.skills was not found')) return 'probe_decode_init_missing';
+  }
+  return 'probe_blocked';
 }
 
 export function recordRuntimeEvidence({
@@ -1340,11 +1507,11 @@ export function runtimeStatus({
       }
       const stale = staleReasons.length > 0;
       if (!stale) validateCatalogAgainstBinding(evidence, current);
+      const catalogStatus = evidence.observations.catalog.policy_conformance === 'fail' ? 'POLICY_DRIFT'
+        : evidence.observations.catalog.result === 'pass' ? 'CATALOG_ONLY'
+          : String(evidence.observations.catalog.result).toUpperCase();
       adapters[adapter] = {
-        status: stale ? 'STALE'
-          : evidence.observations.catalog.policy_conformance === 'fail' ? 'POLICY_DRIFT'
-            : evidence.observations.catalog.result === 'pass' ? 'CATALOG_ONLY'
-              : String(evidence.observations.catalog.result).toUpperCase(),
+        status: stale ? 'STALE' : catalogStatus,
         evidence_id: evidence.evidence_id,
         observed_at: evidence.observed_at,
         catalog: evidence.observations.catalog,
@@ -1355,7 +1522,8 @@ export function runtimeStatus({
           context_budget_pressure: evidence.observations.catalog.context_budget_pressure,
         },
         effective_predicates: evidence.effective_predicates,
-        reason: stale ? staleReasons.join(',') : null,
+        reason: stale ? staleReasons.join(',')
+          : ['BLOCKED', 'UNSUPPORTED'].includes(catalogStatus) ? runtimeProbeReason(evidence) : null,
       };
     } catch (error) {
       adapters[adapter] = {

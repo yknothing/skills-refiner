@@ -6,21 +6,75 @@ import { isAbsolute, join, resolve } from 'node:path';
 import {
   RUNTIME_SCHEMAS, collectRuntimeBinding, computeEvidenceId, currentRuntimeAdapterVersion,
   resolveRuntimeAdapterExecutable, runRuntimeExecutable, runtimeEntityId, sha256,
+  validateRuntimeEvidence,
 } from './runtime-evidence.mjs';
 
 const MAX_OUTPUT = 16 * 1024 * 1024;
 
+class ProbeDecodeError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'ProbeDecodeError';
+    this.code = code;
+  }
+}
+
+function decodeFailure(code, message) {
+  throw new ProbeDecodeError(code, message);
+}
+
+function failureClassFor(errorCode, stderr = '') {
+  if (errorCode === 'ENOENT') return 'not_found';
+  if (errorCode === 'EPERM' || errorCode === 'EACCES'
+      || /Operation not permitted \(os error 1\)/u.test(stderr)) return 'permission_denied';
+  if (errorCode === 'ETIMEDOUT') return 'timeout';
+  if (errorCode === 'ENOBUFS') return 'output_limit';
+  return 'unknown';
+}
+
+function executionResult(result) {
+  const errorCode = typeof result?.error?.code === 'string' ? result.error.code : null;
+  if (errorCode) {
+    return {
+      outcome: 'spawn_error', exit_code: null, signal: null,
+      failure_class: failureClassFor(errorCode),
+    };
+  }
+  if (Number.isSafeInteger(result?.status) && result.status >= 0 && result.status <= 255) {
+    if (result.status === 0) {
+      return { outcome: 'exit_zero', exit_code: 0, signal: null, failure_class: 'none' };
+    }
+    return {
+      outcome: 'exit_nonzero', exit_code: result.status, signal: null,
+      failure_class: failureClassFor(null, String(result.stderr ?? '')),
+    };
+  }
+  if (typeof result?.signal === 'string' && /^SIG[A-Z0-9]{1,24}$/u.test(result.signal)) {
+    return { outcome: 'signaled', exit_code: null, signal: result.signal, failure_class: 'unknown' };
+  }
+  return { outcome: 'spawn_error', exit_code: null, signal: null, failure_class: 'unknown' };
+}
+
+function decodingResult(error, notApplicable = false) {
+  if (notApplicable) return { outcome: 'not_applicable', error_code: null };
+  return error
+    ? { outcome: 'invalid', error_code: error.code ?? 'unknown' }
+    : { outcome: 'parsed', error_code: null };
+}
+
 export function parseCodexPromptCatalogEntries(stdout) {
   let value;
-  try { value = JSON.parse(stdout); } catch { throw new Error('codex prompt-input output is not JSON'); }
-  if (!Array.isArray(value)) throw new Error('codex prompt-input output must be an array');
+  try { value = JSON.parse(stdout); } catch { decodeFailure('not_json', 'codex prompt-input output is not JSON'); }
+  if (!Array.isArray(value)) decodeFailure('wrong_shape', 'codex prompt-input output must be an array');
   const entries = [];
   const catalogs = value.filter((message) => message?.role === 'developer')
     .flatMap((message) => message?.content ?? []).filter((content) => (
       content?.type === 'input_text' && typeof content.text === 'string'
       && content.text.includes('<skills_instructions>') && content.text.includes('### Available skills')
     ));
-  if (catalogs.length !== 1) throw new Error(`expected exactly one Codex skills catalog, observed ${catalogs.length}`);
+  if (catalogs.length !== 1) {
+    decodeFailure('catalog_count_mismatch', `expected exactly one Codex skills catalog, observed ${catalogs.length}`);
+  }
   for (const content of catalogs) {
     const roots = new Map();
     for (const line of content.text.split(/\r?\n/u)) {
@@ -47,7 +101,7 @@ export function parseCodexPromptCatalogEntries(stdout) {
       entries.push({ name: match[1], catalog_path: catalogPath, canonical_path: canonicalPath });
     }
   }
-  if (entries.length === 0) throw new Error('Codex skills catalog was not found');
+  if (entries.length === 0) decodeFailure('catalog_missing', 'Codex skills catalog was not found');
   return entries.sort((a, b) => a.name.localeCompare(b.name) || a.catalog_path.localeCompare(b.catalog_path));
 }
 
@@ -56,18 +110,27 @@ export function parseCodexPromptCatalog(stdout) {
 }
 
 export function parseClaudeInitCatalog(stdout) {
-  const names = new Set();
-  let init = null;
+  const initEvents = [];
   for (const line of stdout.split(/\r?\n/u)) {
     if (!line.trim()) continue;
     let event;
     try { event = JSON.parse(line); } catch { continue; }
-    if (event?.type === 'system' && event?.subtype === 'init' && Array.isArray(event.skills)) {
-      init = event;
-      for (const name of event.skills) if (typeof name === 'string' && name.length > 0) names.add(name);
-    }
+    if (event?.type === 'system' && event?.subtype === 'init') initEvents.push(event);
   }
-  if (!init) throw new Error('Claude system.init.skills was not found');
+  if (initEvents.length === 0) decodeFailure('init_missing', 'Claude system.init.skills was not found');
+  if (initEvents.length !== 1) {
+    decodeFailure('init_count_mismatch', `expected exactly one Claude system.init event, observed ${initEvents.length}`);
+  }
+  const [init] = initEvents;
+  if (!Array.isArray(init.skills)
+      || !init.skills.every((name) => typeof name === 'string' && name.length <= 512
+        && /^[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?$/u.test(name))
+      || new Set(init.skills).size !== init.skills.length
+      || typeof init.claude_code_version !== 'string'
+      || !/^[0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)?$/u.test(init.claude_code_version)) {
+    decodeFailure('init_invalid', 'Claude system.init.skills is invalid');
+  }
+  const names = new Set(init.skills);
   return { names: [...names].sort(), runtimeVersion: init.claude_code_version ?? 'unknown' };
 }
 
@@ -171,7 +234,7 @@ function resultForCatalog(observedEntries, binding, baseResult = 'pass', { ident
 
 function baseEvidence({
   adapter, adapterVersion, runtimeBuild = adapterVersion, commandContract, binding, catalog,
-  executableIdentity, raw, authState, sourceKind, limitations,
+  executableIdentity, raw, authState, sourceKind, limitations, probeResult,
 }) {
   const evidence = {
     schema_version: RUNTIME_SCHEMAS.evidence,
@@ -181,7 +244,7 @@ function baseEvidence({
       adapter_id: adapter,
       adapter_version: adapterVersion,
       runtime_build: runtimeBuild,
-      probe_contract_version: 'skills-refiner.runtime-probe.v1',
+      probe_contract_version: 'skills-refiner.runtime-probe.v2',
       executable_identity: executableIdentity,
       host_environment: { platform: platform(), architecture: arch(), os_release: release(), node_version: process.version },
       command_contract: commandContract,
@@ -214,6 +277,7 @@ function baseEvidence({
       stdout_sha256: sha256(raw.stdout ?? ''),
       stderr_sha256: sha256(raw.stderr ?? ''),
     },
+    probe_result: probeResult,
     limitations,
     effective_predicates: {
       metadata_discoverable: catalog.result,
@@ -224,7 +288,7 @@ function baseEvidence({
     },
   };
   evidence.evidence_id = computeEvidenceId(evidence);
-  return evidence;
+  return validateRuntimeEvidence(evidence);
 }
 
 export function probeRuntime({
@@ -243,18 +307,24 @@ export function probeRuntime({
     let entries = [];
     let parseError = null;
     try { entries = parseCodexPromptCatalogEntries(result.stdout ?? ''); } catch (error) { parseError = error; }
-    const baseResult = result.status === 0 && !parseError ? 'pass' : result.error?.code === 'ENOENT' ? 'unsupported' : 'blocked';
+    const execution = executionResult(result);
+    const decoding = decodingResult(parseError);
+    const baseResult = execution.outcome === 'exit_zero' && decoding.outcome === 'parsed'
+      ? 'pass' : execution.failure_class === 'not_found' ? 'unsupported' : 'blocked';
     const catalog = resultForCatalog(entries, binding, baseResult, { identityCapable: true });
-    catalog.recursion_observed = entries.some((entry) => binding.collections.some((collection) => (
-      entry.catalog_path?.startsWith(`${join(home, '.agents', 'skills', collection.collection_id)}/`)
-    )));
+    catalog.recursion_observed = decoding.outcome === 'parsed'
+      ? entries.some((entry) => binding.collections.some((collection) => (
+        entry.catalog_path?.startsWith(`${join(home, '.agents', 'skills', collection.collection_id)}/`)
+      )))
+      : 'unverified';
     catalog.context_budget_pressure = contextPressureFromFile(contextEventsPath);
     catalog.description_truncated = catalog.context_budget_pressure === true ? true : 'unverified';
     return baseEvidence({
       adapter, adapterVersion, executableIdentity: executable,
       commandContract: ['codex', ...args], binding, catalog,
       raw: { stdout: result.stdout, stderr: result.stderr }, authState: 'not_required_for_prompt_render', sourceKind: 'native_prompt',
-      limitations: [...(parseError ? [`parse_error:${parseError.message}`] : []), 'catalog metadata does not prove body access or instruction compliance'],
+      limitations: ['catalog metadata does not prove body access or instruction compliance'],
+      probeResult: { execution, decoding },
     });
   }
   if (adapter === 'claude') {
@@ -262,27 +332,35 @@ export function probeRuntime({
     const result = runRuntimeExecutable(
       executable, args, { encoding: 'utf8', timeout: 30_000, maxBuffer: MAX_OUTPUT }, runner,
     );
-    let parsed = { names: [], runtimeVersion: adapterVersion };
+    let parsed = { names: [], runtimeVersion: 'unobserved' };
     let parseError = null;
     try { parsed = parseClaudeInitCatalog(result.stdout ?? ''); } catch (error) { parseError = error; }
     const hasInit = !parseError;
-    const baseResult = hasInit ? 'pass' : result.error?.code === 'ENOENT' ? 'unsupported' : 'blocked';
+    const execution = executionResult(result);
+    const decoding = decodingResult(parseError);
+    const baseResult = hasInit && ['exit_zero', 'exit_nonzero'].includes(execution.outcome)
+      ? 'pass' : execution.failure_class === 'not_found' ? 'unsupported' : 'blocked';
     const catalog = resultForCatalog(parsed.names.map((name) => ({ name, catalog_path: null, canonical_path: null })), binding, baseResult);
+    const authState = hasInit && execution.outcome === 'exit_zero' ? 'available'
+      : hasInit && execution.outcome === 'exit_nonzero' ? 'post_init_nonzero' : 'blocked';
     return baseEvidence({
       adapter, adapterVersion, runtimeBuild: parsed.runtimeVersion, executableIdentity: executable,
       commandContract: ['claude', '-p', '--output-format', 'stream-json', '--no-session-persistence', '<probe>'], binding, catalog,
-      raw: { stdout: result.stdout, stderr: result.stderr }, authState: result.status === 0 ? 'available' : hasInit ? 'authentication_blocked_after_init' : 'blocked', sourceKind: 'native_init',
-      limitations: [...(parseError ? [`parse_error:${parseError.message}`] : []), 'system.init proves metadata enumeration only; body access is unverified'],
+      raw: { stdout: result.stdout, stderr: result.stderr }, authState, sourceKind: 'native_init',
+      limitations: ['system.init proves metadata enumeration only; body access is unverified'],
+      probeResult: { execution, decoding },
     });
   }
   const result = runRuntimeExecutable(
     executable, ['status'], { encoding: 'utf8', timeout: 15_000, maxBuffer: 1024 * 1024 }, runner,
   );
-  const catalog = resultForCatalog([], binding, result.error?.code === 'ENOENT' ? 'unsupported' : 'blocked');
+  const execution = executionResult(result);
+  const catalog = resultForCatalog([], binding, execution.failure_class === 'not_found' ? 'unsupported' : 'blocked');
   return baseEvidence({
     adapter, adapterVersion, executableIdentity: executable,
     commandContract: ['cursor-agent', 'status'], binding, catalog,
     raw: { stdout: result.stdout, stderr: result.stderr }, authState: /not logged in/iu.test(`${result.stdout}\n${result.stderr}`) ? 'not_logged_in' : 'blocked', sourceKind: 'native_status',
     limitations: ['Cursor CLI exposes no native catalog command in this build', 'static implementation evidence does not qualify current runtime discovery'],
+    probeResult: { execution, decoding: decodingResult(null, true) },
   });
 }
