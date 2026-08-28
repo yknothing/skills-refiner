@@ -27,6 +27,30 @@ function planned(t, collectionId = 'better-skills') {
   return { root, source, fixture, plan };
 }
 
+function commitManagedSource(source, message) {
+  const staged = spawnSync('/usr/bin/git', ['-C', source, 'add', '-A'], { encoding: 'utf8' });
+  assert.equal(staged.status, 0, staged.stderr);
+  const committed = spawnSync('/usr/bin/git', [
+    '-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit', '-m', message,
+  ], { encoding: 'utf8' });
+  assert.equal(committed.status, 0, committed.stderr);
+  attestManagedRevision(source);
+}
+
+function applyProjectionFreeSuccessor(fixture, source) {
+  const sourceSkill = join(source, 'skills/bs-insight-product/SKILL.md');
+  writeFileSync(sourceSkill, `${readFileSync(sourceSkill, 'utf8')}\nProjection-free baseline generation.\n`);
+  commitManagedSource(source, 'projection-free baseline generation');
+  const plan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T01:00:00.000Z',
+  });
+  assert.equal(plan.projections.length, 0);
+  applyManagedPlan(plan, plan.plan_hash);
+  return plan;
+}
+
 test('declarative source inspection supports folded YAML and pinned member sets', (t) => {
   const root = makeManagedRoot();
   t.after(() => removeManagedRoot(root));
@@ -552,6 +576,124 @@ test('apply binds preserved collision targets into the immutable plan preconditi
   symlinkSync('../../.agents/skills/different-history', collision.path);
   assert.throws(() => applyManagedPlan(plan, plan.plan_hash), /installed state/u);
   assert.equal(statusManagedCollection({ collectionId: 'better-skills', home: fixture.home }).status, 'UNMANAGED');
+});
+
+test('successor generation accepts only verified in-collection member digest changes for preserved symlinks', (t) => {
+  const { fixture, plan: firstPlan, source } = planned(t);
+  applyManagedPlan(firstPlan, firstPlan.plan_hash);
+  for (const root of fixture.agentRoots) {
+    for (const alias of fixture.aliases) unlinkSync(join(root, alias));
+  }
+  const activePlan = applyProjectionFreeSuccessor(fixture, source);
+  const claudeRoot = fixture.agentRoots[0];
+  for (const member of activePlan.source.members) {
+    symlinkSync(`../../.agents/skills/better-skills/${member.name}`, join(claudeRoot, member.name));
+  }
+  const sourceSkill = join(source, 'skills/bs-prdefine/SKILL.md');
+  writeFileSync(sourceSkill, `${readFileSync(sourceSkill, 'utf8')}\nSuccessor collision generation.\n`);
+  commitManagedSource(source, 'successor collision generation');
+  const successorPlan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T02:00:00.000Z',
+  });
+  const plannedMemberCollisions = successorPlan.preserved_collisions.filter(({ agent, name, target_status: targetStatus }) => (
+    agent === 'claude' && activePlan.source.members.some((member) => member.name === name) && targetStatus === 'resolved'
+  ));
+  assert.equal(plannedMemberCollisions.length, activePlan.source.members.length);
+  const plannedDigest = plannedMemberCollisions.find(({ name }) => name === 'bs-prdefine').target_tree_digest;
+  applyManagedPlan(successorPlan, successorPlan.plan_hash);
+
+  let status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
+  assert.equal(status.name_collision_status, 'OBSERVED');
+  assert.equal(status.management_attention.some(({ code }) => code === 'PRESERVED_COLLISION_SET_CHANGED'), false);
+  const observedCollision = status.name_collisions.find(({ agent, name }) => agent === 'claude' && name === 'bs-prdefine');
+  assert.notEqual(observedCollision.target_tree_digest, plannedDigest);
+  const index = JSON.parse(readFileSync(join(fixture.skillsRoot, 'better-skills/INDEX.json'), 'utf8'));
+  assert.equal(observedCollision.target_tree_digest, index.members.find(({ name }) => name === 'bs-prdefine').tree_digest);
+
+  const deployedSkill = join(fixture.skillsRoot, 'better-skills/bs-prdefine/SKILL.md');
+  writeFileSync(deployedSkill, `${readFileSync(deployedSkill, 'utf8')}\nUntrusted member drift.\n`);
+  status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.status, 'DRIFTED');
+  assert.equal(status.issues.includes('MEMBER_DRIFT:bs-prdefine'), true);
+  assert.equal(status.management_attention.some(({ code }) => code === 'PRESERVED_COLLISION_SET_CHANGED'), true);
+  assert.notEqual(
+    status.name_collisions.find(({ agent, name }) => agent === 'claude' && name === 'bs-prdefine').target_tree_digest,
+    index.members.find(({ name }) => name === 'bs-prdefine').tree_digest,
+  );
+});
+
+test('successor generation still reports a preserved member symlink retarget', (t) => {
+  const { fixture, plan: firstPlan, source } = planned(t);
+  applyManagedPlan(firstPlan, firstPlan.plan_hash);
+  applyProjectionFreeSuccessor(fixture, source);
+  const collisionPath = join(fixture.agentRoots[0], 'bs-prdefine');
+  symlinkSync('../../.agents/skills/better-skills/bs-prdefine', collisionPath);
+  const sourceSkill = join(source, 'skills/bs-prdefine/SKILL.md');
+  writeFileSync(sourceSkill, `${readFileSync(sourceSkill, 'utf8')}\nSuccessor retarget generation.\n`);
+  commitManagedSource(source, 'successor retarget generation');
+  const successorPlan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T02:00:00.000Z',
+  });
+  applyManagedPlan(successorPlan, successorPlan.plan_hash);
+  unlinkSync(collisionPath);
+  symlinkSync('../../.agents/skills/better-skills/bs-insight-product', collisionPath);
+  const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
+  assert.equal(status.management_attention.some(({ code }) => code === 'PRESERVED_COLLISION_SET_CHANGED'), true);
+});
+
+test('successor generation still binds content at an external preserved symlink target', (t) => {
+  const { fixture, plan: firstPlan, source } = planned(t);
+  applyManagedPlan(firstPlan, firstPlan.plan_hash);
+  applyProjectionFreeSuccessor(fixture, source);
+  const externalTarget = join(fixture.home, 'external-preserved-skill');
+  mkdirSync(externalTarget);
+  writeFileSync(join(externalTarget, 'SKILL.md'), 'external preserved bytes\n');
+  symlinkSync('../../external-preserved-skill', join(fixture.agentRoots[0], 'bs-prdefine'));
+  const sourceSkill = join(source, 'skills/bs-prdefine/SKILL.md');
+  writeFileSync(sourceSkill, `${readFileSync(sourceSkill, 'utf8')}\nSuccessor external generation.\n`);
+  commitManagedSource(source, 'successor external generation');
+  const successorPlan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T02:00:00.000Z',
+  });
+  applyManagedPlan(successorPlan, successorPlan.plan_hash);
+  let status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.management_attention.some(({ code }) => code === 'PRESERVED_COLLISION_SET_CHANGED'), false);
+  writeFileSync(join(externalTarget, 'SKILL.md'), 'changed external preserved bytes\n');
+  status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
+  assert.equal(status.management_attention.some(({ code }) => code === 'PRESERVED_COLLISION_SET_CHANGED'), true);
+});
+
+test('successor generation does not treat a managed member descendant as the member root', (t) => {
+  const { fixture, plan: firstPlan, source } = planned(t);
+  applyManagedPlan(firstPlan, firstPlan.plan_hash);
+  const sourceReference = join(source, 'skills/bs-prdefine/references/detail.md');
+  mkdirSync(dirname(sourceReference), { recursive: true });
+  writeFileSync(sourceReference, 'first descendant generation\n');
+  commitManagedSource(source, 'member descendant baseline generation');
+  const activePlan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T01:00:00.000Z',
+  });
+  assert.equal(activePlan.projections.length, 0);
+  applyManagedPlan(activePlan, activePlan.plan_hash);
+  const collisionPath = join(fixture.agentRoots[0], 'bs-prdefine');
+  symlinkSync('../../.agents/skills/better-skills/bs-prdefine/references', collisionPath);
+  writeFileSync(sourceReference, 'second descendant generation\n');
+  commitManagedSource(source, 'member descendant successor generation');
+  const successorPlan = compileManagedPlan({
+    collectionId: 'better-skills', home: fixture.home, sourceRoot: source,
+    revision: managedRevision(source), now: '2026-07-20T02:00:00.000Z',
+  });
+  applyManagedPlan(successorPlan, successorPlan.plan_hash);
+  const status = statusManagedCollection({ collectionId: 'better-skills', home: fixture.home });
+  assert.equal(status.status, 'FILESYSTEM_READY', status.issues.join(', '));
+  assert.equal(status.management_attention.some(({ code }) => code === 'PRESERVED_COLLISION_SET_CHANGED'), true);
 });
 
 test('historical V2 profile remains interpretable and V2 to V4 undo restores the predecessor', (t) => {

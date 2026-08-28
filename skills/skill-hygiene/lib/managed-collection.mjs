@@ -1530,11 +1530,35 @@ function scopedReceiptDigest(plan) {
   } catch { return null; }
 }
 
+function preservedCollisionSetsMatch(plan, observed, verifiedManagedMembers) {
+  const planned = plan.preserved_collisions;
+  if (planned === undefined) return true;
+  if (planned.length !== observed.length) return false;
+  return planned.every((expected, index) => {
+    const current = observed[index];
+    if (canonicalJson(current) === canonicalJson(expected)) return true;
+    if (expected?.kind !== 'symlink' || current?.kind !== 'symlink'
+        || expected.target_status !== 'resolved' || current.target_status !== 'resolved'
+        || current.target_tree_digest !== verifiedManagedMembers.get(current.name)) return false;
+    const digestNormalized = { ...current, target_tree_digest: expected.target_tree_digest };
+    if (canonicalJson(digestNormalized) !== canonicalJson(expected)) return false;
+    const memberRoot = join(plan.target.collection_root, current.name);
+    try {
+      const stat = lstatSync(memberRoot);
+      return stat.isDirectory() && !stat.isSymbolicLink()
+        && realpathSync(memberRoot) === current.resolved_target;
+    } catch { return false; }
+  });
+}
+
 function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitted = true, orphanedCatalog = false, orphanedControl = false } = {}) {
   const spec = collectionSpec(plan.collection_id);
   const issues = [];
   let index = null;
   let expected = null;
+  let collectionRootMatchesPlan = false;
+  let indexMatchesPlan = false;
+  const verifiedManagedMembers = new Map();
   if (orphanedCatalog) issues.push('ORPHANED_CATALOG');
   if (orphanedControl) issues.push('ORPHANED_CONTROL');
   try {
@@ -1547,13 +1571,18 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
     const stat = lstatSync(plan.target.collection_root);
     if (stat.isSymbolicLink() || !stat.isDirectory()) issues.push('COLLECTION_ROOT_NOT_REAL_DIRECTORY');
     else if ((stat.mode & 0o777) !== 0o755) issues.push('COLLECTION_ROOT_MODE_DRIFT');
+    else collectionRootMatchesPlan = true;
   } catch { issues.push('COLLECTION_ROOT_MISSING'); }
-  if (lstatExists(join(plan.target.collection_root, 'SKILL.md'))) issues.push('COLLECTION_ROOT_HAS_SKILL_MD');
+  if (lstatExists(join(plan.target.collection_root, 'SKILL.md'))) {
+    issues.push('COLLECTION_ROOT_HAS_SKILL_MD');
+    collectionRootMatchesPlan = false;
+  }
   try {
     index = readJson(join(plan.target.collection_root, 'INDEX.json'), 'invalid_index');
     validateManagedIndex(index);
     expected = expectedIndex(plan, paths);
-    if (canonicalJson(index) !== canonicalJson(expected)) issues.push('INDEX_IDENTITY_DRIFT');
+    indexMatchesPlan = canonicalJson(index) === canonicalJson(expected);
+    if (!indexMatchesPlan) issues.push('INDEX_IDENTITY_DRIFT');
   } catch { issues.push('INDEX_MISSING_OR_INVALID'); }
   try {
     const artifactRootMode = lstatSync(paths.artifactRepo).mode & 0o777;
@@ -1573,8 +1602,13 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
       const path = join(plan.target.collection_root, member.name);
       if (!lstatExists(path)) continue;
       try {
-        if ((lstatSync(path).mode & 0o777) !== 0o755) issues.push(`MEMBER_ROOT_MODE_DRIFT:${member.name}`);
-        if (deployedTreeDigest(path) !== expectedMembers.get(member.name)) issues.push(`MEMBER_DRIFT:${member.name}`);
+        const stat = lstatSync(path);
+        const modeMatches = (stat.mode & 0o777) === 0o755;
+        const digestMatches = deployedTreeDigest(path) === expectedMembers.get(member.name);
+        if (!modeMatches) issues.push(`MEMBER_ROOT_MODE_DRIFT:${member.name}`);
+        if (!digestMatches) issues.push(`MEMBER_DRIFT:${member.name}`);
+        if (collectionRootMatchesPlan && indexMatchesPlan && stat.isDirectory() && !stat.isSymbolicLink()
+            && modeMatches && digestMatches) verifiedManagedMembers.set(member.name, member.tree_digest);
       } catch { issues.push(`MEMBER_INVALID:${member.name}`); }
     }
     for (const resource of index.resources) {
@@ -1644,8 +1678,7 @@ function statusAgainstPlan(plan, paths = operationPaths(plan), { requireCommitte
         ? 'STALE_SAME_REPOSITORY_PROJECTION' : 'BROKEN_PRESERVED_SYMLINK',
       path,
     }));
-  if (plan.preserved_collisions !== undefined
-      && canonicalJson(nameCollisions) !== canonicalJson(plan.preserved_collisions)) {
+  if (!preservedCollisionSetsMatch(plan, nameCollisions, verifiedManagedMembers)) {
     managementAttention.unshift({ code: 'PRESERVED_COLLISION_SET_CHANGED', path: null });
   }
   return {
