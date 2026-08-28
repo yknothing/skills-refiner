@@ -40,6 +40,8 @@ PROVENANCE_GIT_TMP=""
 PROVENANCE_RECEIPT_TMP=""
 GIT_TREE_HASH_RESULT=""
 MUTATION_PROVENANCE_JSON=""
+SCAN_CONTENT_CACHE_DIR=""
+SCAN_CONTENT_CACHE_HITS_FILE=""
 
 # Colors
 RED='\033[0;31m'
@@ -111,6 +113,247 @@ if ! command -v base64 >/dev/null 2>&1; then
     echo "[ERROR] base64 is required for byte-preserving symlink identity. Install base64 and retry." >&2
     exit 127
 fi
+
+COLLECTION_INDEX_NODE="${SKILLS_REFINER_NODE_BIN:-node}"
+COLLECTION_INDEX_LIB_DIR="$SCRIPT_DIR/../lib"
+
+is_managed_collection_root() {
+    case "$1" in
+        prodcraft|better-skills|loopos|langcraft) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Validate only controller-owned collection roots. An arbitrary top-level
+# INDEX.json is data, not authority to make nested directories active Skills.
+# The existing collection contracts own schema/source/member validation; this
+# read-only adapter additionally binds every declared deployed path to its
+# current tree digest before the scanner enumerates a member.
+validate_managed_collection_index() {
+    local collection_root="$1" collection_id="$2"
+    if ! command -v "$COLLECTION_INDEX_NODE" >/dev/null 2>&1; then
+        jq -n --arg collection_id "$collection_id" \
+            --arg index_path "$collection_root/INDEX.json" \
+            '{status:"blocked", collection_id:$collection_id, index_path:$index_path,
+              error_code:"collection_index_validator_unavailable",
+              diagnostic:"Node.js is required to validate a managed collection INDEX.json"}'
+        return 1
+    fi
+
+    "$COLLECTION_INDEX_NODE" --input-type=module - \
+        "$collection_root" "$collection_id" "$COLLECTION_INDEX_LIB_DIR" <<'NODE'
+import { createHash } from 'node:crypto';
+import {
+  lstatSync, readFileSync, readdirSync, realpathSync,
+} from 'node:fs';
+import { basename, isAbsolute, join, relative, sep } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const [collectionRoot, expectedCollectionId, libraryDirectory] = process.argv.slice(2);
+const indexPath = join(collectionRoot, 'INDEX.json');
+const recognized = new Set(['prodcraft', 'better-skills', 'loopos', 'langcraft']);
+
+function blocked(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  throw error;
+}
+
+function sha256(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function requiredStatus(path, code, message) {
+  try {
+    return lstatSync(path);
+  } catch {
+    blocked(code, message);
+  }
+}
+
+try {
+  if (!recognized.has(expectedCollectionId) || basename(collectionRoot) !== expectedCollectionId
+      || !isAbsolute(collectionRoot)) {
+    blocked('collection_index_identity_invalid', 'collection root identity is not controller-owned');
+  }
+
+  const rootStatus = requiredStatus(
+    collectionRoot, 'collection_index_root_missing', 'managed collection root disappeared during validation',
+  );
+  if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()
+      || realpathSync(collectionRoot) !== collectionRoot) {
+    blocked('collection_index_root_unsafe', 'managed collection root must be a canonical real directory');
+  }
+  const indexStatus = requiredStatus(
+    indexPath, 'collection_index_missing', 'controller-owned collection root is missing INDEX.json',
+  );
+  if (!indexStatus.isFile() || indexStatus.isSymbolicLink() || indexStatus.size < 2
+      || indexStatus.size > 1024 * 1024) {
+    blocked('collection_index_file_unsafe', 'INDEX.json must be a bounded real file');
+  }
+
+  let index;
+  try {
+    index = JSON.parse(readFileSync(indexPath, 'utf8'));
+  } catch (error) {
+    blocked('collection_index_json_invalid', `cannot parse INDEX.json: ${error.message}`);
+  }
+
+  const contractUrl = pathToFileURL(join(
+    libraryDirectory,
+    expectedCollectionId === 'prodcraft' ? 'collection-contract.mjs' : 'managed-collection-contract.mjs',
+  )).href;
+  const contract = await import(contractUrl);
+  try {
+    if (expectedCollectionId === 'prodcraft') contract.validateCollectionIndex(index);
+    else contract.validateManagedIndex(index);
+  } catch (error) {
+    blocked('collection_index_contract_invalid', error.message);
+  }
+  if (index.collection_id !== expectedCollectionId) {
+    blocked('collection_index_identity_invalid', 'INDEX.json collection_id does not match its root');
+  }
+
+  const { computeTreeDigest } = await import(pathToFileURL(join(libraryDirectory, 'collection-tree.mjs')).href);
+  let matchedProfile = null;
+  if (expectedCollectionId !== 'prodcraft') {
+    const { collectionSpec } = await import(pathToFileURL(join(libraryDirectory, 'collection-specs.mjs')).href);
+    const spec = collectionSpec(expectedCollectionId);
+    matchedProfile = spec.memberProfiles.find((profile) => profile.length === index.members.length
+      && profile.every((member, position) => member.name === index.members[position].name
+        && index.members[position].relative_path === member.name));
+    if (!matchedProfile) blocked('collection_index_source_mapping_invalid', 'members do not match an authoritative source_path profile');
+  }
+
+  const ignoredBasenames = index.schema_version === 'skills-refiner.managed-collection.index.v2'
+    ? ['.DS_Store'] : [];
+  const members = [];
+  const seenNames = new Set();
+  const seenRelativePaths = new Set();
+  for (const [position, member] of index.members.entries()) {
+    if (seenNames.has(member.name) || seenRelativePaths.has(member.relative_path)) {
+      blocked('collection_index_member_duplicate', 'INDEX.json contains duplicate member identities');
+    }
+    seenNames.add(member.name);
+    seenRelativePaths.add(member.relative_path);
+    if (member.relative_path !== member.name || member.relative_path.includes('/')
+        || member.relative_path === '.' || member.relative_path === '..') {
+      blocked('collection_index_relative_path_invalid', `member relative_path is not a direct canonical child: ${member.name}`);
+    }
+    const memberRoot = join(collectionRoot, member.relative_path);
+    const memberStatus = requiredStatus(
+      memberRoot, 'collection_index_member_missing', `declared member is missing: ${member.name}`,
+    );
+    if (!memberStatus.isDirectory() || memberStatus.isSymbolicLink()
+        || realpathSync(memberRoot) !== memberRoot) {
+      blocked('collection_index_member_unsafe', `member is not a canonical real directory: ${member.name}`);
+    }
+    const skillPath = join(memberRoot, 'SKILL.md');
+    const skillStatus = requiredStatus(
+      skillPath, 'collection_index_member_skill_invalid', `member SKILL.md is missing or unsafe: ${member.name}`,
+    );
+    if (!skillStatus.isFile() || skillStatus.isSymbolicLink()) {
+      blocked('collection_index_member_skill_invalid', `member SKILL.md is missing or unsafe: ${member.name}`);
+    }
+    const observedTreeDigest = computeTreeDigest(
+      memberRoot,
+      (code, message) => blocked(`collection_index_${code}`, message),
+      { ignoredBasenames },
+    );
+    if (observedTreeDigest !== member.tree_digest) {
+      blocked('collection_index_member_tree_drift', `member tree digest does not match INDEX.json: ${member.name}`);
+    }
+    members.push({
+      name: member.name,
+      source_provider: index.source.provider,
+      repository_id: index.source.repository_id,
+      resolved_revision: index.source.resolved_revision,
+      source_path: expectedCollectionId === 'prodcraft'
+        ? `skills/.curated/${member.name}` : matchedProfile[position].sourcePath,
+      relative_path: member.relative_path,
+      tree_digest: member.tree_digest,
+      observed_tree_digest: observedTreeDigest,
+    });
+  }
+
+  const expectedTopLevel = new Set(['INDEX.json', ...members.map(({ relative_path: memberPath }) => memberPath)]);
+  for (const resource of index.resources ?? []) expectedTopLevel.add(resource.relative_path.split('/')[0]);
+  for (const entry of readdirSync(collectionRoot)) {
+    // Both collection controllers explicitly treat root-level Finder metadata
+    // as non-authoritative. Member-tree hashing remains schema-specific below.
+    if (entry === '.DS_Store') continue;
+    if (!expectedTopLevel.has(entry)) {
+      blocked('collection_index_unexpected_entry', `undeclared collection entry: ${entry}`);
+    }
+  }
+  for (const expected of expectedTopLevel) {
+    if (!readdirSync(collectionRoot).includes(expected)) {
+      blocked('collection_index_missing_entry', `declared collection entry is missing: ${expected}`);
+    }
+  }
+
+  for (const resource of index.resources ?? []) {
+    const resourcePath = join(collectionRoot, resource.relative_path);
+    const rel = relative(collectionRoot, resourcePath);
+    if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      blocked('collection_index_resource_path_invalid', `resource escapes collection root: ${resource.relative_path}`);
+    }
+    const status = requiredStatus(
+      resourcePath, 'collection_index_resource_missing', `declared resource is missing: ${resource.relative_path}`,
+    );
+    let observedDigest;
+    if (status.isSymbolicLink()) {
+      blocked('collection_index_resource_unsafe', `resource is a symlink: ${resource.relative_path}`);
+    } else if (status.isDirectory()) {
+      observedDigest = computeTreeDigest(
+        resourcePath,
+        (code, message) => blocked(`collection_index_${code}`, message),
+        { ignoredBasenames },
+      );
+    } else if (status.isFile()) {
+      observedDigest = sha256(Buffer.concat([
+        Buffer.from(`f\0${status.mode & 0o777}\0${status.size}\0`),
+        readFileSync(resourcePath), Buffer.from('\0'),
+      ]));
+    } else {
+      blocked('collection_index_resource_unsafe', `resource has an unsupported type: ${resource.relative_path}`);
+    }
+    if (observedDigest !== resource.tree_digest) {
+      blocked('collection_index_resource_tree_drift', `resource tree digest does not match INDEX.json: ${resource.relative_path}`);
+    }
+  }
+
+  const locatorDigest = expectedCollectionId === 'prodcraft'
+    ? index.gateway.locator_digest : index.exposure.locator_digest;
+  if (locatorDigest !== null) {
+    const gatewayName = expectedCollectionId === 'prodcraft' ? index.gateway.name : index.exposure.name;
+    const locatorName = expectedCollectionId === 'prodcraft'
+      ? 'prodcraft-runtime.json' : `${expectedCollectionId}-runtime.json`;
+    const locatorPath = join(collectionRoot, gatewayName, locatorName);
+    const locatorStatus = requiredStatus(
+      locatorPath, 'collection_index_locator_drift', 'gateway locator is missing',
+    );
+    if (!locatorStatus.isFile() || locatorStatus.isSymbolicLink()
+        || sha256(readFileSync(locatorPath)) !== locatorDigest) {
+      blocked('collection_index_locator_drift', 'gateway locator does not match INDEX.json');
+    }
+  }
+
+  process.stdout.write(`${JSON.stringify({
+    status: 'valid', collection_id: expectedCollectionId, index_path: indexPath, members,
+  })}\n`);
+} catch (error) {
+  process.stdout.write(`${JSON.stringify({
+    status: 'blocked',
+    collection_id: expectedCollectionId ?? null,
+    index_path: indexPath,
+    error_code: error?.code ?? 'collection_index_validation_failed',
+    diagnostic: error?.message ?? 'managed collection INDEX.json validation failed',
+  })}\n`);
+  process.exitCode = 1;
+}
+NODE
+}
 
 get_frontmatter() {
     local file="$1" key="$2"
@@ -306,10 +549,72 @@ git_root_for_dir() {
     git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true
 }
 
+sanitize_git_remote() {
+    local remote="$1" rest authority host path scheme
+    [ -n "$remote" ] && [ "${#remote}" -le 2048 ] || return 0
+    if printf '%s' "$remote" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        return 0
+    fi
+
+    # Query strings, fragments and userinfo are never provenance. Accept only
+    # repository paths on an explicit public-forge allowlist; private hosts,
+    # local paths, custom ports and other schemes collapse to no source URL.
+    remote="${remote%%\#*}"
+    remote="${remote%%\?*}"
+    case "$remote" in
+        *://*)
+            scheme="${remote%%://*}"
+            case "$scheme" in http|https|ssh|git) ;; *) return 0 ;; esac
+            rest="${remote#*://}"
+            [ "$rest" != "${rest%%/*}" ] || return 0
+            authority="${rest%%/*}"
+            path="${rest#*/}"
+            host="${authority##*@}"
+            case "$host" in *:*) return 0 ;; esac
+            ;;
+        *:*)
+            authority="${remote%%:*}"
+            path="${remote#*:}"
+            host="${authority##*@}"
+            ;;
+        *) return 0 ;;
+    esac
+    host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+    case "$host" in
+        github.com|gitlab.com|bitbucket.org|codeberg.org) ;;
+        *) return 0 ;;
+    esac
+    [ -n "$path" ] && [ "${#path}" -le 1024 ] || return 0
+    if ! printf '%s' "$path" | LC_ALL=C grep -Eq '^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$'; then
+        return 0
+    fi
+    case "/$path/" in *'/../'*|*'/./'*|*'//'*) return 0 ;; esac
+    printf 'https://%s/%s\n' "$host" "$path"
+}
+
 git_remote_for_root() {
-    local root="$1"
+    local root="$1" raw_remote
     [ -z "$root" ] && return 0
-    git -C "$root" config --get remote.origin.url 2>/dev/null || true
+    raw_remote=$(git -C "$root" config --get remote.origin.url 2>/dev/null || true)
+    sanitize_git_remote "$raw_remote"
+}
+
+repository_id_for_source_url() {
+    local source_url="$1" identity
+    [ -n "$source_url" ] || return 0
+    identity="${source_url#https://}"
+    identity="${identity%.git}"
+    printf '%s\n' "$identity"
+}
+
+git_source_path_for_dir() {
+    local root="$1" dir="$2"
+    [ -n "$root" ] || return 0
+    if [ "$dir" = "$root" ]; then
+        printf '.\n'
+    elif [[ "$dir" == "$root/"* ]]; then
+        printf '%s\n' "${dir#"$root/"}"
+    fi
 }
 
 git_branch_for_root() {
@@ -319,14 +624,120 @@ git_branch_for_root() {
 }
 
 source_kind_for_entry() {
-    local location="$1" entry_type="$2"
+    local location="$1" entry_type="$2" discovery_depth="${3:-1}"
     if [ "$entry_type" = "symlink" ]; then
         echo "symlink_distribution"
+    elif [ "$location" = ".agents/skills" ] && [ "$discovery_depth" -gt 1 ]; then
+        echo "canonical_collection_member"
     elif [ "$location" = ".agents/skills" ]; then
         echo "canonical_global"
     else
         echo "native_agent"
     fi
+}
+
+append_risk_finding() {
+    local findings="$1" detector_id="$2" subtype="$3" canonical_skill_file="$4"
+    local line_number="$5" context_kind="$6" execution_scope="$7" preview="$8" snippet="$9"
+    local snippet_sha256
+    snippet_sha256=$(sr_hash_string "$snippet") || return 1
+    jq -c \
+        --arg detector_id "$detector_id" \
+        --arg subtype "$subtype" \
+        --arg canonical_skill_file "$canonical_skill_file" \
+        --argjson line "$line_number" \
+        --arg context_kind "$context_kind" \
+        --arg execution_scope "$execution_scope" \
+        --arg redacted_preview "$preview" \
+        --arg snippet_sha256 "$snippet_sha256" \
+        '. + [{
+            id: $detector_id,
+            detector_id: $detector_id,
+            subtype: $subtype,
+            severity: "review_required",
+            canonical_skill_file: $canonical_skill_file,
+            line: $line,
+            context_kind: $context_kind,
+            execution_scope: $execution_scope,
+            redacted_preview: $redacted_preview,
+            snippet_sha256: $snippet_sha256
+        }]' <<< "$findings"
+}
+
+# Return structured, redacted review signals. Detection intentionally avoids
+# path/name allowlists: a finding is bound to detector + line + content hash.
+collect_risk_indicators() {
+    local skill_file="$1" canonical_skill_file="$2"
+    local findings='[]' line command_line line_number=0 lower rhs normalized variable
+    local pipe_to_shell_re dangerous_root_re privileged_re secret_assignment_re
+    pipe_to_shell_re="(cu""rl|wge""t)[[:space:][:graph:]]*[|][[:space:]]*(ba""sh|sh)"
+    dangerous_root_re="r""m[[:space:]]+-r""f[[:space:]]+/([[:space:]]|$)"
+    privileged_re="su""do[[:space:]]+"
+    secret_assignment_re='(API_KEY|TOKEN|SECRET)[[:space:]]*=[[:space:]]*'
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line_number=$((line_number + 1))
+        # Most SKILL.md lines cannot match any detector. Keep that overwhelmingly
+        # common path inside Bash instead of spawning several grep processes per
+        # line; large skills distributed across many agent roots otherwise turn
+        # one inventory into hundreds of thousands of short-lived subprocesses.
+        case "$line" in
+            *curl*|*wget*|*rm*|*sudo*|*API_KEY*|*TOKEN*|*SECRET*) ;;
+            *) continue ;;
+        esac
+        command_line="${line//\`/}"
+        if printf '%s\n' "$command_line" | grep -qE "$pipe_to_shell_re"; then
+            findings=$(append_risk_finding "$findings" "pipe_to_shell" \
+                "supply_chain_remote_exec" "$canonical_skill_file" "$line_number" \
+                "command" "local" "remote download piped to a shell" "$line") || return 1
+        fi
+        if printf '%s\n' "$command_line" | grep -qE "$dangerous_root_re"; then
+            findings=$(append_risk_finding "$findings" "destructive_root" \
+                "recursive_root_deletion" "$canonical_skill_file" "$line_number" \
+                "command" "local" "recursive deletion targets the filesystem root" "$line") || return 1
+        fi
+        if printf '%s\n' "$command_line" | grep -qE "$privileged_re"; then
+            local privileged_subtype="privileged_operation" privileged_scope="local"
+            if printf '%s\n' "$command_line" | grep -qE '(^|[[:space:]])ssh[[:space:]].*su''do[[:space:]]+'; then
+                privileged_subtype="remote_operation"
+                privileged_scope="remote"
+            elif printf '%s\n' "$command_line" | grep -qE 'su''do[[:space:]]+(apt(-get)?|dnf|yum|pacman|zypper)[[:space:]].*(install|add)|su''do[[:space:]]+brew[[:space:]]+install'; then
+                privileged_subtype="package_install"
+            fi
+            findings=$(append_risk_finding "$findings" "privileged_command" \
+                "$privileged_subtype" "$canonical_skill_file" "$line_number" \
+                "command" "$privileged_scope" "privileged command requires contextual review" "$line") || return 1
+        fi
+
+        if [[ "$line" =~ $secret_assignment_re ]]; then
+            variable="${BASH_REMATCH[1]}"
+            rhs="${line#*=}"
+            normalized=$(printf '%s' "$rhs" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^['"'"'"]//; s/['"'"'"]([[:space:]]*(#.*)?)$//')
+            lower=$(printf '%s' "$normalized" | tr '[:upper:]' '[:lower:]')
+            case "$normalized" in
+                ''|'$('*|'${'*|'$'[A-Za-z_]*|*'...'*) continue ;;
+            esac
+            case "$normalized" in
+                \"*) normalized="${normalized#\"}"; normalized="${normalized%%\"*}" ;;
+                \'*) normalized="${normalized#\'}"; normalized="${normalized%%\'*}" ;;
+                \`*) normalized="${normalized#\`}"; normalized="${normalized%%\`*}" ;;
+                *) normalized="${normalized%%[[:space:]\`]*}" ;;
+            esac
+            case "$lower" in
+                *'<your-'*|*'<api-'*|*'<token>'*|*placeholder*|*redacted*|*changeme*|*example*|*dummy*|*'your-key'*) continue ;;
+            esac
+            if { [ "${#normalized}" -ge 20 ] \
+                    && printf '%s' "$normalized" | grep -q '[[:alpha:]]' \
+                    && printf '%s' "$normalized" | grep -q '[[:digit:]]' \
+                    && ! printf '%s' "$normalized" | grep -q '[[:space:]$]'; } \
+                || printf '%s' "$normalized" | grep -qE '^(sk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}$'; then
+                findings=$(append_risk_finding "$findings" "possible_secret" \
+                    "credential_like_literal" "$canonical_skill_file" "$line_number" \
+                    "assignment" "local" "credential-like literal assigned to ${variable}" "$line") || return 1
+            fi
+        fi
+    done < "$skill_file"
+    printf '%s\n' "$findings"
 }
 
 canonical_dir_for_entry() {
@@ -399,9 +810,57 @@ cleanup_provenance_git_tmp() {
     if [ -n "$PROVENANCE_RECEIPT_TMP" ] && [ -f "$PROVENANCE_RECEIPT_TMP" ]; then
         rm -f -- "$PROVENANCE_RECEIPT_TMP"
     fi
+    # Command substitutions run scan_directory in a subshell and inherit EXIT
+    # traps. Only the top-level scanner owns the cross-directory content cache.
+    if [ "${BASH_SUBSHELL:-0}" -eq 0 ] \
+        && [ -n "$SCAN_CONTENT_CACHE_DIR" ] && [ -d "$SCAN_CONTENT_CACHE_DIR" ]; then
+        rm -rf -- "$SCAN_CONTENT_CACHE_DIR"
+    fi
 }
 
 trap cleanup_provenance_git_tmp EXIT
+
+initialize_scan_content_cache() {
+    local tmp_root candidate
+    tmp_root="${TMPDIR:-/tmp}"
+    candidate=$(mktemp -d "${tmp_root%/}/skills-refiner-scan-cache.XXXXXX") || return 1
+    chmod 700 "$candidate" || {
+        rm -rf -- "$candidate"
+        return 1
+    }
+    SCAN_CONTENT_CACHE_DIR="$candidate"
+    SCAN_CONTENT_CACHE_HITS_FILE="$candidate/cache-hits"
+    : > "$SCAN_CONTENT_CACHE_HITS_FILE" || return 1
+    chmod 600 "$SCAN_CONTENT_CACHE_HITS_FILE" || return 1
+}
+
+scan_content_cache_file() {
+    local canonical_skill_file="$1" cache_key
+    [ -n "$SCAN_CONTENT_CACHE_DIR" ] || return 1
+    # Device + inode uniquely identify the opened filesystem object for this
+    # scan; size, mtime, and ctime invalidate reuse if it changes mid-run. One
+    # stat replaces the previous stat/hash subprocess chain on every alias.
+    cache_key=$(stat -c '%d-%i-%s-%Y-%Z' "$canonical_skill_file" 2>/dev/null) \
+        || cache_key=$(stat -f '%d-%i-%z-%m-%c' "$canonical_skill_file" 2>/dev/null) \
+        || return 1
+    [[ "$cache_key" =~ ^[0-9]+(-[0-9]+){4}$ ]] || return 1
+    printf '%s/%s.json\n' "$SCAN_CONTENT_CACHE_DIR" "$cache_key"
+}
+
+write_scan_content_cache() {
+    local cache_file="$1" entry_json="$2" cache_tmp
+    [ -n "$cache_file" ] && [ ! -e "$cache_file" ] && [ ! -L "$cache_file" ] || return 0
+    cache_tmp=$(mktemp "$SCAN_CONTENT_CACHE_DIR/.entry.XXXXXX") || return 1
+    chmod 600 "$cache_tmp" || {
+        rm -f -- "$cache_tmp"
+        return 1
+    }
+    if ! printf '%s\n' "$entry_json" > "$cache_tmp" || ! jq -e 'type == "object"' "$cache_tmp" >/dev/null 2>&1; then
+        rm -f -- "$cache_tmp"
+        return 1
+    fi
+    mv -f -- "$cache_tmp" "$cache_file"
+}
 
 ensure_provenance_git_tmp() {
     [ -n "$PROVENANCE_GIT_TMP" ] && [ -d "$PROVENANCE_GIT_TMP/repo" ] && return 0
@@ -590,8 +1049,22 @@ scan_directory() {
     local dir="$1"
     local dir_label="$2"
     local results="[]"
+    local results_file=""
+    local collection_index_blockers="[]"
+    local validated_collection_members="[]"
 
-    [ ! -d "$dir" ] && echo "$results" && return
+    if [ ! -d "$dir" ]; then
+        jq -n '{entries:[], collection_index_blockers:[]}'
+        return
+    fi
+
+    if [ -n "$SCAN_CONTENT_CACHE_DIR" ] && [ -d "$SCAN_CONTENT_CACHE_DIR" ]; then
+        results_file=$(mktemp "$SCAN_CONTENT_CACHE_DIR/entries.XXXXXX" 2>/dev/null || true)
+        [ -z "$results_file" ] || chmod 600 "$results_file" || {
+            rm -f -- "$results_file"
+            results_file=""
+        }
+    fi
 
     local install_receipt_snapshot=""
     if [ "$dir_label" = ".agents/skills" ]; then
@@ -599,12 +1072,63 @@ scan_directory() {
         PROVENANCE_RECEIPT_TMP="$install_receipt_snapshot"
     fi
 
+    local entry_paths=()
     for entry_path in "$dir"/*; do
         [ -e "$entry_path" ] || [ -L "$entry_path" ] || continue
+        entry_paths+=("$entry_path")
+        # Only roots owned by the collection controller may activate nested
+        # members. Validation is fail-closed: no member is enumerated until the
+        # schema, source mapping, relative paths, and deployed tree digests all
+        # match the authoritative collection contract.
+        if [ "$dir_label" = ".agents/skills" ] \
+            && is_managed_collection_root "${entry_path##*/}"; then
+            local validation_json validation_rc
+            validation_json=$(validate_managed_collection_index "$entry_path" "${entry_path##*/}")
+            validation_rc=$?
+            if [ "$validation_rc" -ne 0 ] || [ "$(echo "$validation_json" | jq -r '.status // "blocked"' 2>/dev/null)" != "valid" ]; then
+                if ! echo "$validation_json" | jq -e 'type == "object" and .status == "blocked"' >/dev/null 2>&1; then
+                    validation_json=$(jq -n \
+                        --arg collection_id "${entry_path##*/}" \
+                        --arg index_path "$entry_path/INDEX.json" \
+                        '{status:"blocked", collection_id:$collection_id, index_path:$index_path,
+                          error_code:"collection_index_validation_failed",
+                          diagnostic:"collection INDEX validator returned an invalid result"}')
+                fi
+                collection_index_blockers=$(echo "$collection_index_blockers" | jq --argjson blocker "$validation_json" '. + [$blocker]')
+                continue
+            fi
+
+            local indexed_member_relative
+            validated_collection_members=$(echo "$validated_collection_members" | jq \
+                --argjson validation "$validation_json" '. + [$validation.members[] | . + {collection_id:$validation.collection_id}]')
+            while IFS= read -r indexed_member_relative; do
+                entry_paths+=("$entry_path/$indexed_member_relative")
+            done < <(echo "$validation_json" | jq -r '.members[].relative_path')
+        fi
+    done
+
+    for entry_path in "${entry_paths[@]}"; do
+        [ -e "$entry_path" ] || [ -L "$entry_path" ] || continue
         [ -d "$entry_path" ] || [ -L "$entry_path" ] || continue
-        local entry_name
+        local entry_name relative_entry_path relative_without_slashes discovery_depth collection_id
+        local collection_member_contract collection_member_relative_path
         entry_name="${entry_path##*/}"
         [[ "$entry_name" == .* ]] && continue
+        relative_entry_path="${entry_path#"$dir"/}"
+        relative_without_slashes="${relative_entry_path//\//}"
+        discovery_depth=$(( ${#relative_entry_path} - ${#relative_without_slashes} + 1 ))
+        collection_id=""
+        if [ "$discovery_depth" -gt 1 ]; then
+            collection_id="${relative_entry_path%%/*}"
+        fi
+        collection_member_contract="null"
+        if [ -n "$collection_id" ]; then
+            collection_member_relative_path="${relative_entry_path#*/}"
+            collection_member_contract=$(echo "$validated_collection_members" | jq -c \
+                --arg collection_id "$collection_id" \
+                --arg relative_path "$collection_member_relative_path" \
+                'first(.[] | select(.collection_id == $collection_id and .relative_path == $relative_path)) // null')
+        fi
 
         local entry_type link_target raw_link_target_base64
         link_target=""
@@ -637,12 +1161,18 @@ scan_directory() {
                 --arg location "$dir_label" \
                 --arg entry_path "$entry_path" \
                 --arg active_root "$dir" \
+                --arg storage_relative_path "$relative_entry_path" \
+                --arg collection_id "$collection_id" \
+                --argjson discovery_depth "$discovery_depth" \
                 --arg entry_type "broken_symlink" \
                 --arg link_target "$link_target" \
                 --arg raw_link_target_base64 "$raw_link_target_base64" \
                 --argjson mutation_provenance "$mutation_provenance_json" \
                 '{name: $name, dir_name: $dir_name, location: $location,
                   entry_path: $entry_path, active_root: $active_root,
+                  storage_relative_path: $storage_relative_path,
+                  discovery_depth: $discovery_depth,
+                  collection_id: (if $collection_id == "" then null else $collection_id end),
                   entry_kind: $entry_type, type: $entry_type,
                   link_target: $link_target,
                   raw_link_target: $link_target,
@@ -650,7 +1180,11 @@ scan_directory() {
                   mutation_provenance: $mutation_provenance,
                   description: "", word_count: 0, age_days: 0,
                   flags: ["broken_symlink"]}')
-            results=$(echo "$results" | jq --argjson e "$entry_json" '. + [$e]')
+            if [ -n "$results_file" ]; then
+                printf '%s\n' "$entry_json" >> "$results_file"
+            else
+                results=$(echo "$results" | jq --argjson e "$entry_json" '. + [$e]')
+            fi
             continue
         fi
 
@@ -663,6 +1197,94 @@ scan_directory() {
         source_skill_file="$entry_path/SKILL.md"
         canonical_skill_file="$skill_file"
         [ ! -f "$skill_file" ] && continue
+
+        # A single canonical skill is commonly distributed into a dozen agent
+        # roots. Reuse content-derived facts, but always rebuild entry identity,
+        # installer evidence, and provenance for the current discovery surface.
+        local scan_cache_file
+        scan_cache_file=$(scan_content_cache_file "$canonical_skill_file" 2>/dev/null || true)
+        if [ -n "$scan_cache_file" ] && [ -f "$scan_cache_file" ] && [ ! -L "$scan_cache_file" ]; then
+            local cached_source_kind cached_is_backup=false entry_json
+            cached_source_kind=$(source_kind_for_entry "$dir_label" "$entry_type" "$discovery_depth")
+            case "$entry_name" in
+                *.backup.*|*.disabled*|*.tmp*|*.old*) cached_is_backup=true ;;
+            esac
+            entry_json=$(jq -c \
+                --arg dir_name "$entry_name" \
+                --arg location "$dir_label" \
+                --arg entry_path "$entry_path" \
+                --arg active_root "$dir" \
+                --arg storage_relative_path "$relative_entry_path" \
+                --arg collection_id "$collection_id" \
+                --argjson collection_member_contract "$collection_member_contract" \
+                --argjson discovery_depth "$discovery_depth" \
+                --arg entry_type "$entry_type" \
+                --arg raw_link_target "$link_target" \
+                --arg raw_link_target_base64 "$raw_link_target_base64" \
+                --argjson mutation_provenance "$mutation_provenance_json" \
+                --arg source_skill_file "$source_skill_file" \
+                --arg source_kind "$cached_source_kind" \
+                --argjson is_backup "$cached_is_backup" '
+                select(type == "object") |
+                . as $cached |
+                ($cached.collection_member_contract // null) as $cached_contract |
+                .dir_name = $dir_name |
+                .location = $location |
+                .entry_path = $entry_path |
+                .active_root = $active_root |
+                .storage_relative_path = $storage_relative_path |
+                .discovery_depth = $discovery_depth |
+                .collection_id = (if $collection_id == "" then null else $collection_id end) |
+                .collection_member_contract = $collection_member_contract |
+                .entry_kind = $entry_type |
+                .type = $entry_type |
+                .link_target = $raw_link_target |
+                .raw_link_target = (if $raw_link_target == "" then null else $raw_link_target end) |
+                .raw_link_target_base64 = (if $entry_type == "directory" then null else $raw_link_target_base64 end) |
+                .mutation_provenance = $mutation_provenance |
+                .source_skill_file = $source_skill_file |
+                .flags = ([.flags[] | select(startswith("backup") | not)]
+                          + if $is_backup then ["backup_remnant"] else [] end) |
+                .provenance = (
+                    if $collection_member_contract != null then {
+                        kind: $source_kind,
+                        source_url: (if $collection_member_contract.source_provider == "github"
+                                     then "https://github.com/" + $collection_member_contract.repository_id + ".git"
+                                     else "" end),
+                        source_provider: $collection_member_contract.source_provider,
+                        repository_id: $collection_member_contract.repository_id,
+                        source_path: $collection_member_contract.source_path,
+                        resolved_revision: $collection_member_contract.resolved_revision,
+                        claim_kind: "index_claim",
+                        git_root: "",
+                        git_branch: "",
+                        confidence: "controller_unverified"
+                    } elif $cached_contract == null then
+                        ($cached.provenance | .kind = $source_kind | .claim_kind = null)
+                    else {
+                        kind: $source_kind,
+                        source_url: "",
+                        source_provider: null,
+                        repository_id: null,
+                        source_path: null,
+                        resolved_revision: null,
+                        claim_kind: null,
+                        git_root: "",
+                        git_branch: "",
+                        confidence: "heuristic"
+                    } end
+                )
+            ' "$scan_cache_file" 2>/dev/null || true)
+            if [ -n "$entry_json" ]; then
+                if [ -n "$results_file" ]; then
+                    printf '%s\n' "$entry_json" >> "$results_file"
+                else
+                    results=$(echo "$results" | jq --argjson e "$entry_json" '. + [$e]')
+                fi
+                printf '1\n' >> "$SCAN_CONTENT_CACHE_HITS_FILE"
+                continue
+            fi
+        fi
 
         local name desc_full desc top_version metadata_version declared_version word_count mtime mtime_iso now age_days
         name=$(get_frontmatter "$skill_file" "name")
@@ -721,16 +1343,11 @@ scan_directory() {
         [ "$word_count" -gt 5000 ] && flags+=("very_large")
         [ "$age_days" -gt "$STALE_DAYS" ] && flags+=("stale_${age_days}d")
 
-        local content pipe_to_shell_re dangerous_cmd_re secret_assignment_re
-        content=$(cat "$skill_file" 2>/dev/null)
-        # Assemble detector regexes so the scanner's own source is not mistaken
-        # for an executable instruction by third-party static checks.
-        pipe_to_shell_re="(cu""rl|wge""t)[[:space:][:graph:]]*[|][[:space:]]*(ba""sh|sh)"
-        dangerous_cmd_re="r""m[[:space:]]+-r""f[[:space:]]+/|su""do[[:space:]]+"
-        secret_assignment_re='(API_KEY|TOKEN|SECRET)[[:space:]]*='
-        echo "$content" | grep -qE "$pipe_to_shell_re" && flags+=("pipe_to_shell")
-        echo "$content" | grep -qE "$dangerous_cmd_re" && flags+=("dangerous_cmd")
-        echo "$content" | grep -qE "$secret_assignment_re" && flags+=("possible_secret")
+        local risk_json risk_id
+        risk_json=$(collect_risk_indicators "$skill_file" "$canonical_skill_file") || risk_json='[]'
+        while IFS= read -r risk_id; do
+            [ -n "$risk_id" ] && flags+=("$risk_id")
+        done < <(printf '%s\n' "$risk_json" | jq -r 'map(.id) | unique[]')
 
         local broken_refs=()
         local refs
@@ -751,15 +1368,45 @@ scan_directory() {
             flags_json=$(printf '%s\n' "${flags[@]}" | jq -R . | jq -s .)
         fi
 
-        local risk_json normalized_content_sha256 git_root git_remote git_branch source_kind
-        risk_json=$(printf '%s\n' "${flags[@]}" | jq -R 'select(. == "pipe_to_shell" or . == "dangerous_cmd" or . == "possible_secret") | {id: ., severity: "review_required"}' | jq -s .)
-        [ -z "$risk_json" ] && risk_json='[]'
-
+        local normalized_content_sha256 git_root git_remote git_branch source_kind
+        local source_provider repository_id provenance_source_path resolved_revision provenance_claim_kind provenance_confidence
         normalized_content_sha256=$(hash_file "$skill_file")
         git_root=$(git_root_for_dir "$canonical_dir")
         git_remote=$(git_remote_for_root "$git_root")
         git_branch=$(git_branch_for_root "$git_root")
-        source_kind=$(source_kind_for_entry "$dir_label" "$entry_type")
+        source_kind=$(source_kind_for_entry "$dir_label" "$entry_type" "$discovery_depth")
+        source_provider=""
+        repository_id=""
+        provenance_source_path=""
+        resolved_revision=""
+        provenance_claim_kind=""
+        provenance_confidence="heuristic"
+        if [ "$collection_member_contract" != "null" ]; then
+            source_provider=$(echo "$collection_member_contract" | jq -r '.source_provider // ""')
+            repository_id=$(echo "$collection_member_contract" | jq -r '.repository_id // ""')
+            provenance_source_path=$(echo "$collection_member_contract" | jq -r '.source_path // ""')
+            resolved_revision=$(echo "$collection_member_contract" | jq -r '.resolved_revision // ""')
+            provenance_claim_kind="index_claim"
+            provenance_confidence="controller_unverified"
+            # The ambient ~/.agents/skills repository is not the collection
+            # member's source authority. INDEX claims remain controller-
+            # unverified and must not inherit that unrelated Git root/branch.
+            git_root=""
+            git_branch=""
+            if [ "$source_provider" = "github" ] \
+                && [[ "$repository_id" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+                git_remote="https://github.com/${repository_id}.git"
+            else
+                git_remote=""
+            fi
+        else
+            repository_id=$(repository_id_for_source_url "$git_remote")
+            provenance_source_path=$(git_source_path_for_dir "$git_root" "$canonical_dir")
+            if [ -n "$repository_id" ]; then
+                source_provider="git"
+                provenance_confidence="direct"
+            fi
+        fi
 
         local when_to_use when_to_use_preview disable_model_invocation user_invocable model effort context agent shell_value
         local allowed_tools_json paths_json hook_events_json_value has_hooks extra_keys_json fm_keys_json openai_yaml openai_yaml_exists
@@ -809,6 +1456,9 @@ scan_directory() {
             --arg location "$dir_label" \
             --arg entry_path "$entry_path" \
             --arg active_root "$dir" \
+            --arg storage_relative_path "$relative_entry_path" \
+            --arg collection_id "$collection_id" \
+            --argjson discovery_depth "$discovery_depth" \
             --arg entry_type "$entry_type" \
             --arg raw_link_target "$link_target" \
             --arg raw_link_target_base64 "$raw_link_target_base64" \
@@ -824,6 +1474,12 @@ scan_directory() {
             --arg git_root "$git_root" \
             --arg git_remote "$git_remote" \
             --arg git_branch "$git_branch" \
+            --arg source_provider "$source_provider" \
+            --arg repository_id "$repository_id" \
+            --arg provenance_source_path "$provenance_source_path" \
+            --arg resolved_revision "$resolved_revision" \
+            --arg provenance_claim_kind "$provenance_claim_kind" \
+            --arg provenance_confidence "$provenance_confidence" \
             --arg when_to_use_preview "$when_to_use_preview" \
             --arg disable_model_invocation "$disable_model_invocation" \
             --arg user_invocable "$user_invocable" \
@@ -859,6 +1515,7 @@ scan_directory() {
             --argjson tool_dependencies_count "$tool_dependencies_count" \
             --argjson runtime_loadable "$runtime_loadable_json" \
             --argjson mutation_provenance "$mutation_provenance_json" \
+            --argjson collection_member_contract "$collection_member_contract" \
             --argjson flags "$flags_json" \
             --argjson risks "$risk_json" \
             '{
@@ -867,6 +1524,10 @@ scan_directory() {
                 location: $location,
                 entry_path: $entry_path,
                 active_root: $active_root,
+                storage_relative_path: $storage_relative_path,
+                discovery_depth: $discovery_depth,
+                collection_id: (if $collection_id == "" then null else $collection_id end),
+                collection_member_contract: $collection_member_contract,
                 entry_kind: $entry_type,
                 type: $entry_type,
                 link_target: $raw_link_target,
@@ -948,22 +1609,37 @@ scan_directory() {
                 provenance: {
                     kind: $source_kind,
                     source_url: $git_remote,
+                    source_provider: (if $source_provider == "" then null else $source_provider end),
+                    repository_id: (if $repository_id == "" then null else $repository_id end),
+                    source_path: (if $provenance_source_path == "" then null else $provenance_source_path end),
+                    resolved_revision: (if $resolved_revision == "" then null else $resolved_revision end),
+                    claim_kind: (if $provenance_claim_kind == "" then null else $provenance_claim_kind end),
                     git_root: $git_root,
                     git_branch: $git_branch,
-                    confidence: (if $git_remote != "" then "direct" else "heuristic" end)
+                    confidence: $provenance_confidence
                 },
                 risk_indicators: $risks,
                 flags: $flags
             }')
 
-        results=$(echo "$results" | jq --argjson e "$entry_json" '. + [$e]')
+        if [ -n "$results_file" ]; then
+            printf '%s\n' "$entry_json" >> "$results_file"
+        else
+            results=$(echo "$results" | jq --argjson e "$entry_json" '. + [$e]')
+        fi
+        write_scan_content_cache "$scan_cache_file" "$entry_json" 2>/dev/null || true
     done
 
     if [ -n "$install_receipt_snapshot" ]; then
         rm -f -- "$install_receipt_snapshot"
         PROVENANCE_RECEIPT_TMP=""
     fi
-    echo "$results"
+    if [ -n "$results_file" ]; then
+        results=$(jq -s '.' "$results_file")
+        rm -f -- "$results_file"
+    fi
+    jq -n --argjson entries "$results" --argjson blockers "$collection_index_blockers" \
+        '{entries:$entries, collection_index_blockers:$blockers}'
 }
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -978,32 +1654,47 @@ main() {
     fi
 
     local all_data
-    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v5", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories", hash_normalization:"strip-canary-crlf-bom.v1", runtime_validation_mode:"static-preflight", runtime_status_semantics:"pass=runtime validator confirmed; fail=proven blocker; unknown=runtime loader not executed"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], entries:[], runtime_load_blockers:[], name_collisions:[]}')
+    all_data=$(jq -n --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson stale_days "$STALE_DAYS" --argjson max_description_length "$MAX_DESCRIPTION_LENGTH" '{metadata:{schema_version:"skill-scan.v6", product_version:"2.0", scanned_at:$scanned_at, stale_days:$stale_days, max_description_length:$max_description_length, scope:"agent-recognized-directories-plus-validated-managed-collection-members", hash_normalization:"strip-canary-crlf-bom.v1", runtime_validation_mode:"static-preflight", runtime_status_semantics:"pass=runtime validator confirmed; fail=proven blocker; unknown=runtime loader not executed", collection_index_validation:"controller-contract-and-deployed-tree-digest"}, topology:{}, skills:[], skill_links:[], broken_symlinks:[], entries:[], runtime_load_blockers:[], collection_index_blockers:[], name_collisions:[]}')
 
     for dir in "${AGENT_DIRS[@]}"; do
         [ ! -d "$dir" ] && continue
         local label="${dir#$HOME_DIR/}"
-        local dir_data total symlinks native broken
+        local dir_data
         dir_data=$(scan_directory "$dir" "$label")
-        total=$(echo "$dir_data" | jq 'length')
-        symlinks=$(echo "$dir_data" | jq '[.[] | select(.type == "symlink")] | length')
-        native=$(echo "$dir_data" | jq '[.[] | select(.type == "directory")] | length')
-        broken=$(echo "$dir_data" | jq '[.[] | select(.type == "broken_symlink")] | length')
-
         all_data=$(echo "$all_data" | jq \
             --arg label "$label" \
-            --argjson total "$total" \
-            --argjson symlinks "$symlinks" \
-            --argjson native "$native" \
-            --argjson broken "$broken" \
-            '.topology[$label] = {total: $total, symlinks: $symlinks, native: $native, broken_symlinks: $broken}')
-
-        all_data=$(echo "$all_data" | jq --argjson d "$dir_data" '
-            .skills += [$d[] | select(.type == "directory")] |
-            .skill_links += [$d[] | select(.type == "symlink")] |
-            .broken_symlinks += [$d[] | select(.type == "broken_symlink")]
+            --argjson directory "$dir_data" '
+            ($directory.entries) as $entries |
+            .topology[$label] = {
+                total: ($entries | length),
+                symlinks: ([$entries[] | select(.type == "symlink")] | length),
+                native: ([$entries[] | select(.type == "directory")] | length),
+                broken_symlinks: ([$entries[] | select(.type == "broken_symlink")] | length)
+            } |
+            .skills += [$entries[] | select(.type == "directory")] |
+            .skill_links += [$entries[] | select(.type == "symlink")] |
+            .broken_symlinks += [$entries[] | select(.type == "broken_symlink")] |
+            .collection_index_blockers += $directory.collection_index_blockers
         ')
     done
+
+    local canonical_content_parses=0 canonical_content_cache_hits=0 content_cache_status="disabled"
+    if [ -n "$SCAN_CONTENT_CACHE_DIR" ] && [ -d "$SCAN_CONTENT_CACHE_DIR" ]; then
+        content_cache_status="enabled"
+        canonical_content_parses=$(find "$SCAN_CONTENT_CACHE_DIR" -type f -name '*.json' 2>/dev/null | wc -l | tr -d '[:space:]')
+        canonical_content_cache_hits=$(wc -l < "$SCAN_CONTENT_CACHE_HITS_FILE" | tr -d '[:space:]')
+    fi
+    all_data=$(echo "$all_data" | jq \
+        --arg status "$content_cache_status" \
+        --argjson canonical_content_parses "${canonical_content_parses:-0}" \
+        --argjson canonical_content_cache_hits "${canonical_content_cache_hits:-0}" '
+        .metadata.scan_efficiency = {
+            content_cache: $status,
+            cache_key: "canonical-skill-file-identity.v1",
+            canonical_content_parses: $canonical_content_parses,
+            canonical_content_cache_hits: $canonical_content_cache_hits
+        }
+    ')
 
     all_data=$(echo "$all_data" | jq '
         def is_backup_or_archive:
@@ -1030,23 +1721,41 @@ main() {
                 name: .[0].name,
                 real_directory_count: length,
                 distinct_canonical_dirs: ([.[].canonical_dir] | unique | length),
+                distinct_repository_ids: ([.[].provenance.repository_id | select(. != null and length > 0)] | unique),
+                distinct_source_paths: ([.[].provenance.source_path | select(. != null and length > 0)] | unique),
                 distinct_versions: ([.[].declared_version | select(length > 0)] | unique),
                 distinct_hashes: ([.[].normalized_content_sha256 | select(length > 0)] | unique),
+                distinct_entity_keys: ([.[] | [
+                    (.provenance.repository_id // ""),
+                    (.provenance.source_path // ""),
+                    .canonical_dir
+                ] | @json] | unique),
+                disposition: "preserve",
+                reason: "same_declared_name_multiple_qualified_entities",
                 entries: [.[] | {
                     location,
                     canonical_dir,
                     canonical_skill_file,
                     declared_version,
                     normalized_content_sha256,
-                    provenance
+                    provenance,
+                    entity_identity: {
+                        repository_id: .provenance.repository_id,
+                        source_path: .provenance.source_path,
+                        canonical_target: .canonical_dir
+                    }
                 }]
             })
-            | map(select((.distinct_versions | length) > 1 or (.distinct_hashes | length) > 1))
+            | map(select((.distinct_entity_keys | length) > 1))
         )
     ')
 
+    local collection_index_blocker_count
+    collection_index_blocker_count=$(echo "$all_data" | jq '.collection_index_blockers | length')
+
     if $JSON_ONLY; then
         echo "$all_data" | jq '.'
+        [ "$collection_index_blocker_count" -eq 0 ]
         return
     fi
 
@@ -1099,13 +1808,13 @@ main() {
 
     local broken_count security_count load_blocker_count backup_count critical_count advisory_count
     broken_count=$(echo "$all_data" | jq '.broken_symlinks | length')
-    security_count=$(echo "$all_data" | jq '[.skills[] | select(any(.flags[]?; . == "pipe_to_shell" or . == "dangerous_cmd" or . == "possible_secret"))] | length')
+    security_count=$(echo "$all_data" | jq '[.skills[] | select((.risk_indicators // []) | length > 0)] | length')
     load_blocker_count=$(echo "$all_data" | jq '.runtime_load_blockers | length')
     backup_count=$(echo "$all_data" | jq '[.skills[] | select(any(.flags[]?; startswith("backup")))] | length')
-    critical_count=$((broken_count + security_count + load_blocker_count + collision_count))
+    critical_count=$((broken_count + security_count + load_blocker_count + collision_count + collection_index_blocker_count))
     advisory_count=$backup_count
     echo -e "${BOLD}── Severity Summary ──${NC}"
-    echo "  Critical signals:     $critical_count (load blockers: $load_blocker_count, broken symlinks: $broken_count, security review flags: $security_count, active collisions: $collision_count)"
+    echo "  Critical signals:     $critical_count (load blockers: $load_blocker_count, collection INDEX blockers: $collection_index_blocker_count, broken symlinks: $broken_count, security review flags: $security_count, active collisions: $collision_count)"
     echo "  Advisory signals:     $advisory_count (backup/archive remnants)"
     echo "  Informational signals: topology, provenance, size, and age distributions below"
     echo -e "  ${DIM}Signals are not verdicts; validate high-priority paths directly before cleanup.${NC}"
@@ -1121,7 +1830,7 @@ main() {
         printf "  ${DIM}%-30s %-20s %-8s %s${NC}\n" "----" "--------" "-----" "-----"
         echo "$flagged" | jq -r '.[] | "\(.name)|\(.location)|\(.word_count)|\(.flags | join(", "))"' | while IFS='|' read -r name loc words flags; do
             local color="$YELLOW"
-            echo "$flags" | grep -qE 'dangerous_|pipe_to_shell|possible_secret|description_too_long|name_not_observed|description_not_observed' && color="$RED"
+            echo "$flags" | grep -qE 'destructive_root|privileged_command|pipe_to_shell|possible_secret|description_too_long|name_not_observed|description_not_observed' && color="$RED"
             printf "  ${color}%-30s${NC} %-20s %-8s %s\n" "${name:0:30}" "${loc:0:20}" "$words" "$flags"
         done
         echo ""
@@ -1130,6 +1839,12 @@ main() {
     if [ "$load_blocker_count" -gt 0 ]; then
         echo -e "${RED}${BOLD}── Runtime Load Blockers ──${NC}"
         echo "$all_data" | jq -r '.runtime_load_blockers[] | "  \(.name) in \(.location) -> \(.load_blockers | join(", ")) (\(.canonical_skill_file))"'
+        echo ""
+    fi
+
+    if [ "$collection_index_blocker_count" -gt 0 ]; then
+        echo -e "${RED}${BOLD}── Managed Collection INDEX Blockers ──${NC}"
+        echo "$all_data" | jq -r '.collection_index_blockers[] | "  \(.collection_id) -> \(.error_code): \(.diagnostic) (\(.index_path))"'
         echo ""
     fi
 
@@ -1173,7 +1888,10 @@ main() {
     echo "  >${STALE_DAYS} days (stale):     $stale"
     echo ""
 
-    if $report_written; then
+    if [ "$collection_index_blocker_count" -gt 0 ]; then
+        echo -e "${RED}[BLOCKED]${NC} Scan found an invalid controller-owned collection INDEX.json."
+        return 1
+    elif $report_written; then
         echo -e "${GREEN}[OK]${NC} Scan complete. JSON: ${CYAN}$REPORT_JSON${NC}"
     else
         echo -e "${GREEN}[OK]${NC} Scan complete. JSON report not written (--json/--no-write)."
@@ -1181,4 +1899,5 @@ main() {
     echo -e "${DIM}Feed this JSON to the AI for expert analysis. Findings are signals, not verdicts.${NC}"
 }
 
+initialize_scan_content_cache || true
 main "$@"

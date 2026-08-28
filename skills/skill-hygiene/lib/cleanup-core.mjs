@@ -53,11 +53,13 @@ function requireExactKeys(value, allowed, message) {
   }
 }
 
+const SUPPORTED_SCAN_SCHEMAS = new Set(['skill-scan.v5', 'skill-scan.v6']);
+
 function validateScan(scan) {
   requireObject(scan, 'scan must be an object');
-  if (scan.metadata?.schema_version !== 'skill-scan.v5' || !Array.isArray(scan.entries)
+  if (!SUPPORTED_SCAN_SCHEMAS.has(scan.metadata?.schema_version) || !Array.isArray(scan.entries)
       || !scan.topology || typeof scan.topology !== 'object' || Array.isArray(scan.topology)) {
-    fail('invalid_schema', 'expected a skill-scan.v5 document');
+    fail('invalid_schema', 'expected a supported skill-scan.v5/v6 document');
   }
   return scan;
 }
@@ -70,6 +72,24 @@ const SAFE_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3
 const RAW_SHA256 = /^[0-9a-f]{64}$/u;
 const RAW_SHA1 = /^[0-9a-f]{40}$/u;
 const SEMANTIC_ENTRY_KINDS = new Set(['directory', 'symlink', 'broken_symlink']);
+const SCAN_V5_PROVENANCE_KEYS = ['kind', 'source_url', 'git_root', 'git_branch', 'confidence'];
+const SCAN_V6_PROVENANCE_KEYS = [
+  'kind',
+  'source_url',
+  'source_provider',
+  'repository_id',
+  'source_path',
+  'resolved_revision',
+  'claim_kind',
+  'git_root',
+  'git_branch',
+  'confidence',
+];
+const SOURCE_PROVIDERS = new Set(['git', 'github']);
+const REVISION = /^[0-9a-f]{40}$/u;
+const REPOSITORY_ID = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/u;
+const GITHUB_REPOSITORY_ID = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
+const PUBLIC_GIT_URL = /^https:\/\/(github\.com|gitlab\.com|bitbucket\.org|codeberg\.org)\/([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)$/u;
 
 function semanticIdentityUnavailable() {
   fail(
@@ -82,6 +102,116 @@ function semanticString(value, { empty = false } = {}) {
   if (typeof value !== 'string' || (!empty && value.length === 0)
       || /[\u0000-\u001f\u007f]/u.test(value)) semanticIdentityUnavailable();
   return value;
+}
+
+function semanticNullableString(value) {
+  return value === null ? null : semanticString(value);
+}
+
+function repositoryIdForPublicGitUrl(sourceUrl) {
+  const match = PUBLIC_GIT_URL.exec(sourceUrl);
+  if (!match) return null;
+  const repositoryPath = match[2].endsWith('.git') ? match[2].slice(0, -4) : match[2];
+  return REPOSITORY_ID.test(`${match[1]}/${repositoryPath}`)
+    ? `${match[1]}/${repositoryPath}`
+    : null;
+}
+
+function normalizedScanProvenance(provenance, {
+  allowMissing = false,
+  expectedSchema = null,
+} = {}) {
+  if (provenance === undefined && allowMissing) {
+    return {
+      format: 'missing',
+      kind: 'unknown',
+      source_url: '',
+      source_provider: null,
+      repository_id: null,
+      source_path: null,
+      resolved_revision: null,
+      claim_kind: null,
+      git_root: '',
+      git_branch: '',
+      confidence: 'none',
+    };
+  }
+  const isV5 = hasExactKeys(provenance, SCAN_V5_PROVENANCE_KEYS);
+  const isV6 = hasExactKeys(provenance, SCAN_V6_PROVENANCE_KEYS);
+  if (!isV5 && !isV6) semanticIdentityUnavailable();
+  if ((expectedSchema === 'skill-scan.v5' && !isV5)
+      || (expectedSchema === 'skill-scan.v6' && !isV6)
+      || (expectedSchema !== null && !SUPPORTED_SCAN_SCHEMAS.has(expectedSchema))) {
+    semanticIdentityUnavailable();
+  }
+
+  const common = {
+    kind: semanticString(provenance.kind),
+    source_url: semanticString(provenance.source_url, { empty: true }),
+    git_root: semanticString(provenance.git_root, { empty: true }),
+    git_branch: semanticString(provenance.git_branch, { empty: true }),
+    confidence: semanticString(provenance.confidence),
+  };
+  if (isV5) {
+    return {
+      format: 'scan-v5',
+      ...common,
+      source_provider: null,
+      repository_id: null,
+      source_path: null,
+      resolved_revision: null,
+      claim_kind: null,
+    };
+  }
+
+  const sourceProvider = semanticNullableString(provenance.source_provider);
+  const repositoryId = semanticNullableString(provenance.repository_id);
+  const sourcePath = semanticNullableString(provenance.source_path);
+  const resolvedRevision = semanticNullableString(provenance.resolved_revision);
+  const claimKind = semanticNullableString(provenance.claim_kind);
+  if ((sourceProvider !== null && !SOURCE_PROVIDERS.has(sourceProvider))
+      || (repositoryId !== null
+        && (repositoryId.length > 1024 || !REPOSITORY_ID.test(repositoryId)))
+      || (sourcePath !== null
+        && (sourcePath.length > 2048 || isAbsolute(sourcePath)
+          || (sourcePath !== '.'
+            && sourcePath.split('/').some((segment) => segment === '' || segment === '.' || segment === '..'))))
+      || (resolvedRevision !== null && !REVISION.test(resolvedRevision))
+      || (claimKind !== null && claimKind !== 'index_claim')) {
+    semanticIdentityUnavailable();
+  }
+  if (sourceProvider === null) {
+    if (common.source_url !== '' || repositoryId !== null || resolvedRevision !== null
+        || claimKind !== null || ['direct', 'controller_unverified'].includes(common.confidence)) {
+      semanticIdentityUnavailable();
+    }
+  } else if (sourceProvider === 'git') {
+    if (repositoryId === null || sourcePath === null || resolvedRevision !== null
+        || claimKind !== null || common.confidence !== 'direct'
+        || !isAbsolute(common.git_root)
+        || repositoryIdForPublicGitUrl(common.source_url) !== repositoryId) {
+      semanticIdentityUnavailable();
+    }
+  } else if (sourceProvider === 'github') {
+    if (repositoryId === null || !GITHUB_REPOSITORY_ID.test(repositoryId)
+        || sourcePath === null || resolvedRevision === null || claimKind !== 'index_claim'
+        || common.confidence !== 'controller_unverified'
+        || common.source_url !== `https://github.com/${repositoryId}.git`
+        || common.git_root !== '' || common.git_branch !== '') {
+      semanticIdentityUnavailable();
+    }
+  } else {
+    semanticIdentityUnavailable();
+  }
+  return {
+    format: 'scan-v6',
+    ...common,
+    source_provider: sourceProvider,
+    repository_id: repositoryId,
+    source_path: sourcePath,
+    resolved_revision: resolvedRevision,
+    claim_kind: claimKind,
+  };
 }
 
 function hasExactKeys(value, allowed, required = allowed) {
@@ -129,7 +259,7 @@ function normalizedMutationProvenance(value) {
   };
 }
 
-function semanticIdentity(entry) {
+function semanticIdentity(entry, { scannerSchema = null } = {}) {
   requireObject(entry, 'scan entry must be an object');
   const entryPath = semanticString(entry.entry_path);
   const activeRoot = semanticString(entry.active_root);
@@ -148,22 +278,22 @@ function semanticIdentity(entry) {
           || !isAbsolute(canonicalTarget)))) semanticIdentityUnavailable();
   if (canonicalTarget !== null) semanticString(canonicalTarget);
   const provenance = entry.provenance;
-  let normalizedProvenance;
-  if (entryKind === 'broken_symlink' && provenance === undefined) {
-    normalizedProvenance = { kind: 'unknown', source_url: '', git_root: '' };
-  } else {
-    if (!hasExactKeys(
-      provenance,
-      ['kind', 'source_url', 'git_root', 'git_branch', 'confidence'],
-    )) semanticIdentityUnavailable();
-    semanticString(provenance.git_branch, { empty: true });
-    semanticString(provenance.confidence);
-    normalizedProvenance = {
-      kind: semanticString(provenance.kind),
-      source_url: semanticString(provenance.source_url, { empty: true }),
-      git_root: semanticString(provenance.git_root, { empty: true }),
-    };
-  }
+  const source = normalizedScanProvenance(provenance, {
+    allowMissing: entryKind === 'broken_symlink',
+    expectedSchema: scannerSchema,
+  });
+  const normalizedProvenance = source.format === 'scan-v6'
+    ? {
+      kind: source.kind,
+      source_url: source.source_url,
+      source_provider: source.source_provider,
+      repository_id: source.repository_id,
+      source_path: source.source_path,
+      resolved_revision: source.resolved_revision,
+      claim_kind: source.claim_kind,
+      git_root: source.git_root,
+    }
+    : { kind: source.kind, source_url: source.source_url, git_root: source.git_root };
   const contentHash = entry.normalized_content_sha256 ?? null;
   if ((entryKind === 'broken_symlink' && contentHash !== null)
       || (entryKind !== 'broken_symlink'
@@ -182,8 +312,8 @@ function semanticIdentity(entry) {
   };
 }
 
-export function semanticIdentityHashForEntry(entry) {
-  return sha256Json(semanticIdentity(entry));
+export function semanticIdentityHashForEntry(entry, options = {}) {
+  return sha256Json(semanticIdentity(entry, options));
 }
 
 export function preApplyStatusAllowsBaseline(status) {
@@ -259,7 +389,9 @@ export function reconcilePostApplyScan({
     let observed = null;
     if (matches.length === 1) {
       try {
-        observed = semanticIdentityHashForEntry(matches[0]);
+        observed = semanticIdentityHashForEntry(matches[0], {
+          scannerSchema: scan.metadata.schema_version,
+        });
       } catch (error) {
         if (!(error instanceof CleanupCoreError)
             || error.code !== 'semantic_identity_unavailable') throw error;
@@ -324,7 +456,7 @@ export function reconcilePostApplyScan({
   return validatePostScanReport({
     schema_version: SCHEMAS.postScan,
     observation_status: unavailable ? 'UNAVAILABLE' : (partial ? 'PARTIAL' : 'COMPLETE'),
-    scanner_schema: unavailable ? null : 'skill-scan.v5',
+    scanner_schema: unavailable ? null : scan.metadata?.schema_version,
     error_code: unavailable
       ? scanErrorCode
       : (statusUnavailable
@@ -369,7 +501,7 @@ function scanFingerprint(scan) {
     canonical_dir: entry.canonical_dir ?? null,
     normalized_content_sha256: entry.normalized_content_sha256 ?? null,
     mutation_provenance: entry.mutation_provenance ?? null,
-    source: sourceEvidence(entry),
+    source: sourceEvidence(entry, scan.metadata.schema_version),
     relevant_signals: relevantSignals(entry, collisions.has(entry.name)),
   })).sort((left, right) => compareStrings(left.entry_path, right.entry_path));
   return sha256Json({
@@ -490,14 +622,27 @@ function eligibility(entry, scan) {
   };
 }
 
-function sourceEvidence(entry) {
-  return {
-    kind: entry.provenance?.kind ?? 'unknown',
+function sourceEvidence(entry, scannerSchema) {
+  const source = normalizedScanProvenance(entry.provenance, {
+    allowMissing: entry.entry_kind === 'broken_symlink',
+    expectedSchema: scannerSchema,
+  });
+  const evidence = {
+    kind: source.kind,
     canonical_target: entry.canonical_dir || null,
-    git_root: entry.provenance?.git_root || null,
-    git_branch: entry.provenance?.git_branch || null,
-    confidence: entry.provenance?.confidence ?? 'none',
+    git_root: source.git_root || null,
+    git_branch: source.git_branch || null,
+    confidence: source.confidence,
   };
+  if (source.format === 'scan-v6') {
+    evidence.source_url = source.source_url || null;
+    evidence.source_provider = source.source_provider;
+    evidence.repository_id = source.repository_id;
+    evidence.source_path = source.source_path;
+    evidence.resolved_revision = source.resolved_revision;
+    evidence.claim_kind = source.claim_kind;
+  }
+  return evidence;
 }
 
 function consumersFor(entry, entries) {
@@ -528,6 +673,7 @@ function candidateFor(entry, scan, scanDigest, collisions) {
   const groups = groupsFor(entry, signals, colliding);
   const disposition = eligibility(entry, scan);
   const distributionConsumers = consumersFor(entry, scan.entries);
+  const source = sourceEvidence(entry, scan.metadata.schema_version);
   const topologyFingerprint = sha256Json({
     name: entry.name ?? basename(entry.entry_path),
     consumers: distributionConsumers,
@@ -550,6 +696,7 @@ function candidateFor(entry, scan, scanDigest, collisions) {
     governance_scope: disposition.governance_scope,
     topology_fingerprint: topologyFingerprint,
     relevant_signals: signals,
+    source,
     mutation_provenance: entry.mutation_provenance ?? null,
     normalized_content_sha256: entry.normalized_content_sha256 ?? null,
     scanner_schema: scan.metadata.schema_version,
@@ -569,7 +716,7 @@ function candidateFor(entry, scan, scanDigest, collisions) {
     keep_reason: null,
     groups,
     primary_group: groups[0],
-    source: sourceEvidence(entry),
+    source,
     distribution_consumers: distributionConsumers,
     evidence,
     uncertainty: uncertaintyFor(entry, disposition.mutation_eligibility),

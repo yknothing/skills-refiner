@@ -6,6 +6,8 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SCAN_SCRIPT="$SCRIPT_DIR/bin/skill-scan.sh"
+COLLECTION_TREE_MODULE="$SCRIPT_DIR/lib/collection-tree.mjs"
+NODE_BIN="${SKILLS_REFINER_NODE_BIN:-node}"
 PASS=0
 FAIL=0
 
@@ -31,7 +33,7 @@ safe_delete_tree() {
     fi
 
     case "$target" in
-        "$tmp_root"/*|/tmp/*|/private/tmp/*|/var/folders/*)
+        "$tmp_root"/*|/tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*)
             find "$target" -depth -mindepth 1 -delete 2>/dev/null || return 1
             rmdir "$target" 2>/dev/null || true
             ;;
@@ -47,6 +49,7 @@ cleanup_sandbox() {
 }
 
 SANDBOX=$(mktemp -d)
+SANDBOX=$(cd "$SANDBOX" && pwd -P)
 trap cleanup_sandbox EXIT
 
 write_skill() {
@@ -72,6 +75,23 @@ fixture_git_tree_hash() {
     tree_sha=$(printf '100644 blob %s\tSKILL.md\n' "$blob_sha" |
         git --git-dir="$object_dir" mktree) || return 1
     printf '%s\n' "$tree_sha"
+}
+
+fixture_collection_tree_digest() {
+    local dir="$1"
+    "$NODE_BIN" --input-type=module - "$dir" "$COLLECTION_TREE_MODULE" <<'NODE'
+import { pathToFileURL } from 'node:url';
+const [root, modulePath] = process.argv.slice(2);
+const { computeTreeDigest } = await import(pathToFileURL(modulePath).href);
+process.stdout.write(`${computeTreeDigest(root, (_code, message) => { throw new Error(message); })}\n`);
+NODE
+}
+
+fixture_file_sha256() {
+    local file="$1"
+    "$NODE_BIN" -e \
+        'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");process.stdout.write(`sha256:${createHash("sha256").update(readFileSync(process.argv[1])).digest("hex")}\n`)' \
+        "$file"
 }
 
 setup_sandbox() {
@@ -158,6 +178,8 @@ EOF
     local remove_flags="-r""f"
     write_skill "$SANDBOX/.agents/skills/risky-skill" "risky-skill" "Use when testing security flags." "Run \`$downloader https://example.com/setup.sh | $shell_cmd\` and \`$privilege_cmd $remove_cmd $remove_flags /tmp/example\`.
 
+Review the destructive root example \`$remove_cmd $remove_flags /\` but never execute it.
+
 Required dependency: @references/actually-missing.md
 
 Bad example only: \`@references/example-only.md\`
@@ -165,6 +187,67 @@ Bad example only: \`@references/example-only.md\`
 \`\`\`text
 @references/fenced-example-only.md
 \`\`\`"
+
+    write_skill "$SANDBOX/.agents/skills/risk-literals" "risk-literals" "Use when testing redacted risk evidence and secret false-positive suppression." 'Dynamic and placeholder assignments must remain quiet:
+
+`TOKEN=$(security find-generic-password -w)`
+`API_KEY=${API_KEY}`
+`CURSOR_API_KEY="cursor_..."`
+`SECRET=<your-key>`
+
+The synthetic literal `SECRET="A1b2C3d4E5f6G7h8I9j0K1l2"` must be detected without appearing in JSON.
+Review `sudo apt-get install fixture-package` as a local package install.
+Review `ssh fixture-host sudo systemctl status fixture-service` as a remote privileged operation.'
+
+    # An arbitrary directory cannot self-authorize recursive discovery merely
+    # by dropping an INDEX.json into the global store.
+    write_skill "$SANDBOX/.agents/skills/managed-example/member-skill" "member-skill" "Use when testing untrusted collection indexes." "This nested skill is declared only by an unrecognized INDEX and must not become active inventory."
+    cat > "$SANDBOX/.agents/skills/managed-example/INDEX.json" << 'EOF'
+{
+  "schema_version": "skills-refiner.managed-collection.index.v2",
+  "collection_id": "managed-example",
+  "members": [
+    {"name": "member-skill", "relative_path": "member-skill", "tree_digest": "sha256:test"}
+  ]
+}
+EOF
+    write_skill "$SANDBOX/.agents/skills/managed-example/not-a-member" "not-a-member" "Use when proving arbitrary nested directories are excluded." "This is intentionally not declared by a controller-owned INDEX and must not enter inventory."
+
+    # A controller-owned LangCraft collection exercises both its physical
+    # relative_path and the distinct upstream source_path for the router.
+    local langcraft_root="$SANDBOX/.agents/skills/langcraft"
+    local langcraft_names=(langcraft philosophical-discourse prose-craft script-craft tech-writing translation)
+    local langcraft_name langcraft_members="[]" langcraft_digest locator_digest
+    for langcraft_name in "${langcraft_names[@]}"; do
+        write_skill "$langcraft_root/$langcraft_name" "$langcraft_name" "Use when testing a validated LangCraft collection member." "This member is declared by the controller-owned collection INDEX and must be scanned only after its deployed tree digest is verified."
+    done
+    write_skill "$langcraft_root/langcraft/docs/not-a-member" "not-a-member" "Use when proving recursive discovery stays bounded." "This nested documentation fixture belongs to the gateway tree but is not itself an indexed collection member."
+    cat > "$langcraft_root/langcraft/langcraft-runtime.json" << 'EOF'
+{"schema_version":"langcraft.runtime.v1","collection_id":"langcraft"}
+EOF
+    locator_digest=$(fixture_file_sha256 "$langcraft_root/langcraft/langcraft-runtime.json") || return 1
+    for langcraft_name in "${langcraft_names[@]}"; do
+        langcraft_digest=$(fixture_collection_tree_digest "$langcraft_root/$langcraft_name") || return 1
+        langcraft_members=$(echo "$langcraft_members" | jq \
+            --arg name "$langcraft_name" --arg digest "$langcraft_digest" \
+            '. + [{name:$name, relative_path:$name, tree_digest:$digest}]')
+    done
+    jq -n --argjson members "$langcraft_members" --arg locator_digest "$locator_digest" '
+      {
+        schema_version:"skills-refiner.managed-collection.index.v2",
+        collection_id:"langcraft",
+        source:{provider:"github", repository_id:"yknothing/langcraft", resolved_revision:"0000000000000000000000000000000000000000", tree_digest:("sha256:" + ("0" * 64))},
+        artifact_digest:("sha256:" + ("1" * 64)),
+        manifest_digest:("sha256:" + ("2" * 64)),
+        members:$members,
+        resources:[],
+        exposure:{type:"gateway", name:"langcraft", locator_digest:$locator_digest},
+        receipt_snapshot_digest:("sha256:" + ("3" * 64)),
+        profile_matrix_digest:("sha256:" + ("4" * 64)),
+        plan_created_at:"2026-07-14T00:00:00.000Z",
+        operation_id:"langcraft-000000000000"
+      }
+    ' > "$langcraft_root/INDEX.json"
 
     mkdir -p "$SANDBOX/.claude/skills"
     ln -s "../../.agents/skills/healthy-skill" "$SANDBOX/.claude/skills/healthy-skill"
@@ -193,6 +276,9 @@ Bad example only: \`@references/example-only.md\`
     ln -s "$SANDBOX/vendor/absolute-linked-skill" "$SANDBOX/.opencode/skills/absolute-linked-skill"
 
     write_skill "$SANDBOX/.codex/skills/codex-only" "codex-only" "Use when testing codex-specific skill detection." "An independently installed codex skill."
+    git -C "$SANDBOX/.codex/skills/codex-only" init -q
+    git -C "$SANDBOX/.codex/skills/codex-only" remote add origin \
+        'ssh://private-user@build.private.corp/internal/codex-only.git?token=private-query-secret#private-fragment-secret'
     mkdir -p "$SANDBOX/.codex/skills/healthy-skill"
     cat > "$SANDBOX/.codex/skills/healthy-skill/SKILL.md" << 'EOF'
 ---
@@ -241,6 +327,18 @@ dependencies:
     - type: mcp
       value: openaiDeveloperDocs
 EOF
+    git -C "$SANDBOX/.codex/skills/healthy-skill" init -q
+    git -C "$SANDBOX/.codex/skills/healthy-skill" remote add origin \
+        'https://scan-user:scan-password@github.com/example/healthy-skill.git?access_token=scan-query-secret#scan-fragment-secret'
+
+    # A byte-identical same-name Skill from another repository remains a
+    # separate qualified entity even though version and content cannot
+    # distinguish it from LangCraft's managed member.
+    mkdir -p "$SANDBOX/.codex/skills/prose-craft"
+    cp "$langcraft_root/prose-craft/SKILL.md" "$SANDBOX/.codex/skills/prose-craft/SKILL.md"
+    git -C "$SANDBOX/.codex/skills/prose-craft" init -q
+    git -C "$SANDBOX/.codex/skills/prose-craft" remote add origin \
+        'deploy-user@github.com:example/prose-craft.git?token=ssh-query-secret#ssh-fragment-secret'
     mkdir -p "$SANDBOX/.gemini/skills"
 
     write_skill "$SANDBOX/workspace/my-project/.agents/skills/project-skill" "project-skill" "Use when this should not appear in global scan." "Project local skill."
@@ -253,8 +351,9 @@ run_tests() {
     echo ""
 
     setup_sandbox
-    local json_output
+    local json_output baseline_scan_rc
     json_output=$(HOME="$SANDBOX" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    baseline_scan_rc=$?
     local report_count
     if [ -d "$SANDBOX/.agents/skills-report" ]; then
         report_count=$(find "$SANDBOX/.agents/skills-report" -name 'scan-*.json' -type f 2>/dev/null | wc -l | tr -d ' ')
@@ -263,7 +362,8 @@ run_tests() {
     fi
 
     echo -e "${BOLD}── Topology ──${NC}"
-    assert_eq "Canonical native count" "10" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
+    assert_eq "Valid managed collection keeps scan successful" "0" "$baseline_scan_rc"
+    assert_eq "Canonical native count includes six validated collection members" "17" "$(echo "$json_output" | jq '.topology[".agents/skills"].native // 0')"
     assert_eq "Claude symlink count" "3" "$(echo "$json_output" | jq '.topology[".claude/skills"].symlinks // 0')"
     assert_eq "Claude native count" "1" "$(echo "$json_output" | jq '.topology[".claude/skills"].native // 0')"
     assert_eq "Cursor symlink count" "1" "$(echo "$json_output" | jq '.topology[".cursor/skills"].symlinks // 0')"
@@ -308,10 +408,27 @@ run_tests() {
     assert_eq "Single-line description length is not pre-truncated" "1030" "$(echo "$json_output" | jq '.skills[] | select(.name == "overlong-description") | .frontmatter.description_length')"
     assert_eq "Block description length is not pre-truncated" "1052" "$(echo "$json_output" | jq '.skills[] | select(.name == "overlong-block-description") | .frontmatter.description_length')"
     assert_eq "Pipe-to-shell flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "pipe_to_shell")] | length')"
-    assert_eq "Dangerous command flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "dangerous_cmd")] | length')"
+    assert_eq "Destructive root command is separately typed" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "destructive_root")] | length')"
+    assert_eq "Privileged commands are separately typed" "2" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "privileged_command")] | length')"
+    assert_eq "Only credential-like literal is flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(.flags[] == "possible_secret")] | length')"
+    assert_eq "Package install subtype is retained" "1" "$(echo "$json_output" | jq '[.skills[] | select(.name == "risk-literals") | .risk_indicators[] | select(.detector_id == "privileged_command" and .subtype == "package_install" and .execution_scope == "local")] | length')"
+    assert_eq "Remote privileged subtype is retained" "1" "$(echo "$json_output" | jq '[.skills[] | select(.name == "risk-literals") | .risk_indicators[] | select(.detector_id == "privileged_command" and .subtype == "remote_operation" and .execution_scope == "remote")] | length')"
+    assert_eq "Risk evidence includes canonical file, line and digest" "true" "$(echo "$json_output" | jq '[.skills[] | .risk_indicators[]?] | all(.canonical_skill_file | startswith("/")) and all(.line > 0) and all(.snippet_sha256 | test("^[0-9a-f]{64}$"))')"
+    assert_eq "Risk JSON never leaks synthetic secret literal" "0" "$(echo "$json_output" | jq '[.. | strings | select(contains("A1b2C3d4E5f6G7h8I9j0K1l2"))] | length')"
     assert_eq "Active missing @ reference is flagged" "1" "$(echo "$json_output" | jq '[.skills[] | select(any(.flags[]?; . == "broken_refs:@references/actually-missing.md"))] | length')"
     assert_eq "Inline/fenced @ examples are not dependencies" "0" "$(echo "$json_output" | jq '[.skills[] | select(any(.flags[]?; contains("example-only.md")))] | length')"
     assert_eq "Project repo skill excluded from global scan" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "project-skill")] | length')"
+    assert_eq "Controller INDEX-declared member is scanned" "1" "$(echo "$json_output" | jq '[.skills[] | select(.name == "langcraft" and .collection_id == "langcraft" and .storage_relative_path == "langcraft/langcraft" and .discovery_depth == 2)] | length')"
+    assert_eq "Collection contract records authoritative source_path" "skills/langcraft-router" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "langcraft" and .collection_id == "langcraft") | .collection_member_contract.source_path')"
+    assert_eq "Collection contract binds relative_path" "langcraft" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "langcraft" and .collection_id == "langcraft") | .collection_member_contract.relative_path')"
+    assert_eq "Collection contract binds observed tree digest" "true" "$(echo "$json_output" | jq '.skills[] | select(.name == "langcraft" and .collection_id == "langcraft") | (.collection_member_contract.tree_digest == .collection_member_contract.observed_tree_digest and (.collection_member_contract.tree_digest | test("^sha256:[0-9a-f]{64}$")))')"
+    assert_eq "Unrecognized INDEX cannot activate a nested member" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "member-skill" and .collection_id == "managed-example")] | length')"
+    assert_eq "Arbitrary nested docs are not promoted" "0" "$(echo "$json_output" | jq '[.skills[] | select(.name == "not-a-member")] | length')"
+    assert_eq "Collection member provenance kind is explicit" "canonical_collection_member" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "langcraft" and .collection_id == "langcraft") | .provenance.kind')"
+    assert_eq "INDEX provenance remains an unverified controller claim" "index_claim:controller_unverified" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "langcraft" and .collection_id == "langcraft") | [.provenance.claim_kind, .provenance.confidence] | join(":")')"
+    assert_eq "INDEX claim does not inherit ambient Git root" "" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "langcraft" and .collection_id == "langcraft") | .provenance.git_root')"
+    assert_eq "INDEX claim does not inherit ambient Git branch" "" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "langcraft" and .collection_id == "langcraft") | .provenance.git_branch')"
+    assert_eq "Valid collection emits no INDEX blocker" "0" "$(echo "$json_output" | jq '.collection_index_blockers | length')"
     assert_eq "BOM/CRLF frontmatter name is observed directly" "bom-crlf-skill" "$(echo "$json_output" | jq -r '.skills[] | select(.dir_name == "bom-crlf-skill") | .frontmatter.name')"
     assert_eq "BOM/CRLF static preflight remains unknown" "unknown" "$(echo "$json_output" | jq -r '.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.status')"
     assert_eq "BOM/CRLF static preflight does not claim loadable" "true" "$(echo "$json_output" | jq '.skills[] | select(.name == "bom-crlf-skill") | .runtime_contract.loadable == null')"
@@ -325,7 +442,7 @@ run_tests() {
     echo -e "${BOLD}── JSON Shape ──${NC}"
     echo "$json_output" | jq . >/dev/null 2>&1
     assert_eq "JSON output is valid" "0" "$?"
-    assert_eq "Scanner schema" "skill-scan.v5" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
+    assert_eq "Scanner schema" "skill-scan.v6" "$(echo "$json_output" | jq -r '.metadata.schema_version')"
     assert_eq "JSON declares static preflight validation mode" "static-preflight" "$(echo "$json_output" | jq -r '.metadata.runtime_validation_mode')"
     assert_eq "JSON has topology key" "true" "$(echo "$json_output" | jq 'has("topology")')"
     assert_eq "JSON has skills key" "true" "$(echo "$json_output" | jq 'has("skills")')"
@@ -343,6 +460,9 @@ run_tests() {
     assert_eq "Receipt evidence binds installed tree" "true" "$(echo "$json_output" | jq '.entries[] | select(.dir_name == "receipt-backed") | (.mutation_provenance.evidence.installed_tree_sha1 | test("^[0-9a-f]{40}$"))')"
     assert_eq "Unproven real directory provenance" "unknown" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .mutation_provenance.kind')"
     assert_eq "JSON has runtime_load_blockers key" "true" "$(echo "$json_output" | jq 'has("runtime_load_blockers")')"
+    assert_eq "JSON has collection_index_blockers key" "true" "$(echo "$json_output" | jq 'has("collection_index_blockers")')"
+    assert_eq "Canonical content cache is active" "enabled" "$(echo "$json_output" | jq -r '.metadata.scan_efficiency.content_cache')"
+    assert_eq "Distributed canonical content is reused" "true" "$(echo "$json_output" | jq '.metadata.scan_efficiency.canonical_content_parses > 0 and .metadata.scan_efficiency.canonical_content_cache_hits > 0')"
     assert_eq "Runtime load blockers are elevated" "2" "$(echo "$json_output" | jq '.runtime_load_blockers | length')"
     assert_eq "JSON-only mode does not write report files" "0" "$report_count"
     echo ""
@@ -473,8 +593,29 @@ EOF
     assert_eq "License excluded from first-class frontmatter" "false" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .frontmatter | has("license")')"
     assert_eq "Extra frontmatter keys preserve license signal only" "1" "$(echo "$json_output" | jq '[.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .extra_frontmatter_keys[] | select(. == "license")] | length')"
     assert_eq "Native agent provenance classified" "native_agent" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .provenance.kind')"
-    assert_eq "Risk indicators are structured" "1" "$(echo "$json_output" | jq '[.skills[] | select(.name == "risky-skill") | .risk_indicators[] | select(.id == "pipe_to_shell")] | length')"
+    assert_eq "Public HTTPS remote is credential and query sanitized" \
+        "https://github.com/example/healthy-skill.git" \
+        "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .provenance.source_url')"
+    assert_eq "Public scp remote drops SSH user and query" \
+        "https://github.com/example/prose-craft.git" \
+        "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "prose-craft") | .provenance.source_url')"
+    assert_eq "Private Git host is not emitted" "" \
+        "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "codex-only") | .provenance.source_url')"
+    assert_eq "Raw Git credentials, private host, query and fragment never enter scan JSON" "0" \
+        "$(echo "$json_output" | jq '[.. | strings | select(
+            contains("scan-user") or contains("scan-password") or contains("scan-query-secret")
+            or contains("scan-fragment-secret") or contains("private-user")
+            or contains("build.private.corp") or contains("private-query-secret")
+            or contains("private-fragment-secret") or contains("deploy-user")
+            or contains("ssh-query-secret") or contains("ssh-fragment-secret"))] | length')"
+    assert_eq "Managed collection provenance binds repository and source path" \
+        "yknothing/langcraft:skills/prose-craft" \
+        "$(echo "$json_output" | jq -r '.skills[] | select(.collection_id == "langcraft" and .name == "prose-craft") | [.provenance.repository_id, .provenance.source_path] | join(":")')"
+    assert_eq "Risk indicators are structured and redacted" "1" "$(echo "$json_output" | jq '[.skills[] | select(.name == "risky-skill") | .risk_indicators[] | select(.id == "pipe_to_shell" and .subtype == "supply_chain_remote_exec" and .redacted_preview == "remote download piped to a shell")] | length')"
     assert_eq "Same-name real dirs reported as collision" "1" "$(echo "$json_output" | jq '[.name_collisions[] | select(.name == "healthy-skill")] | length')"
+    assert_eq "Byte-identical cross-repository same-name entities remain a preserved collision" \
+        "1:0:2:preserve" \
+        "$(echo "$json_output" | jq -r '.name_collisions[] | select(.name == "prose-craft") | [(.distinct_hashes | length), (.distinct_versions | length), (.distinct_repository_ids | length), .disposition] | map(tostring) | join(":")')"
     assert_eq "Claude disable-model-invocation collected" "true" "$(echo "$json_output" | jq -r '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .claude_code.disable_model_invocation')"
     assert_eq "Claude allowed-tools counted" "3" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .claude_code.allowed_tools_count')"
     assert_eq "Claude paths counted" "2" "$(echo "$json_output" | jq '.skills[] | select(.location == ".codex/skills" and .name == "healthy-skill") | .claude_code.paths_count')"
@@ -548,6 +689,86 @@ EOF
     skipped_json=$(HOME="$oversized_home" bash "$SCAN_SCRIPT" --json --skip-provenance-tree 2>/dev/null)
     assert_eq "Skip provenance tree flag remains unknown" "unknown" "$(echo "$skipped_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.kind')"
     assert_eq "Skip provenance tree flag records skip evidence" "provenance_tree_skipped" "$(echo "$skipped_json" | jq -r '.entries[] | select(.dir_name == "receipt-backed") | .mutation_provenance.evidence.kind')"
+    echo ""
+
+    echo -e "${BOLD}── Managed Collection INDEX Fail-Closed ──${NC}"
+    local index_home index_path valid_index invalid_index_json invalid_index_rc index_tmp symlink_home missing_index_home
+    local claim_index_json claim_index_rc claim_revision
+    index_home="$SANDBOX/index-contract-home"
+    mkdir -p "$index_home/.agents/skills"
+    cp -R "$SANDBOX/.agents/skills/langcraft" "$index_home/.agents/skills/langcraft"
+    index_path="$index_home/.agents/skills/langcraft/INDEX.json"
+    valid_index="$SANDBOX/langcraft-valid-index.json"
+    cp "$index_path" "$valid_index"
+    index_tmp="$SANDBOX/index-mutated.json"
+
+    claim_revision="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    jq --arg revision "$claim_revision" '.source.resolved_revision = $revision' "$valid_index" > "$index_tmp"
+    mv "$index_tmp" "$index_path"
+    claim_index_json=$(HOME="$index_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    claim_index_rc=$?
+    assert_eq "Self-consistent INDEX source claim remains scannable" "0" "$claim_index_rc"
+    assert_eq "Self-consistent INDEX revision is not promoted to direct provenance" \
+        "$claim_revision:index_claim:controller_unverified" \
+        "$(echo "$claim_index_json" | jq -r '.skills[] | select(.collection_id == "langcraft") | [.provenance.resolved_revision, .provenance.claim_kind, .provenance.confidence] | join(":")' | sort -u)"
+
+    jq '.schema_version = "skills-refiner.managed-collection.index.v999"' "$valid_index" > "$index_tmp"
+    mv "$index_tmp" "$index_path"
+    invalid_index_json=$(HOME="$index_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    invalid_index_rc=$?
+    assert_eq "Invalid managed INDEX schema exits nonzero" "1" "$invalid_index_rc"
+    assert_eq "Invalid managed INDEX schema is a blocker" "collection_index_contract_invalid" "$(echo "$invalid_index_json" | jq -r '.collection_index_blockers[0].error_code')"
+
+    jq '.collection_id = "loopos"' "$valid_index" > "$index_tmp"
+    mv "$index_tmp" "$index_path"
+    invalid_index_json=$(HOME="$index_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    invalid_index_rc=$?
+    assert_eq "Mismatched managed collection id exits nonzero" "1" "$invalid_index_rc"
+    assert_eq "Mismatched managed collection id blocks enumeration" "0:1" "$(echo "$invalid_index_json" | jq -r '[(.skills | length), (.collection_index_blockers | length)] | map(tostring) | join(":")')"
+
+    jq '.members = []' "$valid_index" > "$index_tmp"
+    mv "$index_tmp" "$index_path"
+    invalid_index_json=$(HOME="$index_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    invalid_index_rc=$?
+    assert_eq "Invalid managed member set exits nonzero" "1" "$invalid_index_rc"
+    assert_eq "Invalid managed member set cannot fall back to recursive scan" "0" "$(echo "$invalid_index_json" | jq '.skills | length')"
+
+    jq '.source.repository_id = "example/untrusted"' "$valid_index" > "$index_tmp"
+    mv "$index_tmp" "$index_path"
+    invalid_index_json=$(HOME="$index_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    invalid_index_rc=$?
+    assert_eq "Untrusted managed source identity exits nonzero" "1" "$invalid_index_rc"
+    assert_eq "Untrusted managed source identity is rejected by controller contract" "collection_index_contract_invalid" "$(echo "$invalid_index_json" | jq -r '.collection_index_blockers[0].error_code')"
+
+    jq '.members[0].relative_path = "../langcraft"' "$valid_index" > "$index_tmp"
+    mv "$index_tmp" "$index_path"
+    invalid_index_json=$(HOME="$index_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    invalid_index_rc=$?
+    assert_eq "Unsafe managed relative_path exits nonzero" "1" "$invalid_index_rc"
+    assert_eq "Unsafe managed relative_path cannot activate an external member" "0" "$(echo "$invalid_index_json" | jq '.skills | length')"
+
+    cp "$valid_index" "$index_path"
+    printf '\npost-index drift\n' >> "$index_home/.agents/skills/langcraft/langcraft/SKILL.md"
+    invalid_index_json=$(HOME="$index_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    invalid_index_rc=$?
+    assert_eq "Managed member tree drift exits nonzero" "1" "$invalid_index_rc"
+    assert_eq "Managed member tree drift has a typed blocker" "collection_index_member_tree_drift" "$(echo "$invalid_index_json" | jq -r '.collection_index_blockers[0].error_code')"
+    assert_eq "Managed member tree drift suppresses every collection member" "0" "$(echo "$invalid_index_json" | jq '.skills | length')"
+
+    symlink_home="$SANDBOX/index-symlink-home"
+    mkdir -p "$symlink_home/.agents/skills"
+    ln -s "$SANDBOX/.agents/skills/langcraft" "$symlink_home/.agents/skills/langcraft"
+    invalid_index_json=$(HOME="$symlink_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    invalid_index_rc=$?
+    assert_eq "Symlinked managed collection root exits nonzero" "1" "$invalid_index_rc"
+    assert_eq "Symlinked managed collection root is fail-closed" "collection_index_root_unsafe" "$(echo "$invalid_index_json" | jq -r '.collection_index_blockers[0].error_code')"
+
+    missing_index_home="$SANDBOX/index-missing-home"
+    mkdir -p "$missing_index_home/.agents/skills/loopos"
+    invalid_index_json=$(HOME="$missing_index_home" bash "$SCAN_SCRIPT" --json 2>/dev/null)
+    invalid_index_rc=$?
+    assert_eq "Missing managed INDEX exits nonzero" "1" "$invalid_index_rc"
+    assert_eq "Missing managed INDEX has a typed blocker" "collection_index_missing" "$(echo "$invalid_index_json" | jq -r '.collection_index_blockers[0].error_code')"
     echo ""
 
     echo -e "${BOLD}── CLI Contract ──${NC}"

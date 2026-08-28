@@ -589,6 +589,37 @@ test('semantic identity rejects missing or malformed evidence instead of hashing
   assert.equal(semanticIdentityHashForEntry(installed), installedHash);
   installed.mutation_provenance.evidence.receipt_file = null;
   assert.throws(() => semanticIdentityHashForEntry(installed), /semantic identity/i);
+
+  const scanV6Entry = structuredClone(original);
+  scanV6Entry.provenance = {
+    ...scanV6Entry.provenance,
+    confidence: 'heuristic',
+    source_provider: null,
+    repository_id: null,
+    source_path: null,
+    resolved_revision: null,
+    claim_kind: null,
+  };
+  assert.match(semanticIdentityHashForEntry(scanV6Entry), /^sha256:[0-9a-f]{64}$/u);
+
+  const indexedScanV6Entry = {
+    ...structuredClone(scanV6Entry),
+    provenance: {
+      ...scanV6Entry.provenance,
+      source_url: 'https://github.com/example/skills.git',
+      source_provider: 'github',
+      repository_id: 'example/skills',
+      source_path: 'skills/source-skill',
+      resolved_revision: 'c'.repeat(40),
+      claim_kind: 'index_claim',
+      git_root: '',
+      git_branch: '',
+      confidence: 'controller_unverified',
+    },
+  };
+  assert.match(semanticIdentityHashForEntry(indexedScanV6Entry), /^sha256:[0-9a-f]{64}$/u);
+  indexedScanV6Entry.provenance.confidence = 'direct';
+  assert.throws(() => semanticIdentityHashForEntry(indexedScanV6Entry), /semantic identity/i);
 }));
 
 test('post-apply scan reconciliation exposes exact conservative Agent truth', () => withSandbox((root) => {
@@ -732,6 +763,124 @@ test('post-apply scan reconciliation exposes exact conservative Agent truth', ()
   });
   assert.equal(mismatched.items[0].status, 'INDETERMINATE');
   assert.equal(mismatched.error_code, 'observation_race');
+}));
+
+test('scan v6 provenance binds semantic, review, and candidate authorization', () => withSandbox((root) => {
+  const asV6 = (scan) => {
+    const result = structuredClone(scan);
+    result.metadata.schema_version = 'skill-scan.v6';
+    result.entries = result.entries.map((entry) => ({
+      ...entry,
+      provenance: {
+        ...entry.provenance,
+        confidence: entry.provenance.confidence === 'direct'
+          ? 'heuristic'
+          : entry.provenance.confidence,
+        source_provider: null,
+        repository_id: null,
+        source_path: null,
+        resolved_revision: null,
+        claim_kind: null,
+      },
+    }));
+    result.skills = result.entries.filter((entry) => entry.entry_kind === 'directory');
+    result.skill_links = result.entries.filter((entry) => entry.entry_kind === 'symlink');
+    result.broken_symlinks = result.entries.filter((entry) => entry.entry_kind === 'broken_symlink');
+    return result;
+  };
+  const scan = asV6(scanFixture(root));
+  const entry = scan.entries[1];
+  entry.provenance = {
+    ...entry.provenance,
+    source_url: 'https://github.com/example/skills.git',
+    source_provider: 'git',
+    repository_id: 'github.com/example/skills',
+    source_path: 'skills/source-skill',
+    confidence: 'direct',
+  };
+  const semanticBaseline = semanticIdentityHashForEntry(entry);
+  const reviewBaseline = compileReview(scan);
+  const candidateBaseline = reviewBaseline.candidates.find(({ entry_path: path }) => path === entry.entry_path);
+
+  const changedScan = structuredClone(scan);
+  const changedEntry = changedScan.entries.find(({ entry_path: path }) => path === entry.entry_path);
+  changedEntry.provenance.source_url = 'https://github.com/example/other-skills.git';
+  changedEntry.provenance.repository_id = 'github.com/example/other-skills';
+  assert.notEqual(semanticIdentityHashForEntry(changedEntry), semanticBaseline);
+  const changedReview = compileReview(changedScan);
+  const changedCandidate = changedReview.candidates.find(({ entry_path: path }) => path === entry.entry_path);
+  assert.notEqual(changedReview.review_fingerprint, reviewBaseline.review_fingerprint);
+  assert.notEqual(changedCandidate.candidate_fingerprint, candidateBaseline.candidate_fingerprint);
+
+  const mismatchedRepository = structuredClone(scan);
+  mismatchedRepository.entries.find(({ entry_path: path }) => path === entry.entry_path)
+    .provenance.repository_id = 'github.com/example/other-skills';
+  assert.throws(() => compileReview(mismatchedRepository), /semantic identity/i);
+
+  const credentialUrl = structuredClone(scan);
+  credentialUrl.entries.find(({ entry_path: path }) => path === entry.entry_path)
+    .provenance.source_url = 'https://user:SECRET_TOKEN@github.com/example/skills.git';
+  assert.throws(() => compileReview(credentialUrl), /semantic identity/i);
+
+  const providerlessUrl = structuredClone(scan);
+  const providerlessEntry = providerlessUrl.entries.find(({ entry_path: path }) => path === entry.entry_path);
+  providerlessEntry.provenance.source_provider = null;
+  providerlessEntry.provenance.repository_id = null;
+  assert.throws(() => compileReview(providerlessUrl), /semantic identity/i);
+
+  const falseDirect = structuredClone(scan);
+  const falseDirectEntry = falseDirect.entries.find(({ entry_path: path }) => path === entry.entry_path);
+  falseDirectEntry.provenance.source_url = '';
+  falseDirectEntry.provenance.source_provider = null;
+  falseDirectEntry.provenance.repository_id = null;
+  falseDirectEntry.provenance.source_path = null;
+  assert.throws(() => compileReview(falseDirect), /semantic identity/i);
+
+  const missingGitRoot = structuredClone(scan);
+  missingGitRoot.entries.find(({ entry_path: path }) => path === entry.entry_path)
+    .provenance.git_root = '';
+  assert.throws(() => compileReview(missingGitRoot), /semantic identity/i);
+
+  const changedPath = structuredClone(entry);
+  changedPath.provenance.source_path = 'skills/renamed-source-skill';
+  assert.notEqual(semanticIdentityHashForEntry(changedPath), semanticBaseline);
+
+  const indexed = structuredClone(entry);
+  indexed.provenance = {
+    ...indexed.provenance,
+    source_url: 'https://github.com/example/skills.git',
+    source_provider: 'github',
+    repository_id: 'example/skills',
+    source_path: 'skills/source-skill',
+    resolved_revision: 'd'.repeat(40),
+    claim_kind: 'index_claim',
+    git_root: '',
+    git_branch: '',
+    confidence: 'controller_unverified',
+  };
+  const indexedBaseline = semanticIdentityHashForEntry(indexed);
+  indexed.provenance.resolved_revision = 'e'.repeat(40);
+  assert.notEqual(semanticIdentityHashForEntry(indexed), indexedBaseline);
+  indexed.provenance.resolved_revision = 'not-a-revision';
+  assert.throws(() => semanticIdentityHashForEntry(indexed), /semantic identity/i);
+
+  const downgradedV6 = structuredClone(scan);
+  const downgradedEntry = downgradedV6.entries.find(({ entry_path: path }) => path === entry.entry_path);
+  for (const key of ['source_provider', 'repository_id', 'source_path', 'resolved_revision', 'claim_kind']) {
+    delete downgradedEntry.provenance[key];
+  }
+  assert.throws(() => compileReview(downgradedV6), /semantic identity/i);
+
+  const upgradedV5 = scanFixture(root);
+  upgradedV5.entries[1].provenance = {
+    ...upgradedV5.entries[1].provenance,
+    source_provider: null,
+    repository_id: null,
+    source_path: null,
+    resolved_revision: null,
+    claim_kind: null,
+  };
+  assert.throws(() => compileReview(upgradedV5), /semantic identity/i);
 }));
 
 test('pre-apply baseline eligibility excludes prior committed and ambiguous retry occupants', () => {

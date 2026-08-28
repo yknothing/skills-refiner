@@ -623,14 +623,15 @@ export function validatePostScanReport(
       || !Array.isArray(report.items) || report.items.length === 0) {
     fail(`post-scan report schema mismatch: expected ${SCHEMAS.postScan}`);
   }
-  if ((report.scanner_schema !== null && report.scanner_schema !== 'skill-scan.v5')
+  const supportedScanner = ['skill-scan.v5', 'skill-scan.v6'].includes(report.scanner_schema);
+  if ((report.scanner_schema !== null && !supportedScanner)
       || (report.error_code !== null && !POST_SCAN_ERROR_CODES.has(report.error_code))) {
     fail('post-scan observation metadata is invalid');
   }
   if ((report.observation_status === 'COMPLETE'
-      && (report.scanner_schema !== 'skill-scan.v5' || report.error_code !== null))
+      && (!supportedScanner || report.error_code !== null))
     || (report.observation_status === 'PARTIAL'
-      && (report.scanner_schema !== 'skill-scan.v5' || report.error_code === null))
+      && (!supportedScanner || report.error_code === null))
     || (report.observation_status === 'UNAVAILABLE'
       && (report.scanner_schema !== null || report.error_code === null))) {
     fail('post-scan observation status contradicts scanner or error truth');

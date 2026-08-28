@@ -307,10 +307,10 @@ function readJsonFile(path) {
 
 function validateScan(scan) {
   if (!scan || typeof scan !== 'object' || Array.isArray(scan)) {
-    invalid('invalid_schema', '[ERROR] Expected a skill-scan.v5 document.');
+    invalid('invalid_schema', '[ERROR] Expected a supported skill-scan.v5/v6 document.');
   }
-  if (scan.metadata?.schema_version !== 'skill-scan.v5' || !Array.isArray(scan.entries)) {
-    invalid('invalid_schema', '[ERROR] Expected a skill-scan.v5 document.');
+  if (!['skill-scan.v5', 'skill-scan.v6'].includes(scan.metadata?.schema_version) || !Array.isArray(scan.entries)) {
+    invalid('invalid_schema', '[ERROR] Expected a supported skill-scan.v5/v6 document.');
   }
   return scan;
 }
@@ -811,7 +811,9 @@ function semanticBaselines(scan, plan, eligibleTransactions) {
     try {
       hashes.set(
         item.transaction_id,
-        semanticIdentityHashForEntry(matches[0]),
+        semanticIdentityHashForEntry(matches[0], {
+          scannerSchema: scan.metadata.schema_version,
+        }),
       );
     } catch {
       unavailable.add(item.transaction_id);

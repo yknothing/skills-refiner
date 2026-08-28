@@ -1018,6 +1018,7 @@ test('core plan compilation receives and validates full native execution identit
       mutation_provenance: installedCandidateValue.evidence.mutation_provenance,
       provenance: {
         kind: 'canonical_global',
+        source_url: '',
         git_root: '',
         git_branch: '',
         confidence: 'direct',
