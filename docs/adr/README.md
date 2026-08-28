@@ -13,6 +13,7 @@
 | [0005](0005-prodcraft-in-root-physical-collection-and-projection.md) | `.agents/skills/prodcraft` 物理 Collection 与 `pc-*` 投影 | Accepted for filesystem scope | 2026-07-20 |
 | [0006](0006-declarative-managed-collections-and-reconciliation-catalog.md) | 声明式 Managed Collections 与可调和管理目录 | Accepted with limitations | 2026-07-20 |
 | [0007](0007-skills-panorama.md) | 技能全景（skills-panorama） | Accepted with limitations | 2026-07-22 |
+| [0008](0008-runtime-aware-global-skills-management.md) | 运行时感知的全局 Agent Skills 管理 | Proposed | 2026-08-28 |
 
 ## 产物
 

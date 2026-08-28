@@ -260,6 +260,58 @@ TTY 提供 **Keep / Later / Inspect / Retire**。空输入等于 Later，因此�
 payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent 也可能保留
 缓存。系统不会自动再次隔离 rehydrated 条目，必须先 review 新证据。
 
+### 运行时暴露面与证据
+
+物理 collection 解决来源与升级组织问题，但仅靠目录嵌套不会降低 Agent catalog
+或 context 成本。默认 runtime profile 向 Codex 与 Claude 暴露 12 个批准的 Better
+Skills 成员，以及 `pc-prodcraft`、`loopos`、`langcraft` 三个 gateway。Cursor 在
+缺少可信原生 catalog/profile probe 前保持 observe-only。Profile 不会覆盖同名的
+user-owned 条目。
+
+使用私有目录，先审核精确 plan，再确认其 hash：
+
+```bash
+SESSION_DIR=$(mktemp -d /tmp/skills-refiner-runtime.XXXXXX) || exit 1
+chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
+PROFILE_PLAN="$SESSION_DIR/profile-plan.json"
+CODEX_EVIDENCE="$SESSION_DIR/codex-evidence.json"
+
+skills-refiner runtime profile status --json
+skills-refiner runtime profile plan --output "$PROFILE_PLAN" --json
+skills-refiner runtime profile apply \
+  --plan "$PROFILE_PLAN" --confirm 'sha256:...' --json
+
+# 必须从 apply 后状态启动；仅 catalog 证据会有意返回退出码 10。
+skills-refiner runtime probe --adapter codex --output "$CODEX_EVIDENCE" --json
+skills-refiner runtime record \
+  --evidence "$CODEX_EVIDENCE" --confirm 'sha256:...' --json
+skills-refiner runtime status --json
+skills-refiner runtime profile status --json
+```
+
+`profile apply` 的确认值必须是精确 `plan_hash`；`runtime record` 的确认值必须是
+精确 `evidence_id`。证据绑定 immutable upstream identity、active controller
+generation、实际 collection bytes、runtime config、host/executable identity 与原生
+probe 派生事实；不保存 raw prompt 或 transcript。`FILESYSTEM_READY`、
+`DEPLOYMENT_READY`、`CATALOG_ONLY` 与 `QUALIFIED` 是刻意分离的状态。缺少 body
+access 或 gateway route 证据时必须保留 `UNVERIFIED`；成功落盘 evidence 也不会把
+catalog-only 提升为 runtime qualification。因此，`runtime record` 在成功返回但仍
+不完整/未资格化的 `RECORDED` 结果上返回退出码 `10`；这不表示持久化失败。
+
+可逆 deployment 变更使用精确 operation id：
+
+```bash
+skills-refiner runtime profile undo 'runtime-profile-............' \
+  --confirm 'runtime-profile-............' --json
+skills-refiner runtime profile recover 'runtime-profile-............' \
+  --confirm 'runtime-profile-............' --json
+rm -f -- "$PROFILE_PLAN" "$CODEX_EVIDENCE"
+rmdir -- "$SESSION_DIR"
+```
+
+权威事实分层、transaction 边界、同名保留规则与 runtime truth matrix 见
+[ADR-0008](docs/adr/0008-runtime-aware-global-skills-management.md)。
+
 机器可读命令在 stdout 只输出一个 JSON 文档，诊断写入 stderr。退出码边界如下：
 
 | 退出码 | 含义 |
@@ -267,12 +319,12 @@ payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent
 | `0` | 成功或已验证的幂等结果 |
 | `2` | 输入无效/不完整、需要或不匹配确认、或安全取消 |
 | `3` | runtime、平台或 mutation adapter 不支持；零 mutation |
-| `10` | 安全检查阻断或检测到 drift |
+| `10` | 安全检查阻断、检测到 drift，或运行时结果真实地不完整/未资格化 |
 | `20` | 需要恢复，或无法证明 mutation outcome |
 | `21` | restore/transaction 冲突 |
 | `130` | 交互被中断 |
 
-版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v5` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v5 保留 v4 的保守运行时语义，并为后续处置计划新增精确 active-entry identity、统一兼容视图与已绑定内容的 GitHub 安装凭证证据。`entries` 的顺序契约是 `skills + skill_links + broken_symlinks`。
+版本说明：当前产品线是 `skills-refiner 2.0`。`skills-refiner.doctor.v2`、`skill-dashboard.identity.v2`、`skill-scan.v6` 等字段是 JSON schema / 事件协议版本，不是产品发布号。Doctor v2 新增选择性安装场景使用的显式 `unavailable` step 状态；Scan v6 保留 v5 的保守运行时语义与 `skills + skill_links + broken_symlinks` 顺序契约，并新增有界 `INDEX.json` collection member inventory、identity-bound canonical-content cache 与经过脱敏、内容绑定的风险证据。仅来自 INDEX 的 repository/revision 仍是未验证声明。Cleanup 同时接受历史 v5 与当前 v6 evidence。
 
 受管第三方 collection 的版本属于另一命名空间：skills-refiner 只报告 approved immutable upstream artifact 中严格提取的值及其 source path/digest，或明确返回 `not_declared`；不会用这些本地 product/schema 版本推导第三方 release version。
 
@@ -289,8 +341,9 @@ payload 仍处于 quarantine 时重新填充 active path，正在运行的 Agent
 - `skills/skills-panorama/bin/skill-panorama.sh` — 编排 scan/catalog → `latest.json` / `latest.md`
 - `skills/skill-hygiene/SKILL.md` — AI 驱动的评估框架
 - `skills/skill-hygiene/bin/skill-scan.sh` — 拓扑与事实收集
-- `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap 与 cleanup CLI launcher
+- `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap 与 cleanup/collection/runtime CLI launcher
 - `skills/skill-hygiene/lib/cleanup-*.mjs` — review、contract、planning、平台与 transaction 逻辑
+- `skills/skill-hygiene/lib/runtime-*.mjs` — runtime policy、profile transaction、原生 probe 与 evidence binding
 - `skills/skill-hygiene/native/cleanup-macos-helper.c` — fail-closed macOS 文件系统 mutation helper
 - `skills/skill-hygiene/tests/test-scan.sh` 与 `test-cleanup-*` — scan 与 cleanup gates
 - `skills/skill-debug/SKILL.md` — 三层可观测性
@@ -343,6 +396,9 @@ SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
 
 # 扫描已安装 skills
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
+
+# 仅在接受 provenance tree 证据被明确截断时使用的快速 inventory
+bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --skip-provenance-tree
 
 # 本机交互式 review；空输入为 Later，不会默认选中退役
 skills-refiner cleanup

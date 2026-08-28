@@ -271,6 +271,63 @@ path while the original payload remains quarantined, and a running Agent may
 retain cached state. Rehydrated entries are never automatically quarantined
 again—review the new evidence first.
 
+### Runtime-aware exposure and evidence
+
+Physical collections organize source-owned Skills, but nesting alone does not
+reduce an Agent's catalog or context cost. The default runtime profile exposes
+the 12 approved Better Skills members plus the `pc-prodcraft`, `loopos`, and
+`langcraft` gateways to Codex and Claude. Cursor remains observe-only until a
+native catalog/profile probe is available. The profile never rewrites a
+same-name user-owned entry.
+
+Use a private directory, inspect the exact plan, and confirm its hash:
+
+```bash
+SESSION_DIR=$(mktemp -d /tmp/skills-refiner-runtime.XXXXXX) || exit 1
+chmod 700 "$SESSION_DIR" || { rmdir -- "$SESSION_DIR"; exit 1; }
+PROFILE_PLAN="$SESSION_DIR/profile-plan.json"
+CODEX_EVIDENCE="$SESSION_DIR/codex-evidence.json"
+
+skills-refiner runtime profile status --json
+skills-refiner runtime profile plan --output "$PROFILE_PLAN" --json
+skills-refiner runtime profile apply \
+  --plan "$PROFILE_PLAN" --confirm 'sha256:...' --json
+
+# Start from the post-apply state. A catalog-only observation intentionally exits 10.
+skills-refiner runtime probe --adapter codex --output "$CODEX_EVIDENCE" --json
+skills-refiner runtime record \
+  --evidence "$CODEX_EVIDENCE" --confirm 'sha256:...' --json
+skills-refiner runtime status --json
+skills-refiner runtime profile status --json
+```
+
+The confirmation for `profile apply` is the exact `plan_hash`; the confirmation
+for `runtime record` is the exact `evidence_id`. Evidence binds immutable
+upstream identity, active controller generation, actual collection bytes,
+runtime configuration, host and executable identity, and derived native probe
+facts. It never stores raw prompts or transcripts. `FILESYSTEM_READY`,
+`DEPLOYMENT_READY`, `CATALOG_ONLY`, and `QUALIFIED` are deliberately different
+states. Missing body-access or gateway-route proof remains `UNVERIFIED`; a
+successful evidence write does not turn catalog-only evidence into runtime
+qualification. Accordingly, `runtime record` returns exit `10` after a
+successful `RECORDED` result that is still incomplete/unqualified; this is not
+a persistence failure.
+
+Use the exact operation id for reversible deployment changes:
+
+```bash
+skills-refiner runtime profile undo 'runtime-profile-............' \
+  --confirm 'runtime-profile-............' --json
+skills-refiner runtime profile recover 'runtime-profile-............' \
+  --confirm 'runtime-profile-............' --json
+rm -f -- "$PROFILE_PLAN" "$CODEX_EVIDENCE"
+rmdir -- "$SESSION_DIR"
+```
+
+See [ADR-0008](docs/adr/0008-runtime-aware-global-skills-management.md) for the
+authority model, transaction boundary, same-name preservation rule, and runtime
+truth matrix.
+
 Machine-readable commands write one JSON document to stdout and diagnostics to
 stderr. Exit codes are stable at this boundary:
 
@@ -279,12 +336,12 @@ stderr. Exit codes are stable at this boundary:
 | `0` | Success or a verified idempotent result |
 | `2` | Invalid/incomplete input, confirmation required/mismatched, or safe cancellation |
 | `3` | Unsupported runtime, platform, or mutation adapter; no mutation |
-| `10` | Blocked safety check or detected drift |
+| `10` | Blocked safety check, detected drift, or an honestly incomplete/unqualified runtime result |
 | `20` | Recovery required or mutation outcome cannot be proven |
 | `21` | Restore/transaction conflict |
 | `130` | Interactive interruption |
 
-Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, and `skill-scan.v5` are schema versions, not product release numbers. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v5 preserves the v4 conservative runtime semantics while adding exact active-entry identity, a unified compatibility view, and content-bound GitHub installer-receipt evidence for later disposition planning. Its `entries` order is the documented concatenation `skills + skill_links + broken_symlinks`.
+Version note: the current product line is `skills-refiner 2.0`. JSON fields such as `skills-refiner.doctor.v2`, `skill-dashboard.identity.v2`, and `skill-scan.v6` are schema versions, not product release numbers. Doctor v2 adds the explicit `unavailable` step status used by selective installs. Scan v6 preserves the v5 conservative runtime semantics and compatibility order `skills + skill_links + broken_symlinks`, while adding bounded `INDEX.json` collection-member inventory, identity-bound canonical-content caching, and redacted, content-bound risk evidence. INDEX-only repository/revision values remain unverified claims. Cleanup accepts historical v5 evidence and current v6 evidence.
 
 Managed third-party collection versions are a separate namespace: skills-refiner reports only values extracted from an approved immutable upstream artifact, together with source path/digest, or `not_declared`. It never derives a third-party release version from these local schema/product numbers.
 
@@ -301,8 +358,9 @@ Managed third-party collection versions are a separate namespace: skills-refiner
 - `skills/skills-panorama/bin/skill-panorama.sh` — scan/catalog orchestration → `latest.json` / `latest.md`
 - `skills/skill-hygiene/SKILL.md` — AI-driven skill evaluation framework
 - `skills/skill-hygiene/bin/skill-scan.sh` — topology and fact collector
-- `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap and cleanup CLI launcher
+- `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap and cleanup/collection/runtime CLI launcher
 - `skills/skill-hygiene/lib/cleanup-*.mjs` — review, contract, planning, platform, and transaction logic
+- `skills/skill-hygiene/lib/runtime-*.mjs` — runtime policy, profile transaction, native probe, and evidence binding
 - `skills/skill-hygiene/native/cleanup-macos-helper.c` — fail-closed macOS filesystem mutation helper
 - `skills/skill-hygiene/tests/test-scan.sh` and `test-cleanup-*` — scan and cleanup gates
 - `skills/skill-debug/SKILL.md` — three-layer observability
@@ -351,6 +409,9 @@ bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 
 # Scan installed skills for health issues
 bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
+
+# Optional fast inventory only; provenance tree evidence is deliberately truncated
+bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh --skip-provenance-tree
 
 # Guided local review; blank keeps retirement unselected (Later)
 skills-refiner cleanup
