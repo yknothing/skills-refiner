@@ -14,6 +14,7 @@
 | [0006](0006-declarative-managed-collections-and-reconciliation-catalog.md) | 声明式 Managed Collections 与可调和管理目录 | Accepted with limitations | 2026-07-20 |
 | [0007](0007-skills-panorama.md) | 技能全景（skills-panorama） | Accepted with limitations | 2026-07-22 |
 | [0008](0008-runtime-aware-global-skills-management.md) | 运行时感知的全局 Agent Skills 管理 | Proposed — Owner decision required | 2026-08-28 |
+| [0009](0009-conservative-skill-evolution.md) | Skill 审慎演进架构优化方案 | Proposed | 2026-09-08 |
 
 ## 产物
 
