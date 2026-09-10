@@ -6,6 +6,10 @@
 skills/
 ├── skills-refiner/       # Design-level audit skill
 ├── skills-appreciation/  # Teaching-grade interpretation skill
+├── skills-panorama/      # Read-only topology overview and triage
+│   ├── bin/skill-panorama.sh
+│   ├── lib/
+│   └── tests/
 ├── skill-hygiene/        # Installed skill evaluation
 │   ├── bin/skill-scan.sh
 │   ├── bin/skills-refiner # Node 24 cleanup CLI bootstrap
@@ -26,7 +30,7 @@ skills/
         ├── test-install-layout.sh
         ├── test-platform-contract.sh
         └── test-observability-regressions.sh
-examples/                 # Usage examples for all four skills
+examples/                 # Usage examples for all five skills
 evals/                    # Evaluation rubrics and cases
 ```
 
@@ -96,6 +100,22 @@ node --test skills/skill-hygiene/tests/test-cleanup-contract.mjs
 node --test skills/skill-hygiene/tests/test-cleanup-core.mjs
 NODE24_BIN="$(command -v node)" bash skills/skill-hygiene/tests/test-cleanup-cli.sh
 
+# Portable collection, source attestation, and runtime contracts (Node 24)
+node --test skills/skill-hygiene/tests/test-collection-contract.mjs \
+  skills/skill-hygiene/tests/test-git-source-attestation.mjs \
+  skills/skill-hygiene/tests/test-runtime-evidence.mjs \
+  skills/skill-hygiene/tests/test-runtime-cli.mjs
+
+# macOS-only collection and runtime profile transactions
+node --test skills/skill-hygiene/tests/test-collection-cli.mjs \
+  skills/skill-hygiene/tests/test-managed-collection.mjs \
+  skills/skill-hygiene/tests/test-prodcraft-collection.mjs \
+  skills/skill-hygiene/tests/test-runtime-profile.mjs
+
+# Panorama interpretation and real CLI contracts
+node --test skills/skills-panorama/tests/test-panorama-gaps.mjs
+SKILLS_REFINER_NODE_BIN="$(command -v node)" bash skills/skills-panorama/tests/test-panorama-cli.sh
+
 # macOS-only mutation, recovery, and native-helper gates
 node --test skills/skill-hygiene/tests/test-cleanup-macos.mjs
 node --test skills/skill-hygiene/tests/test-cleanup-transaction.mjs
@@ -109,6 +129,12 @@ or adapter being asserted. macOS fault-injection and installed-layout mutation
 tests are release gates, not optional local probes. On Ubuntu, assert the exact
 unsupported JSON/exit `3`/zero-mutation boundary. Windows remains a bounded
 read-only Git Bash gate.
+
+The macOS CI job invokes all 23 current test files. Ubuntu runs the portable
+collection, source-attestation, runtime-evidence/CLI and panorama suites;
+collection transactions and runtime profile lifecycle tests run on macOS because
+they use the native helper and macOS filesystem tools. A portable pass does not
+certify macOS mutation.
 
 The `evals/` directory contains human/model review anchors, not an automated release gate. Add an explicit runner before treating evals as required CI.
 

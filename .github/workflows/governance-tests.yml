@@ -68,6 +68,26 @@ jobs:
       - name: Verify selective installed layout
         run: NODE24_BIN="$(command -v node)" bash skills/skill-debug/tests/test-install-layout.sh
 
+      - name: Run portable collection and runtime contracts
+        run: |
+          node --test skills/skill-hygiene/tests/test-collection-contract.mjs \
+            skills/skill-hygiene/tests/test-git-source-attestation.mjs \
+            skills/skill-hygiene/tests/test-runtime-evidence.mjs \
+            skills/skill-hygiene/tests/test-runtime-cli.mjs
+
+      - name: Run macOS collection and runtime profile transactions
+        if: runner.os == 'macOS'
+        run: |
+          node --test skills/skill-hygiene/tests/test-collection-cli.mjs \
+            skills/skill-hygiene/tests/test-managed-collection.mjs \
+            skills/skill-hygiene/tests/test-prodcraft-collection.mjs \
+            skills/skill-hygiene/tests/test-runtime-profile.mjs
+
+      - name: Run panorama contracts and CLI
+        run: |
+          node --test skills/skills-panorama/tests/test-panorama-gaps.mjs
+          SKILLS_REFINER_NODE_BIN="$(command -v node)" bash skills/skills-panorama/tests/test-panorama-cli.sh
+
       - name: Run macOS cleanup mutation and adapter tests
         if: runner.os == 'macOS'
         run: |
