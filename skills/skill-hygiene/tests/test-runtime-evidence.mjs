@@ -5,7 +5,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import { computeTreeDigest } from '../lib/collection-tree.mjs';
 import { buildCollectionPlan } from '../lib/collection-contract.mjs';
@@ -20,6 +20,27 @@ import {
   resolveRuntimeExecutable, runRuntimeExecutable, runtimeEntityId, sha256, validateRuntimeEvidence,
 } from '../lib/runtime-evidence.mjs';
 import { validateCodexCandidate } from '../lib/runtime-profile.mjs';
+
+// Keep native CLI dependencies local to this test process. The evidence code,
+// executable identity checks and filesystem operations remain the real SUT.
+const originalPath = process.env.PATH;
+let runtimeBinRoot;
+test.before(() => {
+  runtimeBinRoot = mkdtempSync(join(tmpdir(), 'skills-runtime-cli-fixture-'));
+  for (const [command, version] of [
+    ['codex', 'codex-cli 1.0.0'],
+    ['claude', '2.1.250 (Claude Code)'],
+    ['cursor-agent', 'cursor-fixture 1.0.0'],
+  ]) {
+    writeFileSync(join(runtimeBinRoot, command), `#!/bin/sh\nprintf '%s\\n' '${version}'\n`, { mode: 0o700 });
+  }
+  process.env.PATH = `${runtimeBinRoot}${delimiter}${originalPath ?? ''}`;
+});
+test.after(() => {
+  if (originalPath === undefined) delete process.env.PATH;
+  else process.env.PATH = originalPath;
+  if (runtimeBinRoot) rmSync(runtimeBinRoot, { recursive: true, force: true });
+});
 
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const MEMBERS = {
