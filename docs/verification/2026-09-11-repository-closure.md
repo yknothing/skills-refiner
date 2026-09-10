@@ -11,7 +11,7 @@ refinements are included; unrelated July 23 artifacts remain outside this change
 
 | Area | Change and preserved behavior |
 |---|---|
-| CI | All 23 existing test files are now referenced. Portable collection/source/runtime and panorama checks run on macOS and Ubuntu. Native collection transactions and runtime profile lifecycle run on macOS. Windows retains its bounded Git Bash contract. |
+| CI | All 23 existing test files are now referenced. Portable collection/source/runtime CLI and panorama checks run on macOS and Ubuntu. Native collection transactions, runtime evidence recording, and runtime profile lifecycle run on macOS. Windows retains its bounded Git Bash contract. |
 | Hygiene | Generated and hand-authored guidance use the same evidence standard. Length, age and low observed use do not justify removal. The entry shrank from 564 to 305 lines by moving collection and runtime procedures into two reachable references. |
 | Operational references | All 6 collection Bash blocks and 2 runtime Bash blocks were preserved. Exact source/plan/operation identities, collisions, platform limits and recovery requirements remain. The runtime reference explicitly establishes its Node and launcher prerequisites. |
 | Panorama | Existing authorization for read-only evaluation carries into hygiene. The menu is conditional; actual mutation retains its own exact-plan and confirmation requirements. |
@@ -69,7 +69,10 @@ general quality improvement, causality or cost reduction is claimed.
   fixtures and restores PATH/temporary files afterward. Executable identity,
   evidence validation, recording and status remain real SUT operations. All 40
   runtime-evidence tests passed with `PATH=/usr/bin:/bin`, without host AI CLIs.
-  Remote outcomes can be inspected in the
+  The next Linux run exposed a separate CI grouping mistake: 11 recording tests
+  invoke the macOS helper for lock/pointer mutation. The runtime-evidence suite
+  now runs in the macOS group with all assertions intact; portable runtime CLI
+  checks remain on both Unix runners. Remote outcomes can be inspected in the
   [governance workflow](https://github.com/yknothing/skills-refiner/actions/workflows/governance-tests.yml);
   local success is not presented as remote success.
 

@@ -103,13 +103,13 @@ NODE24_BIN="$(command -v node)" bash skills/skill-hygiene/tests/test-cleanup-cli
 # Portable collection, source attestation, and runtime contracts (Node 24)
 node --test skills/skill-hygiene/tests/test-collection-contract.mjs \
   skills/skill-hygiene/tests/test-git-source-attestation.mjs \
-  skills/skill-hygiene/tests/test-runtime-evidence.mjs \
   skills/skill-hygiene/tests/test-runtime-cli.mjs
 
-# macOS-only collection and runtime profile transactions
+# macOS-only collection, runtime evidence, and profile transactions
 node --test skills/skill-hygiene/tests/test-collection-cli.mjs \
   skills/skill-hygiene/tests/test-managed-collection.mjs \
   skills/skill-hygiene/tests/test-prodcraft-collection.mjs \
+  skills/skill-hygiene/tests/test-runtime-evidence.mjs \
   skills/skill-hygiene/tests/test-runtime-profile.mjs
 
 # Panorama interpretation and real CLI contracts
@@ -131,10 +131,10 @@ unsupported JSON/exit `3`/zero-mutation boundary. Windows remains a bounded
 read-only Git Bash gate.
 
 The macOS CI job invokes all 23 current test files. Ubuntu runs the portable
-collection, source-attestation, runtime-evidence/CLI and panorama suites;
-collection transactions and runtime profile lifecycle tests run on macOS because
-they use the native helper and macOS filesystem tools. A portable pass does not
-certify macOS mutation.
+collection, source-attestation, runtime CLI and panorama suites. Collection
+transactions, runtime evidence (including record-lock/pointer mutation), and
+runtime profile lifecycle tests run on macOS because they use the native helper
+and macOS filesystem tools. A portable pass does not certify macOS mutation.
 
 The `evals/` directory contains human/model review anchors, not an automated release gate. Add an explicit runner before treating evals as required CI.
 

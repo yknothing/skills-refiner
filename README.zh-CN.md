@@ -469,7 +469,7 @@ Cases 08–09 覆盖与 skill-creator 协作场景。
 
 治理类 skill（`skill-hygiene`、`skill-debug`）通过隔离沙箱集成测试验证。可移植的 scan/observability 与 cleanup contract/CLI gates 在 macOS、Ubuntu 运行；真实 cleanup mutation、native-helper 故障注入，以及成功 transaction 的 status/undo 只在 macOS 运行。`test-install-layout.sh` 验证选择性安装包可在 checkout 外运行且不会改动 source Git。`windows-latest` 仍是有界的 Git Bash 只读/trace 契约，不认证 cleanup mutation。
 
-CI 同时覆盖 collection 契约、来源证明、runtime evidence/CLI 和 panorama 的双 Unix 平台测试；collection 事务与 runtime profile 生命周期在 macOS 验证。完整命令见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+CI 同时覆盖 collection 契约、来源证明、runtime CLI 和 panorama 的双 Unix 平台测试；collection 事务、runtime evidence recording 与 runtime profile 生命周期在 macOS 验证。完整命令见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 贡献
 

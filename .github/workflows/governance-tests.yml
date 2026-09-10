@@ -72,15 +72,15 @@ jobs:
         run: |
           node --test skills/skill-hygiene/tests/test-collection-contract.mjs \
             skills/skill-hygiene/tests/test-git-source-attestation.mjs \
-            skills/skill-hygiene/tests/test-runtime-evidence.mjs \
             skills/skill-hygiene/tests/test-runtime-cli.mjs
 
-      - name: Run macOS collection and runtime profile transactions
+      - name: Run macOS collection, runtime evidence, and profile transactions
         if: runner.os == 'macOS'
         run: |
           node --test skills/skill-hygiene/tests/test-collection-cli.mjs \
             skills/skill-hygiene/tests/test-managed-collection.mjs \
             skills/skill-hygiene/tests/test-prodcraft-collection.mjs \
+            skills/skill-hygiene/tests/test-runtime-evidence.mjs \
             skills/skill-hygiene/tests/test-runtime-profile.mjs
 
       - name: Run panorama contracts and CLI

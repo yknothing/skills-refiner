@@ -497,9 +497,10 @@ Cases 08–09 test the collaboration scenario with skill-creator.
 
 The governance skills (`skill-hygiene`, `skill-debug`) are validated through sandboxed integration tests. Portable scan/observability and cleanup contract/CLI gates run on macOS and Ubuntu; real cleanup mutation, native-helper fault injection, and successful transaction status/undo run only on macOS. `test-install-layout.sh` proves the selectively installed package works outside the checkout and preserves source Git state. `windows-latest` remains a bounded Git Bash read-only/trace contract and does not certify cleanup mutation.
 
-CI also covers collection contracts, source attestation, runtime evidence/CLI,
-and panorama on both Unix hosts. Collection transactions and runtime profile
-lifecycle run on macOS. See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete commands.
+CI also covers collection contracts, source attestation, runtime CLI,
+and panorama on both Unix hosts. Collection transactions, runtime evidence
+recording, and runtime profile lifecycle run on macOS. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the complete commands.
 
 ## Contributing
 
