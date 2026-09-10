@@ -283,7 +283,12 @@ while [ "$large_index" -le 260 ]; do
   large_index=$((large_index + 1))
 done
 LARGE_STDOUT_JSON=$("$PANORAMA_BIN" --yes --agents claude,cursor,codex \
-  --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>/dev/null)
+  --hygiene-root "$HYGIENE_ROOT" --stdout-only 2>"$SANDBOX/large-output.stderr")
+LARGE_STATUS=$?
+if [ "$LARGE_STATUS" -ne 3 ] || [ -z "$LARGE_STDOUT_JSON" ]; then
+  cat "$SANDBOX/large-output.stderr" >&2
+fi
+assert_eq "large stdout-only preserves incomplete collector status" "3" "$LARGE_STATUS"
 assert_json_variable "large stdout-only JSON is complete" LARGE_STDOUT_JSON \
   'if(d.entries.length < 260) process.exit(1)'
 

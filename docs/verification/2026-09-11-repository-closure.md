@@ -75,6 +75,16 @@ general quality improvement, causality or cost reduction is claimed.
   checks remain on both Unix runners. Remote outcomes can be inspected in the
   [governance workflow](https://github.com/yknothing/skills-refiner/actions/workflows/governance-tests.yml);
   local success is not presented as remote success.
+- Linux then reached the large-output panorama regression and exposed a real
+  scanner limit: directory aggregates were passed as single `jq --argjson`
+  arguments. A local external `jq` boundary wrapper rejecting arguments of
+  131072 bytes or more reproduced the failure with a 947416-byte argument while
+  retaining the real scanner and real `jq`. Both directory aggregates now travel
+  over stdin. Missing aggregate inputs and aggregation errors exit nonzero.
+  The frozen final change passed all 175 scanner checks. A separate panorama CLI
+  run passed all 27 checks under that argument limit; the existing 260-entry
+  completeness check remains. Two focused external-`jq` failure samples preserved exit 67 and
+  emitted no successful JSON. These local samples do not replace the Linux CI.
 
 ## Publication and installed checks
 

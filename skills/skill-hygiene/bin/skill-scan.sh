@@ -1806,8 +1806,10 @@ scan_directory() {
         results=$(jq -s '.' "$results_file")
         rm -f -- "$results_file"
     fi
-    jq -n --argjson entries "$results" --argjson blockers "$collection_index_blockers" \
-        '{entries:$entries, collection_index_blockers:$blockers}'
+    # Aggregate JSON can exceed Linux's per-argument limit; stream both values.
+    printf '%s\n%s\n' "$results" "$collection_index_blockers" | jq -s \
+        'if length != 2 then error("missing directory scan data")
+         else {entries:.[0], collection_index_blockers:.[1]} end'
 }
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -1828,10 +1830,11 @@ main() {
         [ ! -d "$dir" ] && continue
         local label="${dir#$HOME_DIR/}"
         local dir_data
-        dir_data=$(scan_directory "$dir" "$label")
-        all_data=$(echo "$all_data" | jq \
+        dir_data=$(scan_directory "$dir" "$label") || return $?
+        all_data=$(printf '%s\n%s\n' "$all_data" "$dir_data" | jq -s \
             --arg label "$label" \
-            --argjson directory "$dir_data" '
+            'if length != 2 then error("missing inventory aggregation data") else . end |
+            .[0] as $inventory | .[1] as $directory | $inventory |
             ($directory.entries) as $entries |
             .topology[$label] = {
                 total: ($entries | length),
@@ -1843,7 +1846,7 @@ main() {
             .skill_links += [$entries[] | select(.type == "symlink")] |
             .broken_symlinks += [$entries[] | select(.type == "broken_symlink")] |
             .collection_index_blockers += $directory.collection_index_blockers
-        ')
+        ') || return $?
     done
 
     local canonical_content_parses=0 canonical_content_cache_hits=0 content_cache_status="disabled"
