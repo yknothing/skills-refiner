@@ -27,9 +27,9 @@ Expected behavior:
 Use `skills-refiner`, and treat `yknothing/prodcraft` as `target_repo`.
 
 Expected behavior:
-- complete Stage 1 first;
+- use the relevant Stage 1 assessment, including valid prior work;
 - then run compatibility and integration analysis for `yknothing/prodcraft`;
-- provide a Minimum Viable Integration Plan and a High-Leverage Enhancement Plan.
+- provide a bounded integration plan with concrete adaptations and exclusions.
 
 ## 4) Compare what should be preserved versus rejected
 
@@ -69,9 +69,9 @@ Expected behavior:
 用 `skills-refiner` 分析这个仓库，目标仓库为 `yknothing/prodcraft`。
 
 预期行为：
-- 先完成第一阶段审查；
+- 使用相关的第一阶段审查，复用已有的有效结论；
 - 再针对 `yknothing/prodcraft` 执行兼容性与整合分析；
-- 提供最小可行整合方案和高价值增强方案。
+- 提供有明确范围、具体适配与排除项的整合方案。
 
 ---
 
@@ -93,7 +93,7 @@ I just finished creating this skill with skill-creator. All tests pass. Use `ski
 Expected behavior:
 - acknowledge that functional tests pass, then move past functional testing;
 - focus on design-level concerns: scope clarity, context engineering, edge cases, maintainability;
-- frame the top 3 refinement actions for direct use in skill-creator's next iteration.
+- frame consequential refinements for direct use in the next authorized iteration.
 
 ### 9) Audit both a skill and its eval set
 
@@ -111,13 +111,20 @@ Expected behavior:
 预期行为：
 - 确认功能测试已通过，然后跳过功能测试层面；
 - 聚焦设计层面的问题：范围清晰度、上下文工程、边界情况、可维护性；
-- 将前 3 项优化建议格式化为可直接用于 skill-creator 下一轮迭代的行动项。
+- 将关键优化建议转成可直接用于下一轮授权迭代的具体改动。
 
 ---
 
 ## Governance & Observability examples
 
 These examples demonstrate the `skill-hygiene` and `skill-debug` skills.
+
+For an already-scoped request such as "Show the Codex/Claude panorama and
+continue read-only evaluation of these five skills", run the panorama collector,
+then pass its identities, findings and unverified layers to `skill-hygiene`.
+Continue the authorized assessment without another menu; do not infer permission
+to relink or retire entries. Generated source material is assessed by its actual
+purpose and consumers, just like hand-authored material.
 
 ### 11) One-shot read-only governance snapshot (`doctor`)
 

@@ -1,61 +1,32 @@
-# Golden anchors — Case 02: Stage 1, partial evidence (README only)
+# Golden anchors — Case 02: README-only evidence
 
-## What a strong answer must do
+Apply the shared quality-first rubric. The evidence boundary is decisive.
 
-### Object identification
-- Correctly identify the input as a **multi-skill repository** seen only through its README.
-- Recognize the five skill names and their high-level descriptions.
-- Note that no actual skill file content is available.
+## Required judgment
 
-### Stage control
-- Run Stage 1 only.
-- Must **not** introduce integration planning or Stage 2 content.
-- Output should end with a refinement plan or top 3 refinement actions.
+- Identify a multi-skill repository as described by its README.
+- Keep Stage 1 scope; no integration destination exists.
+- State that no Skill bodies, dependencies, tests or runtime observations were
+  supplied. Their quality and loadability cannot be established.
+- Use the listed scope and installation instructions as limited observations,
+  and identify the next evidence that would change a meaningful decision.
 
-### Evidence discipline (critical for this case)
-- Must **explicitly state** that the only evidence available is the README.
-- Must **not** make definitive claims about skill file quality, context engineering, or output format.
-- May make reasonable inferences from the README (e.g., skill names suggest scope) but must flag these as inferences.
-- Must **not** treat a skill list in a README as proof that those skills are well-designed.
+The README lists five domains and a manual copy installation process. Versions,
+update behavior and invocation examples are not documented in this snapshot;
+do not turn their absence from the README into claims that the repository
+implements none of them.
 
-### Structural output
-- Must include at least: Executive Summary, Positioning, Core Strengths (with appropriate hedging), Core Weaknesses, Full Review (with explicit evidence limits), Refinement Judgment.
+## Useful response
 
----
+A bounded conclusion and focused request for source/runtime evidence can be
+enough. Any inference about likely use should be labeled. A five-domain list
+does not prove either completeness or incoherence. Manual installation alone
+does not establish poor engineering or a need to build an installer.
 
-## Key judgment anchors
+## Fail the case if
 
-### What can legitimately be said from the README alone
-- The repository has broad scope: five different skill types across PR review, testing, documentation, refactoring, and security.
-- Installation is manual (copy-paste), not automated — a structural signal worth noting.
-- There is no versioning, no update mechanism, and no skill invocation examples in the README.
-- The skill descriptions are one-line summaries, which tells us nothing about skill quality.
-
-### What cannot be said from the README alone
-- Whether the skills are well-structured.
-- Whether they have clear triggers, output formats, or boundaries.
-- Whether the repository is actively maintained.
-- Whether the skills work reliably in practice.
-
-### Reasonable inferences (must be flagged as inferences)
-- The breadth of coverage (5 domains) suggests this may be a personal utility collection rather than a purpose-built toolkit.
-- Manual installation suggests the repository may not be following current skill ecosystem conventions.
-
----
-
-## Failure signals
-
-Treat the answer as **failing** if it:
-- Makes definitive statements about skill quality or maturity from README evidence alone
-- Does not acknowledge the evidence limitation
-- Treats the five skill titles as proof of strong coverage
-- Activates Stage 2 without any prompt
-- Produces a confident scorecard as if full repository access was available
-
-## Score floor to pass
-
-- Object identification: ≥ 4
-- Stage control: 5 (non-negotiable)
-- Evidence discipline: ≥ 4 (critical for this case)
-- Judgment quality: ≥ 3
-- Overall: ≥ 3.5 average across all applicable dimensions
+- It claims individual Skill quality, mature runtime behavior or broad coverage
+  from the README alone.
+- It invents body-level defects, test results or source inspection.
+- It forces integration or gives a confident numerical maturity score.
+- It offers only generic praise without a useful evidence-bounded next step.

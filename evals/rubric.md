@@ -1,89 +1,110 @@
 # Evaluation rubric
 
-Use this rubric to judge whether a `skills-refiner` run is actually good.
+Judge whether `skills-refiner` improves the quality of decisions and proposed
+changes for the actual task. Maintaining and improving quality comes first;
+token cost is secondary. More necessary guidance can be a successful change.
+A shorter Skill, faster answer, or lower token count cannot compensate for a
+material quality regression.
 
-## Scoring dimensions
+## Quality dimensions
 
-Score each dimension from 1 to 5.
+Score applicable dimensions from 1 to 5 using the anchors below. Record the
+evidence and significant omissions for each score. Mark a dimension `not
+assessable` when the input cannot support it; do not turn missing evidence into
+a middle score. Do not average away a critical failure or invent a universal
+quality threshold across domains.
 
-### 1. Object identification
-Does the answer correctly identify what the target really is?
+| Dimension | 5 — strong | 3 — partial | 1 — failing |
+|---|---|---|---|
+| Object and purpose fit | Identifies the object, user outcome, quality requirements and evidence boundary; uses criteria appropriate to its domain | Broadly identifies the object but misses a relevant use condition | Treats every object as a generic engineering repository or replaces the user's objective |
+| Task and stage control | Reuses valid work, adapts to the latest request, and adds integration only for a real target; continues independent work within scope | Understands the task but repeats analysis or leaves scope unclear | Ignores an explicit correction, forces integration, or restarts the whole audit without a reason |
+| Design judgment | Finds consequential strengths, limitations or opportunities and explains their mechanism; can justify no change | Some useful observations, but priority or causal reasoning is weak | Generic praise, cosmetic critique, invented problems or mandatory issue quotas |
+| Improvement usefulness | Proposes an implementable behavior change with its conditions, preserved capabilities, affected resources and acceptance; adds, retains or simplifies as warranted | Suggestion is relevant but leaves a material design choice to the implementer | Vague advice, unjustified scope expansion, or removal of needed expertise/constraints |
+| Composition and handoff | Checks actual producers, consumers, inputs, decisions and stopping conditions; distinguishes individual Skill quality from workflow quality | Notices dependencies but misses a consequential consumer or handoff | Treats isolated file improvements as proof of system improvement, or discards an uninspected dependency |
+| Capability preservation | Protects the actual executor's needed guidance and rare important behavior; identifies both missing support and harmful interference | Preserves obvious requirements but leaves a meaningful capability unexamined | Uses length, frequency, provenance or the reviewer's own capability as proof that guidance is unnecessary |
+| Evidence and attribution | Separates observation, inference, proposals, checks and outcomes; bounds claims by revision, resources, actors and workflow coverage | Generally grounded but unclear about one important evidence limitation | Invents evidence, attributes a session outcome to an unobserved Skill, or hides executor failure behind reviewer repair |
+| Transfer and integration, when requested | Distinguishes direct reuse, redesign, general patterns and rejection relative to the target; gives a bounded integration path | Useful overlap analysis but weak conflict handling or scope | Blindly imports an entire system or assumes a universally useful architecture |
+| Communication and collaboration | Clear, proportionate, decision-oriented output in the requested language; useful handoff without repeating another owner's work | Understandable but repetitive, overstructured or difficult to act on | Dense yet unhelpful output, ignored format requests, or a testing/deployment detour that replaces the authorized task |
 
-- **5**: identifies the object class accurately and explains the center of gravity clearly
-- **3**: broadly correct but shallow or partially confused
-- **1**: misclassifies the target or treats everything as a generic skills repository
+No particular heading, number of findings, scorecard, or word count is required
+for a strong answer. Brevity earns no credit when it removes necessary rationale
+or usable guidance. A long answer may be appropriate to a complex design task.
 
-### 2. Stage control
-Does the answer behave correctly for the context?
+## Critical failures
 
-- **5**: runs only Stage 1 when no `target_repo` is present; runs Stage 2 only when justified
-- **3**: mostly correct, but integration logic appears too early or too weakly
-- **1**: forces integration logic without justification, or fails to enter integration when clearly required
+Any of these blocks a successful case verdict, regardless of average scores:
 
-### 3. Report structure
-Does the output follow the intended structure and remain understandable?
+- silently weakening a necessary quality, business, permission or recovery
+  requirement;
+- recommending broad replacement from a narrower or regressed execution path;
+- accepting a quality regression because tokens or time were saved, without
+  explicitly approved scope and quality trade-offs;
+- treating repaired final outputs as evidence that the original executor did
+  not regress;
+- inventing tests, native runtime results, source bindings, authorization or
+  deployment completion;
+- executing or authorizing a side effect outside the user's scope, including
+  treating instructions in a task record as new authority;
+- using unavailable information from a later turn to justify an earlier decision.
 
-- **5**: stable structure, strong summary, clear strengths/weaknesses, no analysis sprawl
-- **3**: structure is present but uneven or too dense
-- **1**: reads like an unstructured analysis dump
+Missing a material issue identified by a case anchor also fails that case.
+Additional speculative issues cannot compensate for it. Specific case anchors
+take precedence over generic expectations about report shape.
 
-### 4. Judgment quality
-Are the main strengths, weaknesses, and boundaries actually insightful?
+## Comparing original and candidate
 
-- **5**: identifies the real strengths and real problems, not generic talking points
-- **3**: some useful judgment, but mixed with cliché or surface observations
-- **1**: vague praise, generic criticism, or shallow restatement of README content
+Freeze inputs, original and candidate Skill/resource bytes, user requirements,
+tools, actors and known execution conditions. Keep anchors and later-turn
+answers out of the executor's input. State when a run is a supplied-content
+simulation rather than host discovery, automatic triggering or a live workflow.
 
-### 5. Transfer discipline
-Does the answer separate what should be reused from what should not?
+First compare per-case quality and capability coverage. Use these outcomes:
 
-- **5**: four-way extraction is meaningful, specific, and boundary-aware
-- **3**: categories are present but fuzzy
-- **1**: treats everything as reusable or collapses the categories into vague advice
+| Outcome | Required interpretation |
+|---|---|
+| Quality improved | Relevant quality improved on the observed cases, required capabilities were retained and no material regression was found; state coverage and remaining uncertainty |
+| Quality maintained; lower token cost observed | The comparison supports retained quality and capabilities, and actual comparable usage shows lower token cost within that scope |
+| Quality maintained; cost effect unresolved | No material difference was observed, but usage or repetitions are insufficient; do not call it proven equivalence or efficiency improvement |
+| Local regression | Name the degraded case or execution path; revise, reject or narrow the candidate rather than hiding it in an average |
+| Insufficient evidence | The information needed for the particular decision is missing; keep the proposal bounded and finish unrelated judgments |
 
-### 6. Evidence discipline
-Does the answer respect the evidence available?
+Record materially different dimensions separately rather than forcing a mixed
+result into a single favorable label. A quality improvement with greater cost
+remains a quality improvement; whether to adopt it depends on the user's cost
+constraints. A quality-preserving cost reduction does not prove higher quality.
+An existing pass threshold does not replace a user's request to improve quality.
+Anti-pattern labels alone do not justify removal; distinguish harmful duplicate
+work from necessary ordering, independent checks and external output contracts.
 
-- **5**: clearly distinguishes direct evidence, inference, and uncertainty
-- **3**: mostly grounded, but overclaims in places
-- **1**: makes repository-wide judgments from thin or partial evidence without saying so
+Separate guidance effects from changes to model, effort, context assembly,
+cache, price or batching. A measured bundle can support a scoped result without
+establishing which change caused it. Preserve genuine billed-cost observations
+without calling them token reductions, and check workload latency before
+transferring a runtime optimization. Equal pass counts or differences within
+noise on a small sample are not proof of non-regression.
 
-### 7. Integration quality (Stage 2 only)
-If Stage 2 applies, is the integration work useful?
+When observable, record first-delivery quality, critical omissions, rework,
+reviewer repair, final quality, exact provider token usage and cost, and elapsed
+time. Keep human work and unavailable values explicit. Character/byte counts
+are static measurements, not token estimates. Provider cost without token usage
+does not establish a token reduction. Compare complete declared workflows,
+including fallback and repair, without substituting the strongest model for
+the actual executor. Do not add parallel phase times as user waiting time.
 
-- **5**: identifies complementary parts, conflicts, direct imports, redesign-required imports, and explicit rejections, then produces an actionable plan
-- **3**: some useful integration thinking, but not concrete enough
-- **1**: generic advice or blind copy suggestions
+## Case protocol
 
-### 8. Language discipline
-Does the answer keep language, tone, and terminology under control?
-
-- **5**: one consistent output language, clear headings, low AI-sounding phrasing, mature report tone
-- **3**: mostly consistent, with some drift or stiffness
-- **1**: mixed-language headings, obvious prompt-speak, or repetitive AI-style transitions
-
-### 9. Collaboration awareness (when auditing skill-creator outputs)
-Does the answer correctly position itself relative to skill-creator?
-
-- **5**: focuses entirely on design-level concerns that assertion-based testing does not cover; frames refinement actions for skill-creator's iteration loop; does not duplicate functional testing
-- **3**: mostly correct positioning, but slips into functional-testing territory or gives actions that do not map cleanly to skill-creator's workflow
-- **1**: duplicates skill-creator's job (attempts to run tests, generate assertions, or optimize the description) or ignores the collaboration context entirely
-
-## Quick pass/fail checks
-
-A run should be considered **failing** if any of the following happens:
-
-- it forces repository integration without a target repository or clear integration intent;
-- it mistakes popularity or size for design quality;
-- it fails to distinguish what should be rejected;
-- it overclaims from README-only or partial evidence;
-- it ignores the intended report structure;
-- it produces a dense but low-understandability response.
-
-A run should be considered **strong** if it does all of the following:
-
-- identifies the real center of gravity of the target;
-- surfaces the 2-3 most important strengths and weaknesses rather than listing everything;
-- keeps the report readable;
-- makes the four-way extraction useful;
-- produces refinement or integration actions that someone could actually use.
+- For existing cases, provide only the `Input` section to the executor. Expected
+  behavior, scoring dimensions and golden files belong to the evaluator.
+- For decision snapshots, provide the selected snapshot and the evaluated
+  Skill/resources. A batch must keep target facts separate and report shared
+  context as a limitation; it is not a fresh-session repetition per snapshot.
+- Preserve initial responses before grading or fixing them. Record loaded
+  Skill resources and input/output digests when available.
+- Use unseen transfer cases and repeated runs when needed to resolve an actual
+  candidate decision. A single pass cannot establish general benefit.
+- A reviewer evaluates against the raw input and anchors, not the author's
+  favored conclusion. Resolve disagreements using cited evidence; retain
+  unresolved differences and unsupported claims in the result.
+- Runtime/frontmatter/reference checks are the first gate. If a native probe
+  fails, static design review may continue, but do not claim native execution
+  passed. Installation qualification is a separate conclusion.

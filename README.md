@@ -37,15 +37,23 @@ The first governance question is now deliberately blunt: can static evidence pro
 
 ## The five skills
 
-### 1) `skills-refiner` — design-level audit
+### 1) `skills-refiner` — design-level audit and refinement
 
 Use when the main job is to:
 - diagnose a repository, skill, or framework;
 - judge strengths, weaknesses, structure, context engineering, reuse, safety, governance, and maturity;
 - separate what should be preserved, improved, simplified, removed, or rejected;
+- develop concrete guidance changes and check their upstream/downstream effects;
+- continue accepted work with a finite scope and appropriate evidence;
 - continue into compatibility review and integration planning when a destination repository is provided.
 
-This skill is decision-oriented. It complements `skill-creator` by covering what assertion-based testing cannot reach.
+Quality and capability preservation come first; token cost is secondary. The
+Skill supports necessary additions as well as simplification and no-change
+decisions. Reports match the task instead of requiring a fixed scorecard or
+finding count. Workflow comparison and deployment detail are loaded when needed.
+It complements creation/evaluation tools with design judgment. The
+[evaluation set](evals/README.md) distinguishes decision samples, observed
+behavior and deployment readiness; the guidance itself is not proof of benefit.
 
 ### 2) `skills-appreciation` — teaching-grade interpretation
 
@@ -57,9 +65,16 @@ Use when the main job is to:
 
 This skill is interpretation-oriented. It does **not** force engineering-style criteria onto every target — a creative skill is judged differently from an infrastructure skill.
 
+Short appreciations can explain one useful mechanism; evidence determines which
+strengths and limits belong in the article, with no required criticism quota.
+
 ### 3) `skills-panorama` — read-only skills map
 
 Use when you need a first-look inventory of canonical storage, per-Agent exposure, link health, catalog intent, collisions, and eight mutually exclusive topology gap classes. It orchestrates the existing scanner and collection/catalog facts; it does not delete, relink, or mutate the catalog.
+
+When the user has already requested follow-up evaluation, carry that authority
+into `skill-hygiene` without repeating the menu. Mutation keeps its own exact
+plan and confirmation requirements.
 
 ```bash
 SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
@@ -75,6 +90,9 @@ Use when you need to:
 - get a structured inventory for governance review.
 
 This skill follows the "AI judges, scripts collect" philosophy. The shell script (`bin/skill-scan.sh`) gathers structured facts; the AI applies expert judgment. It respects the standard skill installation model: skills installed to `~/.agents/skills/` and symlinked to agent directories are distribution links, not duplicates.
+
+Generated and hand-authored guidance use the same evidence-based value standard.
+Collection and runtime procedures are loaded on demand from the Skill's references.
 
 ### 5) `skill-debug` — skill observability
 
@@ -478,6 +496,10 @@ The `evals/` directory contains anchor-based evaluations for the analysis skills
 Cases 08–09 test the collaboration scenario with skill-creator.
 
 The governance skills (`skill-hygiene`, `skill-debug`) are validated through sandboxed integration tests. Portable scan/observability and cleanup contract/CLI gates run on macOS and Ubuntu; real cleanup mutation, native-helper fault injection, and successful transaction status/undo run only on macOS. `test-install-layout.sh` proves the selectively installed package works outside the checkout and preserves source Git state. `windows-latest` remains a bounded Git Bash read-only/trace contract and does not certify cleanup mutation.
+
+CI also covers collection contracts, source attestation, runtime evidence/CLI,
+and panorama on both Unix hosts. Collection transactions and runtime profile
+lifecycle run on macOS. See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete commands.
 
 ## Contributing
 

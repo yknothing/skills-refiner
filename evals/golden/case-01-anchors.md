@@ -1,57 +1,33 @@
-# Golden anchors — Case 01: Stage 1, single skill analysis
+# Golden anchors — Case 01: single Skill analysis
 
-## What a strong answer must do
+Apply the shared quality-first rubric. No heading, scorecard or issue-count
+quota is required.
 
-### Object identification
-- Correctly identify the input as a **single skill file**, not a repository or a collection.
-- Recognize the skill's scope: a simple, linear workflow for generating release notes.
-- Note that the skill's center of gravity is procedural task execution, not judgment or inference.
+## Required judgment
 
-### Stage control
-- Run Stage 1 only.
-- Must **not** introduce integration planning or Stage 2 content.
-- The output should end with a refinement plan or top 3 refinement actions.
+- Identify a single, narrowly scoped release-note Skill, not a repository.
+- Keep refinement on this object; no target or integration intent was provided.
+- Recognize useful scope and a concrete output shape where relevant.
+- Identify that grouping free-form commit messages can misstate what changed.
+  Explain a proportionate way to handle ambiguity without inventing features
+  or presenting uncertain interpretations as facts.
+- Bound runtime and quality claims by the supplied file. No native loader,
+  test suite or real release outcome was observed in this input.
 
-### Structural output
-- Must include at least: Executive Summary, Positioning, Core Strengths, Core Weaknesses, Full Review, Refinement Judgment.
-- The Scorecard is optional but welcome.
-- The output should be structured and readable, not a chain-of-thought dump.
+## Acceptable refinements
 
----
+A specific grouping/factuality rule, an unresolved-ref response, or use of
+already-provided audience/ref information can improve this task. Explain why
+the selected change matters and preserve the existing focused purpose.
 
-## Key judgment anchors
+Do not require every possible audience, commit convention or release process.
+A format example is useful, not evidence that the Skill must grow into a
+release-management system. Returning a small number of well-supported changes
+is stronger than filling a quota with speculative ones.
 
-### Strengths to identify (at least 2 of these)
-- Clear invocation trigger (the "When to use" section reduces ambiguity)
-- Concrete output format (the release notes template reduces agent drift)
-- Simple, well-scoped single-task skill (no overreach)
+## Fail the case if
 
-### Weaknesses to identify (at least 2 of these)
-- No handling of commit message quality variation (messy history breaks the grouping step)
-- Grouping logic ("features, fixes, chores") is not explained — the agent must infer commit type from freeform messages, which is error-prone
-- No guidance on tone, audience, or detail level for the release notes
-- Missing: what to do when `<start>` or `<end>` refs cannot be resolved
-
-### Refinement actions (at least 1 of these in the top 3)
-- Add a fallback or clarification step for unparseable or ambiguous commits
-- Specify how to classify commits (e.g., by conventional commit prefix or by heuristic)
-- Add a tone/audience parameter to support different release note styles
-
----
-
-## Failure signals
-
-Treat the answer as **failing** if it:
-- Treats this as a repository rather than a single skill
-- Activates Stage 2 without any prompt
-- Gives generic praise without identifying the grouping ambiguity
-- Overclaims about "full test coverage" or "maturity" from a small skill file
-- Produces an unstructured response without section headings
-
-## Score floor to pass
-
-- Object identification: ≥ 4
-- Stage control: 5 (non-negotiable)
-- Judgment quality: ≥ 3
-- Evidence discipline: ≥ 4
-- Overall: ≥ 3.5 average across all applicable dimensions
+- It misidentifies the object or forces integration without a target.
+- It misses the substantive grouping/factuality ambiguity.
+- It claims tested maturity or native runtime success from the pasted file.
+- It proposes unrelated publication, versioning or project-management scope.

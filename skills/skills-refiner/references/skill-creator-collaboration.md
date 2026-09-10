@@ -1,6 +1,9 @@
 # Collaborating with skill-creator
 
-This reference describes how `skills-refiner` and `skills-appreciation` work alongside `skill-creator` (the official Claude skill-creation and iteration tool). The three tools occupy different positions in the skill lifecycle and are strongest when used together.
+This reference describes how `skills-refiner` and `skills-appreciation` work
+alongside an available `skill-creator` creation and evaluation workflow. Exact
+tools and packaging support depend on the installed implementation. These are
+cooperation boundaries, not claims that another tool cannot make design judgments.
 
 ## Division of labor
 
@@ -8,19 +11,23 @@ This reference describes how `skills-refiner` and `skills-appreciation` work alo
 
 - Gathering requirements and drafting a new skill from scratch.
 - Running with-skill vs baseline A/B test executions.
-- Assertion-based quantitative evaluation (pass rate, timing, tokens).
+- Functional and behavioral evaluation, including quality, timing and exact
+  token usage when available.
 - Iterating on the skill based on user feedback and test results.
 - Description optimization for triggering accuracy.
 - Packaging and distributing `.skill` files.
 
 ### skills-refiner owns
 
-- Deep structural audit of a skill's design quality, not just whether it passes assertions.
+- Deep structural audit and concrete improvements to a Skill's design quality,
+  including the guidance needed by its actual execution workflow.
 - Purpose-sensitive evaluation: judging engineering skills, creative skills, teaching skills, and research skills by criteria that actually fit their intent.
 - Evidence discipline: separating what is directly observable from inference and uncertainty.
 - Four-way extraction: classifying findings into directly adoptable, adoptable after redesign, valuable as pattern, and should-not-adopt.
 - Integration planning when a skill needs to fit into an existing repository or workflow.
-- 12-dimension scorecard covering positioning clarity, structural design, context engineering, reusability, composability, safety, maintainability, transferability, team-friendliness, and long-term evolution potential.
+- Quality-first judgment of capability preservation and improvement, with cost
+  assessed separately. Use only the dimensions and output depth relevant to
+  the requested decision; no fixed scorecard is required.
 
 ### skills-appreciation owns
 
@@ -47,8 +54,10 @@ The typical handoff:
 
 1. User creates and iterates a skill with skill-creator until tests pass and feedback is positive.
 2. User invokes `skills-refiner` on the finished skill.
-3. skills-refiner produces a structured report with refinement judgment and top actions.
-4. User takes the top actions back into skill-creator for another iteration pass.
+3. skills-refiner supplies the relevant design judgment, preserved capabilities,
+   concrete guidance changes and acceptance scope.
+4. The authorized implementation/evaluation workflow consumes those changes.
+   Reuse applicable evidence; do not restart the whole cycle unnecessarily.
 
 ### After skills-refiner audits → skills-appreciation explains
 
@@ -67,12 +76,21 @@ skills-refiner can audit the eval set as a capability asset: is it testing the r
 
 ## What skills-refiner should NOT do when collaborating
 
-- Do not duplicate skill-creator's assertion-based testing. That is skill-creator's job.
-- Do not attempt to run A/B tests or spawn subagent executions. That is skill-creator's job.
-- Do not optimize the skill's description for triggering accuracy. That is skill-creator's job.
-- Do not package or distribute skills. That is skill-creator's job.
+- In a design-audit request, do not duplicate existing functional testing or
+  automatically launch model comparisons, description tuning or packaging.
+- Treat reported passing tests as evidence for their actual cases and revision,
+  not as an unconditional assumption that every required behavior works.
+- When the user requests implementation or a comparison, continue within that
+  authority using the available creation/evaluation workflow. Prepare any
+  separately owned work with exact inputs, acceptance and unresolved questions.
+- Deployment remains a separate authority and qualification boundary. Use the
+  applicable packaging/governance mechanism rather than making this review a
+  second installer.
 
-Focus on what skill-creator cannot do: deep design judgment, purpose-sensitive evaluation, evidence-grounded structural analysis, and integration planning.
+Focus on the complementary work: deep design judgment, purpose-sensitive
+evaluation, evidence-grounded structural analysis and integration planning.
+Tests, reports and handoffs are useful when they improve or establish quality;
+their existence alone is not the outcome.
 
 ## Practical invocation patterns
 

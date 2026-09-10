@@ -73,15 +73,18 @@ Generate structured API documentation from source code files.
 
 ## Expected behavior
 
-- Acknowledge that the skill passes its functional tests, then move past functional testing entirely.
-- Focus the audit on design-level concerns that assertion-based tests do not cover:
-  - boundary clarity: what happens with GraphQL, gRPC, WebSocket, or non-REST APIs?
-  - context engineering: the skill reads arbitrary source files, but gives no guidance on context window limits or how to handle large codebases
-  - scope creep risk: the skill tries to support multiple output formats (Markdown, OpenAPI, HTML) without clear separation
-  - maintainability: framework-specific extraction logic is mentioned but not structured, making the skill fragile as frameworks evolve
-  - missing failure modes: what happens when the code has no clear endpoint patterns, or when the framework is unrecognized?
-- Frame the top refinement actions so they are directly usable in skill-creator's next iteration cycle.
-- Do NOT attempt to run tests, generate assertions, or optimize the description.
+- Acknowledge the supplied passing test results within their stated scope; do
+  not claim to have independently verified them.
+- Examine consequential design questions beyond those samples: source and
+  protocol boundaries, required context, output-format instructions, framework
+  adaptation, uncertainty and unsupported input handling.
+- Distinguish an observed instruction conflict from a plausible untested risk.
+  Supporting several formats does not by itself require splitting the Skill;
+  unsupported protocols may be explicitly excluded rather than implemented.
+- Preserve source accuracy and useful extraction guidance. Propose concrete
+  changes for material findings without requiring a fixed issue count.
+- Make refinements usable by the creation/evaluation owner. This request is a
+  design audit; do not run tests, generate assertions or tune the description.
 
 ## Dimensions primarily tested
 

@@ -48,7 +48,8 @@ Use this skill when:
 
 - Treat the pasted skill file as the source object.
 - Run Stage 1 only (no `target_repo` is present).
-- Return a structured review with a refinement judgment and top 3 actions.
+- Return a readable, evidence-bounded judgment and useful refinement actions;
+  no fixed headings or action count are required.
 - Do not force Stage 2.
 
 ## Dimensions primarily tested

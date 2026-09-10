@@ -36,8 +36,8 @@ The target repository currently has no audit, refinement, or quality-review skil
 - Complete Stage 1 first: diagnose `skills-refiner` as a source object.
 - Then continue to Stage 2: analyze compatibility with `yknothing/prodcraft`.
 - Identify what parts of `skills-refiner` are directly adoptable, need redesign, are useful as patterns, or should be rejected.
-- Produce a Minimum Viable Integration Plan and a High-Leverage Enhancement Plan.
-- Return the top 3 next actions.
+- Produce a bounded, actionable integration plan appropriate to the target.
+- Distinguish reusable principles from optional report templates and scores.
 
 ## Dimensions primarily tested
 

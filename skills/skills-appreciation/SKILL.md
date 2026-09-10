@@ -163,7 +163,7 @@ When the task involves comparing or appreciating multiple skills, repositories, 
 
 1. Determine what the target really is.
 2. Explain why its design works or fails.
-3. Surface the few strengths and weaknesses that matter most.
+3. Surface the consequential strengths and limitations supported by the evidence.
 4. Translate visible features into underlying design choices.
 5. Separate transferable lessons from author-specific habits.
 6. Turn the whole thing into a strong explanatory article with a clear thesis.
@@ -242,14 +242,17 @@ Examples:
 The entire piece should orbit this thesis.
 
 ### Step 3 — Build the explanation map
-At minimum, determine:
-- the 1–3 strongest ideas worth teaching;
-- the 1–3 most important weaknesses or limits;
-- the most transferable lesson;
-- the most overrated impression;
-- the most useful reader takeaway.
+Select the ideas that support the thesis and the requested depth: mechanisms
+worth teaching, transferable lessons, consequential limits, or a misleading
+impression when the material actually supports that judgment. There is no quota
+of strengths, weaknesses, or overrated claims. If no material weakness is
+established, do not manufacture one; distinguish incomplete evidence from a
+demonstrated limit.
 
-For each item on this list, identify a concrete example from the target material that makes the claim visible to a practitioner-level reader.
+For each selected claim, identify a concrete example from the target material
+that makes it visible to the intended reader. A short appreciation can develop
+one useful mechanism and its applicable boundary without expanding into every
+analytical category.
 
 ### Step 4 — Design the article structure
 Default progression:
@@ -261,7 +264,10 @@ Default progression:
 6. what designers should learn from it;
 7. what it would take to surpass it.
 
-Do not force these exact headings if the article reads better with a tighter structure. Preserve the logical progression even when the section titles change.
+Use this progression when it serves the article. Shorter modes may combine or
+omit sections; preserve the connection between claim, example, and reader
+takeaway. Include weaknesses or a proposed successor only when evidence and the
+user's purpose warrant them.
 
 ### Step 5 — Write the article
 The article should combine:

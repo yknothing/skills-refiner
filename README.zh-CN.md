@@ -37,15 +37,21 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 
 ## 五个 skill
 
-### 1) `skills-refiner` — 设计层审计
+### 1) `skills-refiner` — 设计层审计与优化
 
 适用于：
 - 诊断仓库、skill 或框架；
 - 评判优劣、结构、上下文工程、复用、安全、治理与工程成熟度；
 - 区分应保留、改进、简化、移除或拒绝的部分；
+- 形成具体的指导改动，并检查上下游影响；
+- 承接已接受的工作，在明确范围内完成审查与收口；
 - 在提供目标仓库时延续到兼容性评审、抽取与整合规划。
 
-面向决策，补足断言测试无法覆盖的设计层。
+质量提升与能力保留优先，token 成本其次。既支持必要的指导补充，也支持
+局部简化和有依据的零修改结论；报告随任务调整，不要求固定评分卡或问题
+数量。工作流比较与部署细则按需读取。它为创建、评测工具补充设计判断。
+[评测集](evals/README.md) 区分决策样本、实际行为和部署就绪，指导文本本身
+不构成收益证明。
 
 ### 2) `skills-appreciation` — 教学级解读
 
@@ -57,6 +63,8 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 
 面向解读，**不会**对创意类 skill 强行套用纯工程标尺。
 
+短评可以只讲清一个有用机制；优点与局限由证据决定，不要求为了结构完整而凑批评。
+
 ### 3) `skills-panorama` — 技能全景（只读地图）
 
 适用于：
@@ -65,6 +73,8 @@ Agent skills 增长快、退化安静。常见两类交织问题：
 - 需要中文报告与低打字决策卡，且**不**在此步骤执行删除或重链。
 
 编排现有 `skill-scan` 与 collection/catalog，不新增第二套磁盘遍历。详见 ADR-0007 与 `skills/skills-panorama/SKILL.md`。
+
+用户已要求继续评估时，携带授权直接交接 `skill-hygiene`，不重复展示菜单。实际变更仍遵守对应工具的精确计划和确认要求。
 
 ```bash
 SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
@@ -80,6 +90,8 @@ SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
 - 获得结构化清单供治理评审。
 
 遵循 **「AI judges, scripts collect」**：`bin/skill-scan.sh` 收集结构化事实，由 AI 结合上下文解释。尊重常见安装模型：`~/.agents/skills/` 为原始目录，各 agent 目录中的软链接为分发而非重复。
+
+生成内容与人工内容采用同一套基于证据的价值标准。集合与 runtime 操作步骤放在 Skill 的参考文件中，按任务需要读取。
 
 ### 5) `skill-debug` — Skill 可观测性
 
@@ -456,6 +468,8 @@ bash ~/.agents/skills/skill-debug/bin/skill-probe.sh --doctor
 Cases 08–09 覆盖与 skill-creator 协作场景。
 
 治理类 skill（`skill-hygiene`、`skill-debug`）通过隔离沙箱集成测试验证。可移植的 scan/observability 与 cleanup contract/CLI gates 在 macOS、Ubuntu 运行；真实 cleanup mutation、native-helper 故障注入，以及成功 transaction 的 status/undo 只在 macOS 运行。`test-install-layout.sh` 验证选择性安装包可在 checkout 外运行且不会改动 source Git。`windows-latest` 仍是有界的 Git Bash 只读/trace 契约，不认证 cleanup mutation。
+
+CI 同时覆盖 collection 契约、来源证明、runtime evidence/CLI 和 panorama 的双 Unix 平台测试；collection 事务与 runtime profile 生命周期在 macOS 验证。完整命令见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 贡献
 
