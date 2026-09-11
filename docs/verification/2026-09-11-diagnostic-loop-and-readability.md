@@ -267,10 +267,13 @@ archive contents verified against the pre-install hashes. The installer and
 post-install byte, projection, reference and launcher checks complete the
 repository-to-installation boundary separately.
 
-Fresh model-task validation remains unavailable in the current host setup:
-Claude CLI reports `loggedIn=false`, while Codex CLI fails configuration parsing
-before discovery. Offline native body loading is recorded above; it does not
-establish configured-host selection or task benefit. These host conditions do
-not justify changing unrelated global configuration or canaries as part of this
-release. Full-suite and final-revision CI results are retained in the release
-receipt and the GitHub Actions run for the published revision.
+The checks above do not include a fresh model-task validation. A sandboxed Claude auth check
+reported `loggedIn=false`; a read-only check outside the sandbox confirmed an
+authenticated session. A native model request needs separate authorization to
+send automatically loaded local context to the configured external service.
+Codex CLI failed configuration parsing before discovery.
+Offline native body loading is recorded above; it does not establish
+configured-host selection or task benefit. No unrelated global configuration
+or canaries were changed. The release receipt records any later native sample,
+full-suite results and final-revision CI, alongside the corresponding GitHub
+Actions run for the published revision.
