@@ -119,6 +119,15 @@ Missing direct reads do not rule out influence through a plan or other handoff.
 
 ## Continue and finish within scope
 
+For a diagnostic/refinement loop, preserve the original target identity, content
+fingerprint, scope, evidence and failure condition before editing. Define the
+expected task or consumer behavior, make the authorized change, and recheck
+that condition against the corresponding target with comparable inputs. Explain
+intended identity changes; a moved/excluded target or failed check remains
+unverified. Report each material finding as verified, still present, unverified
+or regressed, with before/after evidence. Source correctness, installed bytes,
+native loading and task benefit require their own observations.
+
 When the user corrects priority or asks to continue, carry forward accepted
 requirements, evidence, decisions and unfinished work. Revisit only what the
 new input or changed dependencies invalidate. Do not repeat an approval whose

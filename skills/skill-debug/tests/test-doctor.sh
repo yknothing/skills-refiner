@@ -81,6 +81,34 @@ echo "$ZH_OUTPUT" | grep -q "只读快照"
 echo "$ZH_OUTPUT" | grep -q "没有 activation log（无数据，不是失败）"
 echo "$ZH_OUTPUT" | grep -q "load_blockers=1"
 
+# Exercise the real scanner: a rejected collection still yields useful evidence.
+mkdir -p "$HOME/.agents/skills/langcraft"
+set +e
+PARTIAL_JSON=$(bash "$DOCTOR" --json --cwd "$REPO_ROOT" --days 7)
+PARTIAL_RC=$?
+set -e
+[ "$PARTIAL_RC" -eq 1 ]
+echo "$PARTIAL_JSON" | jq -e '
+    .steps.hygiene.status == "error"
+    and .hygiene.error == "subtool_failed"
+    and .hygiene.exit_code == 1
+    and (.hygiene.partial_payload.collection_index_blockers | length == 1)
+    and (.hygiene.partial_payload.collection_index_blockers[0].collection_id == "langcraft")
+    and (.hygiene.partial_payload.skills | any(.name == "minimal-skill"))
+    and (.hygiene.partial_payload.runtime_load_blockers | length == 1)
+    and (.hygiene.detail | length < 200)
+' >/dev/null
+rmdir "$HOME/.agents/skills/langcraft"
+
+# Recheck the same scope after removing only the deliberately invalid fixture.
+RECHECK_JSON=$(bash "$DOCTOR" --json --cwd "$REPO_ROOT" --days 7)
+echo "$RECHECK_JSON" | jq -e '
+    .steps.hygiene.status == "ok"
+    and (.hygiene.collection_index_blockers | length == 0)
+    and (.hygiene.runtime_load_blockers | length == 1)
+    and (.hygiene.skills | any(.name == "minimal-skill"))
+' >/dev/null
+
 set +e
 INVALID_DAYS_OUTPUT=$(bash "$DOCTOR" --json --cwd "$REPO_ROOT" --days nope 2>"$SANDBOX/invalid-days.stderr")
 INVALID_DAYS_RC=$?
@@ -142,6 +170,7 @@ case "${FAKE_SCAN_MODE:-ok}" in
     invalid) echo 'not-json' ;;
     multi) printf '%s\n' '{}' '{}' ;;
     nonzero) echo '{"error":"boom"}'; echo 'hygiene exploded' >&2; exit 3 ;;
+    large_nonzero) jq -n '{error:"large_failure", evidence:("x" * 200000)}'; exit 3 ;;
     no_data) echo '{"error":"no_activation_log"}'; exit 1 ;;
 esac
 EOF
@@ -158,11 +187,23 @@ for CASE_SPEC in 'probe:probe:FAKE_PROBE_MODE' 'dashboard:dashboard:FAKE_DASH_MO
             '.steps[$step].status == "error" and .[$payload].error == "subtool_failed"' >/dev/null
         if [ "$BAD_MODE" = "nonzero" ]; then
             echo "$FAILED_STEP_JSON" | jq -e --arg payload "$PAYLOAD_NAME" '.[$payload].exit_code == 3' >/dev/null
+            echo "$FAILED_STEP_JSON" | jq -e --arg payload "$PAYLOAD_NAME" '.[$payload].partial_payload.error == "boom"' >/dev/null
         else
             echo "$FAILED_STEP_JSON" | jq -e --arg payload "$PAYLOAD_NAME" '.[$payload].exit_code == 0' >/dev/null
+            echo "$FAILED_STEP_JSON" | jq -e --arg payload "$PAYLOAD_NAME" '.[$payload].partial_payload == null' >/dev/null
         fi
     done
 done
+
+set +e
+LARGE_PARTIAL_JSON=$(FAKE_SCAN_MODE=large_nonzero SKILLS_REFINER_TOOLS_ROOT="$FAKE_TOOLS_ROOT" bash "$DOCTOR" --json --cwd "$REPO_ROOT")
+LARGE_PARTIAL_RC=$?
+set -e
+[ "$LARGE_PARTIAL_RC" -eq 1 ]
+echo "$LARGE_PARTIAL_JSON" | jq -e '.hygiene.partial_payload.evidence | length == 200000' >/dev/null
+
+RAW_JSON=$(SKILLS_REFINER_TOOLS_ROOT="$FAKE_TOOLS_ROOT" bash "$DOCTOR" --json --include-text --cwd "$REPO_ROOT")
+echo "$RAW_JSON" | jq -e '.raw_text_observation.relationship == "subsequent_runs" and .raw_text_observation.same_snapshot == false and (.raw_text.hygiene | type == "string")' >/dev/null
 
 set +e
 DASH_NO_DATA_JSON=$(FAKE_DASH_MODE=no_data SKILLS_REFINER_TOOLS_ROOT="$FAKE_TOOLS_ROOT" bash "$DOCTOR" --json --cwd "$REPO_ROOT")

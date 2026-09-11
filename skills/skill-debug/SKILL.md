@@ -212,7 +212,15 @@ The `--doctor` mode combines:
 ## Integration
 
 - Combine with `skill-hygiene` for a complete governance workflow:
-  1. `skill-debug probe` → verify discovery
+  1. `skill-debug probe` → inspect filesystem discovery candidates for the target cwd
   2. `skill-debug dashboard` → check canary observations
-  3. `skill-hygiene` scan → evaluate quality
-  4. Triage: fix, archive, or delete based on combined evidence
+  3. `skill-hygiene` scan → collect facts, then confirm consequential findings
+  4. Improve within existing authority; use the hygiene transaction flow for retirement
+  5. Recheck the original target and failure condition with the same scope, then verify affected consumers
+
+Carry the canonical target/identity variant, fingerprint, observation time,
+scope, confirmed failure and expected success into the handoff. Missing logs
+are `no_data`; collector failure is `error`. Doctor preserves parseable failed
+subtool output as `partial_payload`, without converting failure into success.
+Its optional raw terminal reports are subsequent observations. A zero exit code
+or absence from a changed scan does not prove the original finding is resolved.

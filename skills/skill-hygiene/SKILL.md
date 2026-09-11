@@ -29,6 +29,46 @@ bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh
 bash ~/.agents/skills/skill-debug/bin/skills-refiner-doctor.sh --json
 ```
 
+## Diagnose, improve, and recheck
+
+Use the same evidence chain from initial review through verification. Keep this
+in the current report or handoff; do not introduce a separate tracking system.
+
+1. **Bind the observation.** Record the canonical target and identity variant,
+   content fingerprint, relevant host/cwd/Agent coverage, collector options,
+   observation time and report generation. Preserve the baseline before a later
+   run overwrites `latest.*`. A name alone cannot identify a same-name variant.
+2. **Confirm the finding.** Separate the observed symptom, suspected cause and
+   confirmed failure condition. Inspect the exact referenced file/path or run
+   the relevant validator. Risk patterns, age, size and missing telemetry remain
+   review signals until evidence establishes a problem. Partial or failed
+   collection means unknown coverage, not zero findings.
+3. **Choose the smallest useful action.** State what should change, what must be
+   preserved and the observation that would establish success. Continue an
+   already-authorized action within its scope; installation, replacement and
+   retirement retain their own transaction requirements. Design changes belong
+   in the source; qualify deployment separately before changing installed bytes.
+4. **Recheck the original condition.** Rerun against the same target and scope
+   after the change, then check affected consumers. Explain intended fingerprint
+   changes and retain the old-to-new identity mapping. A removed path, excluded
+   Agent, different root, failed collector or empty report does not prove repair.
+   For intentional retirement, verify the approved transaction and the absence
+   of dangling consumers; do not claim the retired Skill became loadable.
+5. **Close each finding honestly.** Use `verified`, `still_present`,
+   `unverified` or `regressed`, with before/after evidence. A successful command
+   establishes execution only. Static preflight does not establish native
+   loading; a design improvement needs a relevant task/consumer observation.
+   Keep unrelated remaining findings visible.
+
+Present the priority items first: target, confirmed fact or uncertainty, next
+action, and recheck result. Put detailed provenance and raw observations behind
+an explicit evidence link or disclosure. Reuse the baseline and authority on
+handoff so the next Skill can continue without repeating intake.
+
+Doctor failures may contain `partial_payload` with parseable subtool evidence;
+inspect it while preserving the step's `error` status. Optional raw terminal
+reports are later observations, not the same JSON snapshot.
+
 ## Reviewing and Safely Retiring Local Entries
 
 Scanner evidence is not a retirement verdict. Use the cleanup flow only when the
@@ -274,13 +314,17 @@ Where did the skill come from?
 
 ## How to Present Results
 
-Use structured tables. Group findings by severity:
+Use structured tables. Distinguish confirmed findings from review signals before
+grouping by severity; do not promote a scanner category into a verdict.
 
 ### Critical (requires attention)
-Broken symlinks, security risks, references to non-existent dependencies.
+Proven runtime blockers, confirmed broken symlinks or required references, and
+verified security defects. Unconfirmed security patterns stay in a clearly
+marked review queue with their evidence and uncertainty.
 
 ### Advisory (worth reviewing)
-Backup remnants, very old skills with no recent usage evidence, unusually large skills.
+Backup remnants, age, size and missing observation data are context for review.
+They do not independently establish low value or a reason to change a Skill.
 
 ### Informational
 Statistics, topology map, provenance distribution.
@@ -300,6 +344,6 @@ Statistics, topology map, provenance distribution.
 
 ## Integration
 
-- Use `skill-debug probe` to verify which skills are discoverable from a specific cwd
+- Use `skill-debug probe` to inspect filesystem discovery candidates from a specific cwd; verify native discovery separately
 - Use `skill-debug dashboard` to cross-reference with recorded canary activation evidence
 - Use `skills-refiner` for deep design-quality analysis of individual skills

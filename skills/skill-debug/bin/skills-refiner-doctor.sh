@@ -28,8 +28,8 @@ Options:
   --days N             Dashboard window in days (default: 30)
   --json               Single structured JSON object on stdout
   --lang en|zh|auto    Terminal language (default: auto)
-  --raw                Append raw subtool terminal reports after the summary
-  --include-text       Include raw subtool text in --json output
+  --raw                Append separately collected subtool terminal reports
+  --include-text       Include those later observations in --json output
   --with-trace-status  Append skill-trace.sh --status output (read-only)
   --no-color           Reserved for subtool compatibility; doctor summary is plain text
   -h, --help           Show this help
@@ -43,6 +43,8 @@ Notes:
   This command does not inject or strip activation traces.
   If skill-hygiene is not installed, output is a structured partial result
   with hygiene unavailable and exit status 1.
+  Failed steps preserve parseable evidence in partial_payload; status stays error.
+  Optional raw reports are subsequent runs, not the original JSON snapshot.
   JSON schema versions are API versions; product_version is the skills-refiner release line.
 EOF
     exit 0
@@ -172,20 +174,24 @@ prepare_step_payload() {
         return 0
     fi
 
-    local detail
-    detail=$(cat "$stderr_file")
-    if [ -z "$detail" ]; then
-        if is_single_json_object "$raw_file"; then
-            detail=$(jq -c . "$raw_file")
-        else
-            detail=$(cat "$raw_file")
-        fi
+    local partial_payload_valid=false
+    if is_single_json_object "$raw_file"; then
+        partial_payload_valid=true
     fi
     jq -n \
         --arg error "subtool_failed" \
         --argjson exit_code "$rc" \
-        --arg detail "$detail" \
-        '{error: $error, exit_code: $exit_code, detail: $detail}' >"$output_file"
+        --argjson partial_payload_valid "$partial_payload_valid" \
+        --rawfile raw_payload "$raw_file" \
+        --rawfile stderr "$stderr_file" \
+        '(if $partial_payload_valid then ($raw_payload | fromjson) else null end) as $partial |
+        {error: $error, exit_code: $exit_code,
+          detail: (if $stderr != "" then $stderr
+            elif $partial_payload_valid then
+              if ($partial.error | type) == "string" then $partial.error
+              else "subtool returned a nonzero status; structured evidence retained in partial_payload" end
+            else $raw_payload end | sub("\\n+$"; "")),
+          partial_payload: $partial}' >"$output_file"
 }
 
 probe_tmp=$(mktemp)
@@ -306,7 +312,7 @@ if $JSON_MODE; then
 
     if $INCLUDE_TEXT; then
         jq_args+=(--rawfile probe_text "$probe_text_tmp" --rawfile dashboard_text "$dash_text_tmp" --rawfile hygiene_text "$scan_text_tmp")
-        jq_filter="$jq_filter | .raw_text = {probe: \$probe_text, dashboard: \$dashboard_text, hygiene: \$hygiene_text}"
+        jq_filter="$jq_filter | .raw_text = {probe: \$probe_text, dashboard: \$dashboard_text, hygiene: \$hygiene_text} | .raw_text_observation = {relationship: \"subsequent_runs\", same_snapshot: false}"
     fi
     if $WITH_TRACE_STATUS && [ -n "$trace_tmp" ]; then
         jq_args+=(--rawfile trace_status_text "$trace_tmp")
@@ -327,7 +333,7 @@ metric() {
 step_error_summary() {
     local file="$1" rc detail
     rc=$(jq -r '.exit_code // "unknown"' "$file" 2>/dev/null)
-    detail=$(jq -r '.detail // "subtool failed"' "$file" 2>/dev/null | tr '\r\n\t' '   ')
+    detail=$(jq -r '(.detail // "subtool failed") | if length > 320 then .[0:320] + "… (see --json)" else . end' "$file" 2>/dev/null | tr '\r\n\t' '   ')
     printf 'error (exit_code=%s): %s' "$rc" "$detail"
 }
 
@@ -436,6 +442,7 @@ fi
 if $INCLUDE_TEXT; then
     echo ""
     echo "Raw Reports"
+    echo "Raw terminal reports are additional observations collected after the JSON snapshot."
     echo "-- skill-probe --"
     cat "$probe_text_tmp"
     echo "-- skill-dashboard --"
