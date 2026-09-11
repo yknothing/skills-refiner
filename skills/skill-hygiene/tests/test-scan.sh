@@ -472,6 +472,8 @@ run_tests() {
         "$(echo "$json_output" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .installer_receipt | [.receipt_skill, .identity_binding] | join(":")')"
     assert_eq "Installer lifecycle is not copied onto Agent projections" "true" \
         "$(echo "$json_output" | jq 'all(.entries[] | select(.location != ".agents/skills"); .installer_receipt == null)')"
+    assert_eq "Cached Agent projections do not inherit installer source declarations" "true" \
+        "$(echo "$json_output" | jq 'all(.entries[] | select(.location != ".agents/skills"); .installer_source_claim == null)')"
     assert_eq "Unproven real directory provenance" "unknown" "$(echo "$json_output" | jq -r '.entries[] | select(.dir_name == "healthy-skill" and .location == ".agents/skills") | .mutation_provenance.kind')"
     assert_eq "JSON has runtime_load_blockers key" "true" "$(echo "$json_output" | jq 'has("runtime_load_blockers")')"
     assert_eq "JSON has collection_index_blockers key" "true" "$(echo "$json_output" | jq 'has("collection_index_blockers")')"
@@ -576,6 +578,10 @@ run_tests() {
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json --skip-provenance-tree 2>/dev/null)
     assert_eq "Skipped provenance tree cannot promote receipt source" "null" \
         "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.provenance.claim_kind // "null")')"
+    assert_eq "Skipped tree retains installer-declared source without an immutable revision" "example/skills:installer_declared:null" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .installer_source_claim | [.repository_id, .confidence, (.resolved_revision // "null")] | join(":")')"
+    assert_eq "Source declaration does not authorize mutation" "unknown:truncated" \
+        "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | [.mutation_provenance.kind, .mutation_provenance.confidence] | join(":")')"
     assert_eq "Skipped provenance tree still exposes only installer-declared lifecycle" \
         "installer_declared:2099-01-02T03:04:05.000Z:2099-06-07T08:09:10.000Z" \
         "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .installer_receipt | [.timestamp_semantics, .installed_at, .updated_at] | join(":")')"
@@ -585,6 +591,8 @@ run_tests() {
     safety_json=$(HOME="$safety_home" bash "$SCAN_SCRIPT" --json --skip-provenance-tree 2>/dev/null)
     assert_eq "Receipt lifecycle is not attached after frontmatter identity replacement" "null" \
         "$(echo "$safety_json" | jq -r '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | (.installer_receipt // "null")')"
+    assert_eq "Source declaration is not attached after frontmatter identity replacement" "true" \
+        "$(echo "$safety_json" | jq '.entries[] | select(.location == ".agents/skills" and .dir_name == "receipt-backed") | .installer_source_claim == null')"
     cp "$skill_backup" "$safety_home/.agents/skills/receipt-backed/SKILL.md"
 
     jq '.skills["receipt-backed"].installedAt = "2099-02-31T03:04:05.000Z"' \

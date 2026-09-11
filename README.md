@@ -81,12 +81,20 @@ SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
   bash ~/.agents/skills/skills-panorama/bin/skill-panorama.sh --yes --agents all
 ```
 
+The command writes same-generation `latest.json`, `latest.md`, and `latest.html`.
+HTML uses the reusable `panorama-report.v1` template, with complete content
+available before JavaScript adds filtering. Its columns follow the available
+container width; `--share` also writes a redacted `share.html`.
+The review filter includes proven runtime load blockers. Installer-declared
+upstream sources and storage-repository observations remain separate; a source
+declaration grants no mutation authority.
+
 ### 4) `skill-hygiene` — installed skill evaluation
 
 Use when you need to:
 - audit the health and quality of installed skills across all agent directories;
 - identify broken symlinks, backup remnants, security indicators, stale or stub skills;
-- understand the skill topology: canonical sources, symlinked distributions, native agent skills, same-name content/version collisions;
+- understand the skill topology: canonical sources, symlinked distributions, native agent skills, same-name content/version differences (host loading conflicts require separate evidence);
 - get a structured inventory for governance review.
 
 This skill follows the "AI judges, scripts collect" philosophy. The shell script (`bin/skill-scan.sh`) gathers structured facts; the AI applies expert judgment. It respects the standard skill installation model: skills installed to `~/.agents/skills/` and symlinked to agent directories are distribution links, not duplicates.
@@ -130,7 +138,7 @@ Across all five skills:
 - All data stays local. No data is sent externally. Canary logs use a non-symlink `~/.agents/debug/` directory (`0700`) and `activation.jsonl` (`0600`); symlinked log paths are rejected rather than followed or chmodded.
 
 **Statistics accuracy contract:**
-- Exact local statistics: skill file inventory, canonical paths, symlink distribution links, broken symlinks, content hashes, same-name/content/version collisions, report freshness, and recorded canary JSONL events.
+- Exact local statistics: skill file inventory, canonical paths, symlink distribution links, broken symlinks, content hashes, same-name/content/version differences, report freshness, and recorded canary JSONL events.
 - Proxy statistics: canary observed rate, not-observed identities, cwd distribution, and observation frequency. These count local evidence, not true runtime use.
 - Out of scope without native telemetry: whether an agent discovered, loaded, obeyed, or benefited from a skill in a real conversation.
 
@@ -412,7 +420,7 @@ Managed third-party collection versions are a separate namespace: skills-refiner
 
 **Governance & Observability:**
 - `skills/skills-panorama/SKILL.md` — read-only topology map and triage
-- `skills/skills-panorama/bin/skill-panorama.sh` — scan/catalog orchestration → `latest.json` / `latest.md`
+- `skills/skills-panorama/bin/skill-panorama.sh` — scan/catalog orchestration → `latest.json` / `latest.md` / `latest.html`
 - `skills/skill-hygiene/SKILL.md` — AI-driven skill evaluation framework
 - `skills/skill-hygiene/bin/skill-scan.sh` — topology and fact collector
 - `skills/skill-hygiene/bin/skills-refiner` — Node 24 bootstrap and cleanup/collection/runtime CLI launcher

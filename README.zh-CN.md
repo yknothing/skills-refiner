@@ -81,6 +81,12 @@ SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
   bash ~/.agents/skills/skills-panorama/bin/skill-panorama.sh --yes
 ```
 
+命令生成同一报告 ID 的 `latest.json`、`latest.md` 和 `latest.html`。
+HTML 使用固定的 `panorama-report.v1` 模板，完整内容在 JavaScript 执行前
+即可阅读；搜索、筛选和详情布局随面板宽度调整。`--share` 同时生成脱敏的
+`share.html`。同名目录只呈现路径、来源声明和内容差异，宿主加载影响单独验证。
+“需要检查”包括已确认的加载阻塞，安装记录声明不会获得修改权限。
+
 ### 4) `skill-hygiene` — 已安装 skill 评估
 
 适用于：

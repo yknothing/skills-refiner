@@ -27,6 +27,7 @@ import {
   panoramaDir,
 } from './panorama-constants.mjs';
 import { decisionCardForGap, summarizeGaps } from './panorama-gaps.mjs';
+import { renderPanoramaHtml } from './panorama-html.mjs';
 
 /**
  * 将家目录真路径替换为 ~（可分享脱敏）。
@@ -308,6 +309,8 @@ export function renderPanoramaMarkdown(doc) {
   lines.push(`控制清单模式：${doc.catalog_mode === 'members' ? '已对照批准成员' : '未使用控制清单'}`);
   lines.push(`收集完整性：${doc.collectors?.status ?? 'DEGRADED'} / ${doc.collectors?.completeness ?? 'PARTIAL'}`);
   lines.push('');
+  lines.push('阅读顺序：总览与缺口数量 → 运行时事实 → 按缺口评估 → 按需展开完整来源证据。');
+  lines.push('');
   lines.push('## 总览');
   lines.push('');
   lines.push(`条目总数：${doc.summary.total}`);
@@ -319,7 +322,8 @@ export function renderPanoramaMarkdown(doc) {
   const reviewEntries = doc.entries.filter((entry) => (entry.identity?.review_signals?.risk_indicators ?? []).length > 0
     || (entry.identity?.review_signals?.hygiene_flags ?? []).some((flag) => flag.startsWith('broken_refs:')));
   if (reviewEntries.length > 0) {
-    lines.push('### 治理复核信号');
+    lines.push('<details>');
+    lines.push(`<summary>治理复核信号（${reviewEntries.length} 条，待确认）</summary>`);
     lines.push('');
     lines.push('| Skill | 安全信号 | 引用信号 |');
     lines.push('|---|---|---|');
@@ -330,6 +334,8 @@ export function renderPanoramaMarkdown(doc) {
         .join(', ') || '无';
       lines.push(`| ${entry.identity.name} | ${risks} | ${refs} |`);
     }
+    lines.push('');
+    lines.push('</details>');
     lines.push('');
   }
   if (Array.isArray(doc.managed_collections) && doc.managed_collections.length > 0) {
@@ -356,34 +362,6 @@ export function renderPanoramaMarkdown(doc) {
     lines.push('文件系统状态、运行时验证和上游版本是三个独立事实；`UNVERIFIED` 不会被写成通过。');
     lines.push('');
   }
-  lines.push('### 逐 Skill 来源与生命周期');
-  lines.push('');
-  lines.push('直接 receipt-bound 条目的时间只转述 installer receipt，语义为 `installer_declared`，不是已验证事件时间。受管集合成员的首次/当前激活时间来自 controller，语义为 `controller_record`；其 receipt history 仅是集合聚合，固定标为 `installer_declared_collection_aggregate`，不能当作逐 Skill 安装事件。immutable revision 仅对 `source_qualified` identity 展示。');
-  lines.push('');
-  lines.push('| Skill / identity variant | 资格 | 来源 | 版本（authority） | 安装/首次激活时间 | 更新/当前代激活时间 | receipt history（集合聚合） | evidence scope/state |');
-  lines.push('|---|---|---|---|---|---|---|---|');
-  for (const entry of doc.entries ?? []) {
-    const viewVariants = entry.provenance_lifecycle?.variants ?? [];
-    if (viewVariants.length === 0) {
-      lines.push(`| ${markdownCell(entry.identity?.name)} | unavailable | 未知 | 未知 | 未知 | 未知 | 未知 | unavailable |`);
-      continue;
-    }
-    for (let index = 0; index < viewVariants.length; index += 1) {
-      const variant = viewVariants[index];
-      const observations = variant.observations ?? [];
-      const suffix = viewVariants.length > 1 ? ` [${index + 1}/${viewVariants.length}]` : '';
-      const source = summarizeObservationValues(observations, sourceLabel, '来源冲突');
-      const version = summarizeObservationValues(observations, versionLabel, '版本冲突');
-      const installedAt = summarizeObservationValues(observations, (observation) => lifecycleTimestampLabel(observation, 'installed_at'), '时间冲突');
-      const updatedAt = summarizeObservationValues(observations, (observation) => lifecycleTimestampLabel(observation, 'updated_at'), '时间冲突');
-      const receiptHistory = summarizeObservationValues(observations, receiptHistoryLabel, '聚合历史冲突');
-      const evidence = summarizeObservationValues(observations, evidenceLabel, '多状态');
-      lines.push(`| ${markdownCell(`${entry.identity?.name ?? 'unknown'}${suffix}`)} | ${markdownCell(variant.qualification)} | ${markdownCell(source)} | ${markdownCell(version)} | ${markdownCell(installedAt)} | ${markdownCell(updatedAt)} | ${markdownCell(receiptHistory)} | ${markdownCell(evidence)} |`);
-    }
-  }
-  lines.push('');
-  lines.push('同名多 variant 逐行保留；表中“冲突/多状态”不会被合并为单一来源，精确观察见 JSON `provenance_lifecycle.variants[].observations[]`。');
-  lines.push('');
   lines.push('| 缺口类 | 数量 |');
   lines.push('|---|---:|');
   for (const gap of GAP_CLASS_PRIORITY) {
@@ -422,6 +400,8 @@ export function renderPanoramaMarkdown(doc) {
 
   lines.push('## 按缺口分组');
   lines.push('');
+  lines.push('这里是拓扑分诊，不是最终故障裁决；安全、引用与原生加载仍需各自证据。');
+  lines.push('');
   for (const gap of GAP_CLASS_PRIORITY) {
     const items = doc.entries.filter((entry) => entry.gap_class === gap);
     lines.push(`### ${gap}（${items.length}）`);
@@ -434,6 +414,9 @@ export function renderPanoramaMarkdown(doc) {
     const card = decisionCardForGap(gap);
     lines.push(`- 风险：${card.level} — ${card.reason}`);
     lines.push(`- 若继续评估：交给 ${card.handoff}`);
+    lines.push('');
+    lines.push('<details>');
+    lines.push(`<summary>查看 ${gap} 的 ${items.length} 条明细</summary>`);
     lines.push('');
     for (const entry of items) {
       const agents = Object.entries(entry.projected || {})
@@ -455,6 +438,8 @@ export function renderPanoramaMarkdown(doc) {
       }
     }
     lines.push('');
+    lines.push('</details>');
+    lines.push('');
   }
 
   lines.push('## 按 Agent 分列摘要');
@@ -463,6 +448,40 @@ export function renderPanoramaMarkdown(doc) {
     const presentCount = doc.entries.filter((entry) => entry.projected?.[agent.id]?.present).length;
     lines.push(`- ${agent.label_zh}（\`${agent.location}\`）${agent.present ? '' : ' — 目录不存在，已跳过投影列'}：${presentCount} 条`);
   }
+  lines.push('');
+
+  lines.push('## 来源与生命周期明细');
+  lines.push('');
+  lines.push('<details>');
+  lines.push('<summary>逐 Skill 来源与生命周期（展开完整证据）</summary>');
+  lines.push('');
+  lines.push('直接 receipt-bound 条目的时间只转述 installer receipt，语义为 `installer_declared`，不是已验证事件时间。受管集合成员的首次/当前激活时间来自 controller，语义为 `controller_record`；其 receipt history 仅是集合聚合，固定标为 `installer_declared_collection_aggregate`，不能当作逐 Skill 安装事件。immutable revision 仅对 `source_qualified` identity 展示。');
+  lines.push('');
+  lines.push('| Skill / identity variant | 资格 | 来源 | 版本（authority） | 安装/首次激活时间 | 更新/当前代激活时间 | receipt history（集合聚合） | evidence scope/state |');
+  lines.push('|---|---|---|---|---|---|---|---|');
+  for (const entry of doc.entries ?? []) {
+    const viewVariants = entry.provenance_lifecycle?.variants ?? [];
+    if (viewVariants.length === 0) {
+      lines.push(`| ${markdownCell(entry.identity?.name)} | unavailable | 未知 | 未知 | 未知 | 未知 | 未知 | unavailable |`);
+      continue;
+    }
+    for (let index = 0; index < viewVariants.length; index += 1) {
+      const variant = viewVariants[index];
+      const observations = variant.observations ?? [];
+      const suffix = viewVariants.length > 1 ? ` [${index + 1}/${viewVariants.length}]` : '';
+      const source = summarizeObservationValues(observations, sourceLabel, '来源冲突');
+      const version = summarizeObservationValues(observations, versionLabel, '版本冲突');
+      const installedAt = summarizeObservationValues(observations, (observation) => lifecycleTimestampLabel(observation, 'installed_at'), '时间冲突');
+      const updatedAt = summarizeObservationValues(observations, (observation) => lifecycleTimestampLabel(observation, 'updated_at'), '时间冲突');
+      const receiptHistory = summarizeObservationValues(observations, receiptHistoryLabel, '聚合历史冲突');
+      const evidence = summarizeObservationValues(observations, evidenceLabel, '多状态');
+      lines.push(`| ${markdownCell(`${entry.identity?.name ?? 'unknown'}${suffix}`)} | ${markdownCell(variant.qualification)} | ${markdownCell(source)} | ${markdownCell(version)} | ${markdownCell(installedAt)} | ${markdownCell(updatedAt)} | ${markdownCell(receiptHistory)} | ${markdownCell(evidence)} |`);
+    }
+  }
+  lines.push('');
+  lines.push('同名多 variant 逐行保留；表中“冲突/多状态”不会被合并为单一来源，精确观察见 JSON `provenance_lifecycle.variants[].observations[]`。');
+  lines.push('');
+  lines.push('</details>');
   lines.push('');
 
   lines.push('## 字段对照（中文 ↔ JSON 键）');
@@ -585,13 +604,13 @@ function writePrivateAtomic(path, bytes) {
 }
 
 /**
- * 覆盖写入本机 latest.json / latest.md。
+ * 覆盖写入同代次 latest.json / latest.md / latest.html。
  * @param {{ home: string, doc: object, stdoutOnly?: boolean, copyToCwd?: boolean, share?: boolean }} options
  */
 export function writePanoramaOutputs(options) {
   const md = renderPanoramaMarkdown(options.doc);
   const jsonText = `${JSON.stringify(options.doc, null, 2)}\n`;
-  const result = { jsonPath: null, mdPath: null, shareJsonPath: null, shareMdPath: null, stdout: null };
+  const result = { jsonPath: null, mdPath: null, htmlPath: null, shareJsonPath: null, shareMdPath: null, shareHtmlPath: null, stdout: null };
 
   if (options.stdoutOnly) {
     result.stdout = { json: options.doc, markdown: md };
@@ -601,26 +620,33 @@ export function writePanoramaOutputs(options) {
   const dir = ensurePrivateOutputDirectory(options.home);
   const jsonPath = join(dir, APP_SUPPORT_RELATIVE.latestJson);
   const mdPath = join(dir, APP_SUPPORT_RELATIVE.latestMd);
+  const htmlPath = join(dir, APP_SUPPORT_RELATIVE.latestHtml);
+  const htmlText = renderPanoramaHtml(options.doc);
   const outputs = [
     { path: jsonPath, bytes: jsonText },
     { path: mdPath, bytes: md },
+    { path: htmlPath, bytes: htmlText },
   ];
   if (options.share) {
     const redacted = redactValue(options.doc, options.home);
     const shareJson = join(dir, APP_SUPPORT_RELATIVE.shareJson);
     const shareMd = join(dir, APP_SUPPORT_RELATIVE.shareMd);
+    const shareHtml = join(dir, APP_SUPPORT_RELATIVE.shareHtml);
     outputs.push(
       { path: shareJson, bytes: `${JSON.stringify(redacted, null, 2)}\n` },
       { path: shareMd, bytes: redactHomePaths(md, options.home) },
+      { path: shareHtml, bytes: renderPanoramaHtml(redacted, { snapshotLabel: '可分享的脱敏快照' }) },
     );
     result.shareJsonPath = shareJson;
     result.shareMdPath = shareMd;
+    result.shareHtmlPath = shareHtml;
   }
 
   if (options.copyToCwd) {
     outputs.push(
       { path: join(process.cwd(), APP_SUPPORT_RELATIVE.latestJson), bytes: jsonText },
       { path: join(process.cwd(), APP_SUPPORT_RELATIVE.latestMd), bytes: md },
+      { path: join(process.cwd(), APP_SUPPORT_RELATIVE.latestHtml), bytes: htmlText },
     );
   }
 
@@ -628,6 +654,7 @@ export function writePanoramaOutputs(options) {
   for (const output of outputs) writePrivateAtomic(output.path, output.bytes);
   result.jsonPath = jsonPath;
   result.mdPath = mdPath;
+  result.htmlPath = htmlPath;
 
   return result;
 }

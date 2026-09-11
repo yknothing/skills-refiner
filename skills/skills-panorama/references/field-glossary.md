@@ -7,7 +7,7 @@
 | 在哪个 Agent 里出现 | `projected` | **按 Agent 分列**，不是单个「已分发」布尔 |
 | 控制清单是否批准启用 | `catalog_active` | `active` / `inactive` / `absent` / `unknown` |
 | 链接是否完好 | `link_health` | `ok` / `broken` / `unexpected_target` / `not_applicable` / `unknown`；外部但可达仍是 `ok`，只有权威计划给出期望目标时才可判 `unexpected_target` |
-| 是否撞名/撞内容 | `collision` | `none` / `conflict` / `unknown` |
+| 同名记录与加载冲突 | `collision` | `none` / `conflict` / `unknown` |
 | 缺口类（衍生） | `gap_class` | 八类中文名之一（稳定英文 id 见 gap-taxonomy）；由上表可逆推导 |
 
 `identity.catalog_members` 保存受管 `INDEX.json` 声明的成员路径、tree digest 与 no-follow 存在性观察。它仍属于「身份」原子列，用于区分「集合成员未被 scanner 展开」和「声明路径真实缺失」。
@@ -28,8 +28,22 @@
 
 顶层 `runtime_truth_matrix` 按 Agent 将 `filesystem` / `deployment` / `catalog` / `body` / `route` / `context` 六层分开。`context.result=unverified` 时禁止推断目录索引已经节省 context；`cursor.deployment.result=observe_only` 也不得冒充已部署。
 
+`provenance_lifecycle.variants[].observations[].installation` 保留每个入口的
+`entry_kind`、`link_target`、`canonical_target` 和 `link_health`，直接来自扫描器。
+软链接入口与它指向的实际文件目录是不同路径；`source.repository_id` 表示上游仓库，
+缺失仓库信息不表示链接目标未知。`lifecycle` 时间只适用于该条记录对应的路径，
+不能从目标目录复制为各软链接的创建时间。旧报告没有 `installation` 时保留未知，
+不得仅凭路径不同推断它是软链接。
+
 顶层 `collectors` 保存 `status`、`completeness`、`degraded_reasons` 与结构化 `blockers`。可解析的非零收集器输出会保留事实并标记 `DEGRADED`，CLI 返回 3。
 
 ## 禁止字段
 
 不得出现：`installed`、`ready`，或任何把未知谓词塌缩成单一绿灯的汇总枚举。
+
+
+`collision.status=conflict` 仅用于已获得同一宿主加载空间内冲突证据的情况。当前文件系统采集只能报告同名本地记录：`status=unknown`、`assessment=inventory_only`、`confirmation=null`，不能将源码目录、软链接或不同内容直接升级为命名冲突。`identity_status=ambiguous_name` 只表示报告中的名字对应多个本地身份，不表示宿主解析歧义。指向同一 canonical target 且内容相同的入口按一个 path-qualified identity 聚合，来源字段缺失不再拆分身份。
+
+Scanner 的可选 `installer_source_claim` 保留安全读取、字段约束和当前 frontmatter 名称匹配后的安装来源声明；`confidence=installer_declared` 不证明当前内容匹配，不提供不可变修订，也不授予修改权限。全树核验通过后已有 `provenance.confidence=receipt_bound` 和 `mutation_provenance` 契约保持不变。Panorama 将未绑定的声明标为 `evidence_state.source=receipt_declared`；没有采集到来源不能表述为磁盘上没有安装记录。
+
+安装声明与存储目录的 Git provenance 同时存在时，上游来源采用安装声明，原存储信息保留在对应 observation 的 `storage_provenance`。存储仓库的修订不能绑定到安装声明。`identity.review_signals.runtime_load_blockers` 仅转述 scanner 已确认失败的 `runtime_contract.load_blockers`，保留路径和验证方法；未知要求不升级为加载阻塞。

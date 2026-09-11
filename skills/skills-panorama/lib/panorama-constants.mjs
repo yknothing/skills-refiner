@@ -22,8 +22,10 @@ export const APP_SUPPORT_RELATIVE = Object.freeze({
   triageFile: join('Library', 'Application Support', 'skills-refiner', 'panorama', 'triage-preferences.json'),
   latestJson: 'latest.json',
   latestMd: 'latest.md',
+  latestHtml: 'latest.html',
   shareJson: 'share.json',
   shareMd: 'share.md',
+  shareHtml: 'share.html',
 });
 
 /** 覆盖配置 schema。 */
@@ -56,7 +58,7 @@ export const PREDICATE_LABELS_ZH = Object.freeze({
   projected: '在哪个 Agent 里出现',
   catalog_active: '控制清单是否批准启用',
   link_health: '链接是否完好',
-  collision: '是否撞名/撞内容',
+  collision: '同名记录与加载冲突',
 });
 
 /**

@@ -140,32 +140,62 @@ function buildProjected(entries, agents, sourceLocation) {
   return projected;
 }
 
-function collisionClassification(entries, sourceLocation) {
+function repositoryKey(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  let key = value.trim();
+  try {
+    const url = new URL(key);
+    key = `${url.hostname}${url.pathname}`;
+  } catch {
+    key = key.replace(/^git@([^:]+):/u, '$1/');
+    if (/^[^/.]+\/[^/]+$/u.test(key)) key = `github.com/${key}`;
+  }
+  key = key.replace(/\/+$/u, '').replace(/\.git$/u, '');
+  return key.startsWith('github.com/') ? key.toLowerCase() : key;
+}
+
+function entrySource(entry) {
+  const provenance = entry?.provenance ?? {};
+  const claim = entry?.installer_source_claim;
+  return claim?.confidence === 'installer_declared'
+    && claim.claim_kind === 'installer_receipt_claim'
+    && provenance.confidence !== 'receipt_bound' ? claim : provenance;
+}
+
+function collisionClassification(entries) {
   const concrete = (entries ?? []).filter((entry) => (entry.entry_kind || entry.type) !== 'broken_symlink');
-  const repositories = concrete.map((entry) => entry.provenance?.source_url ?? null);
+  const targets = new Map();
+  for (const entry of concrete) {
+    const target = entry.canonical_dir || entry.entry_path;
+    if (!targets.has(target)) targets.set(target, new Set());
+    const source = entrySource(entry);
+    const repository = repositoryKey(source.source_url || source.repository_id || source.source);
+    if (repository) targets.get(target).add(repository);
+  }
+  const repositories = [...targets.values()];
+  const knownSources = new Set(repositories.flatMap((values) => [...values]));
   const versions = [...new Set(concrete
     .map((entry) => entry.declared_version ?? entry.metadata_version)
     .filter(Boolean))];
   const revisions = [...new Set(concrete
-    .map((entry) => entry.provenance?.resolved_revision)
+    .map((entry) => entrySource(entry).confidence === 'installer_declared' ? null : entrySource(entry).resolved_revision)
     .filter(Boolean))];
-  const locations = new Set(concrete.map((entry) => entry.location).filter(Boolean));
-  const everySameRepository = repositories.length > 1
-    && repositories.every((value) => typeof value === 'string' && value.length > 0)
-    && new Set(repositories).size === 1;
-  if (everySameRepository && (versions.length > 1 || revisions.length > 1)) return 'same_source_revision_skew';
-  if (everySameRepository) return 'same_source_artifact_mismatch';
-  if (versions.length === 1 && concrete.length > 1 && repositories.every((value) => !value)) {
-    return 'provider_variant_set_candidate';
+  const allSourcesKnown = repositories.length > 0 && repositories.every((values) => values.size === 1);
+  if (allSourcesKnown && knownSources.size === 1 && (versions.length > 1 || revisions.length > 1)) return 'same_source_revision_difference';
+  if (allSourcesKnown && knownSources.size === 1) {
+    const hashes = new Set(concrete.map((entry) => entry.normalized_content_sha256).filter(Boolean));
+    return hashes.size > 1 ? 'same_source_content_difference' : 'same_source_records';
   }
-  if (!locations.has(sourceLocation) && locations.size > 1) return 'host_isolated_same_name';
-  return 'foreign_same_name';
+  if (allSourcesKnown && knownSources.size > 1) return 'different_source_records';
+  return 'same_name_records';
 }
 
-function collisionResult(evidence, entries, sourceLocation) {
+function collisionResult(evidence, entries) {
   return {
-    status: COLLISION_STATUS.conflict,
-    classification: collisionClassification(entries, sourceLocation),
+    status: COLLISION_STATUS.unknown,
+    assessment: 'inventory_only',
+    classification: collisionClassification(entries),
+    confirmation: null,
     default_disposition: 'preserve',
     evidence,
   };
@@ -210,7 +240,6 @@ function buildCollision(
   collisions,
   entries,
   approvedMembers = [],
-  sourceLocation = SOURCE_STORE_LOCATION,
   variants = [],
 ) {
   const hit = (collisions ?? []).find((item) => item.name === name);
@@ -219,17 +248,16 @@ function buildCollision(
         real_directory_count: hit.real_directory_count ?? null,
         distinct_hashes: hit.distinct_hashes ?? [],
         distinct_versions: hit.distinct_versions ?? [],
-      }, entries, sourceLocation);
+      }, entries);
   }
 
-  // skill-scan 的目录冲突检查不会把健康 symlink 的外部目标算成第二个
-  // 实体。全景可直接复用 scanner 已给出的 canonical_dir + 内容指纹，
-  // 在不重扫磁盘的前提下补出“不同真实目标且内容不同”的冲突。
+  // Preserve distinct local records without treating directory inventory as
+  // evidence of ambiguity in a host's loading namespace.
   const targetPaths = new Set();
   const targetHashes = new Set();
   for (const entry of entries ?? []) {
     const kind = entry.entry_kind || entry.type;
-    const targetPath = kind === 'directory' ? entry.entry_path : entry.canonical_dir;
+    const targetPath = kind === 'directory' ? entry.canonical_dir || entry.entry_path : entry.canonical_dir;
     if (typeof targetPath === 'string' && targetPath.length > 0) targetPaths.add(targetPath);
     const hash = entry.normalized_content_sha256;
     if (typeof hash === 'string' && hash.length > 0) targetHashes.add(hash);
@@ -242,7 +270,7 @@ function buildCollision(
           .map((entry) => entry.declared_version ?? entry.metadata_version)
           .filter(Boolean))].sort(),
         canonical_targets: [...targetPaths].sort(),
-      }, entries, sourceLocation);
+      }, entries);
   }
 
   const memberPaths = new Set(approvedMembers.map((item) => item.member_path).filter(Boolean));
@@ -254,7 +282,7 @@ function buildCollision(
         distinct_hashes: [...new Set([...targetHashes, ...memberDigests])].sort(),
         distinct_versions: [],
         canonical_targets: [...allDeclaredTargets].sort(),
-      }, entries, sourceLocation);
+      }, entries);
   }
   return { status: COLLISION_STATUS.none, evidence: null };
 }
@@ -291,8 +319,15 @@ function buildCatalogActive(name, catalogState, underCollection) {
 function buildReviewSignals(entries) {
   const risks = new Map();
   const hygieneFlags = new Set();
+  const loadBlockers = [];
   for (const entry of entries ?? []) {
     for (const flag of entry.flags ?? []) hygieneFlags.add(flag);
+    if (entry.runtime_contract?.status === 'fail') {
+      for (const reason of entry.runtime_contract.load_blockers ?? []) {
+        loadBlockers.push({ reason, observed_path: entry.entry_path ?? null,
+          validation_method: entry.runtime_contract.validation_method ?? null });
+      }
+    }
     for (const risk of entry.risk_indicators ?? []) {
       if (!risk?.id) continue;
       const key = [risk.id, risk.subtype ?? '', risk.canonical_skill_file ?? '', risk.line ?? '', risk.snippet_sha256 ?? ''].join('\0');
@@ -311,6 +346,7 @@ function buildReviewSignals(entries) {
       .map((risk) => ({ ...risk, observed_paths: [...risk.observed_paths].sort() }))
       .sort((a, b) => a.id.localeCompare(b.id)),
     hygiene_flags: [...hygieneFlags].sort(),
+    runtime_load_blockers: loadBlockers,
   };
 }
 
@@ -418,23 +454,30 @@ function observationContentBinding(entry) {
 }
 
 function buildProvenanceObservation({ entry = null, member = null, variant }) {
+  const entryKind = entry?.entry_kind || entry?.type || null;
   const controllerState = member?.collection_evidence?.evidence_state ?? null;
   const controllerVerified = controllerState === 'controller_verified';
   const lifecycle = member ? collectionLifecycle(member) : installerLifecycle(entry);
   const sourceQualified = variant.qualification === 'source_qualified';
   const provenance = entry?.provenance ?? {};
+  const declaredSource = entry?.installer_source_claim ?? {};
+  const source = entrySource(entry);
   const controllerSource = controllerVerified ? member?.collection_evidence?.source ?? {} : {};
-  const repositoryId = controllerSource.repository_id ?? member?.repository_id ?? provenance.repository_id
-    ?? provenance.source ?? null;
+  const repositoryId = controllerSource.repository_id ?? member?.repository_id ?? source.repository_id
+    ?? source.source ?? null;
   const repositoryUrl = controllerSource.source_url ?? member?.repository_url
-    ?? provenance.source_url ?? null;
-  const sourcePath = member?.source_path ?? provenance.source_path
-    ?? entry?.storage_relative_path ?? null;
+    ?? source.source_url ?? null;
   const receiptBound = provenance.claim_kind === 'installer_receipt_claim'
     && provenance.confidence === 'receipt_bound';
+  const receiptDeclared = !member && !sourceQualified && !receiptBound
+    && source === declaredSource;
+  const sourcePath = member?.source_path
+    ?? (receiptDeclared ? declaredSource.source_path : provenance.source_path)
+    ?? entry?.storage_relative_path ?? null;
   const sourceState = member ? controllerState ?? 'index_fallback'
     : sourceQualified ? 'source_qualified'
     : receiptBound ? 'receipt_bound'
+      : receiptDeclared ? 'receipt_declared'
       : repositoryId || repositoryUrl ? 'path_qualified' : 'unavailable';
   const managedVersion = collectionVersion(member);
   const version = managedVersion ?? (entry ? entryVersion(entry) : {
@@ -446,10 +489,17 @@ function buildProvenanceObservation({ entry = null, member = null, variant }) {
   return {
     observed_path: entry?.entry_path ?? member?.member_path ?? null,
     observed_location: entry?.location ?? null,
+    installation: {
+      entry_kind: entryKind,
+      link_target: entry?.raw_link_target || entry?.link_target || null,
+      canonical_target: entry?.canonical_dir || (entryKind === 'directory' ? entry.entry_path : null)
+        || member?.member_path || null,
+      link_health: entry ? assessLinkHealth(entry, SOURCE_STORE_LOCATION).status : LINK_HEALTH_VALUES.unknown,
+    },
     evidence_scope: {
       source: controllerVerified ? 'managed_collection_controller'
         : member ? 'managed_collection_index'
-        : receiptBound ? 'installer_receipt' : 'skill_scan.v7_entry',
+        : receiptBound || receiptDeclared ? 'installer_receipt' : 'skill_scan.v7_entry',
       lifecycle: member && lifecycle ? member.collection_evidence?.evidence_scope ?? 'managed_collection_index'
         : lifecycle ? 'installer_receipt' : 'not_observed',
       version: managedVersion ? 'immutable_artifact_manifest'
@@ -467,7 +517,7 @@ function buildProvenanceObservation({ entry = null, member = null, variant }) {
     },
     source: {
       provider: controllerSource.provider ?? member?.source_provider
-        ?? provenance.source_provider ?? null,
+        ?? source.source_provider ?? null,
       repository_id: repositoryId,
       repository_url: repositoryUrl,
       source_path: sourcePath,
@@ -478,10 +528,12 @@ function buildProvenanceObservation({ entry = null, member = null, variant }) {
           ?? provenance.resolved_revision ?? variant.resolved_revision ?? null
         : null,
       claim_kind: controllerVerified ? 'controller_record'
-        : member ? 'index_claim' : provenance.claim_kind ?? null,
+        : member ? 'index_claim' : receiptDeclared ? declaredSource.claim_kind : provenance.claim_kind ?? null,
       confidence: controllerVerified ? 'controller_verified'
-        : member ? 'controller_unverified' : provenance.confidence ?? null,
+        : member ? 'controller_unverified' : receiptDeclared ? declaredSource.confidence : provenance.confidence ?? null,
     },
+    ...(receiptDeclared || entry?.storage_provenance
+      ? { storage_provenance: entry?.storage_provenance ?? provenance } : {}),
     version,
     lifecycle: lifecycle ?? {
       installed_at: null,
@@ -549,11 +601,15 @@ function buildIdentityVariants(name, entries, approvedMembers, collectionRoots =
     const fingerprint = entry.normalized_content_sha256 ?? null;
     const member = memberByPath.get(canonicalTarget) ?? null;
     if (member) matchedMembers.add(member.member_path);
-    const repositoryId = member?.repository_id ?? entry.provenance?.repository_id
-      ?? entry.provenance?.source ?? entry.provenance?.source_url ?? null;
-    const repositoryUrl = member?.repository_url ?? entry.provenance?.source_url ?? null;
-    const revision = member?.resolved_revision ?? entry.provenance?.resolved_revision ?? null;
-    const sourcePath = member?.source_path ?? entry.storage_relative_path ?? null;
+    const source = entrySource(entry);
+    const repositoryId = member?.repository_id ?? source.repository_id
+      ?? source.source ?? source.source_url ?? null;
+    const repositoryUrl = member?.repository_url ?? source.source_url ?? null;
+    const revision = member?.resolved_revision
+      ?? (source.confidence === 'installer_declared' ? null : source.resolved_revision) ?? null;
+    const sourcePath = member?.source_path
+      ?? source.source_path
+      ?? entry.storage_relative_path ?? null;
     const collectionId = member?.collection_id ?? entry.collection_id ?? null;
     const artifactDigest = member?.tree_digest ?? fingerprint;
     const collectionClaim = Boolean(member || collectionId
@@ -565,7 +621,7 @@ function buildIdentityVariants(name, entries, approvedMembers, collectionRoots =
     const entityId = identityDigest(sourceQualified ? [
       'source', collectionId, repositoryId, qualifiedRevision, sourcePath, name, artifactDigest,
     ] : [
-      'path', collectionId, repositoryId, qualifiedRevision, sourcePath, name, artifactDigest, canonicalTarget,
+      'path', name, artifactDigest, canonicalTarget,
     ]);
     const key = entityId;
     const underCollection = typeof canonicalTarget === 'string' && collectionRoots.some((root) => (
@@ -596,6 +652,11 @@ function buildIdentityVariants(name, entries, approvedMembers, collectionRoots =
       observed_paths: [],
       observed_locations: [],
     };
+    if (source.confidence === 'installer_declared' && !member) {
+      current.repository_id = repositoryId;
+      current.repository_url = repositoryUrl;
+      current.source_path = sourcePath;
+    }
     if (entry.entry_path && !current.observed_paths.includes(entry.entry_path)) current.observed_paths.push(entry.entry_path);
     if (entry.location && !current.observed_locations.includes(entry.location)) current.observed_locations.push(entry.location);
     if (canonicalTarget && !current.canonical_targets.includes(canonicalTarget)) current.canonical_targets.push(canonicalTarget);
@@ -652,7 +713,21 @@ function buildIdentityVariants(name, entries, approvedMembers, collectionRoots =
  * @param {{ agents: Array, sourceLocation: string, collisions: object[], catalogState: object, collectionRoots: string[] }} ctx
  */
 export function normalizeSkillRow(group, ctx) {
-  const { name, entries } = group;
+  const { name } = group;
+  // A projection can carry the scanner cache's ambient Git observation. When
+  // the exact same files have a direct installer claim, keep that ambient
+  // record as storage evidence, without copying the receipt onto the link.
+  const declaredDirectories = group.entries.filter((entry) => isStoredEntry(entry, ctx.sourceLocation)
+    && entrySource(entry).confidence === 'installer_declared');
+  const entries = group.entries.map((entry) => {
+    if ((entry.entry_kind || entry.type) !== 'symlink' || entry.installer_source_claim
+        || entry.provenance?.confidence === 'receipt_bound') return entry;
+    const directory = declaredDirectories.find((source) => source.canonical_dir && source.canonical_dir === entry.canonical_dir
+      && source.normalized_content_sha256 && source.normalized_content_sha256 === entry.normalized_content_sha256
+      && repositoryKey(source.provenance?.source_url || source.provenance?.repository_id)
+        === repositoryKey(entry.provenance?.source_url || entry.provenance?.repository_id));
+    return directory ? { ...entry, provenance: {}, storage_provenance: entry.provenance ?? {} } : entry;
+  });
   const approvedMembers = ctx.approvedMembers?.get(name) ?? [];
   const storedEntries = entries.filter((entry) => isStoredEntry(entry, ctx.sourceLocation));
   const underCollection = entries.some((entry) => {
@@ -689,7 +764,7 @@ export function normalizeSkillRow(group, ctx) {
     }
   }
   const link_health = aggregateLinkHealth(projected);
-  const collision = buildCollision(name, ctx.collisions, entries, approvedMembers, ctx.sourceLocation, variants);
+  const collision = buildCollision(name, ctx.collisions, entries, approvedMembers, variants);
   const variantCatalogStates = new Set(variants.map(({ catalog_active: state }) => state));
   const catalog_active = variantCatalogStates.size === 1
     ? [...variantCatalogStates][0]
@@ -760,7 +835,6 @@ export function rowsForMissingApproved(approvedNames, seenNames, ctx) {
         ctx.collisions,
         [],
         observations,
-        ctx.sourceLocation,
         variants,
       ),
     });

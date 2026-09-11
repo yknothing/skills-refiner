@@ -41,6 +41,7 @@ PROVENANCE_RECEIPT_TMP=""
 GIT_TREE_HASH_RESULT=""
 MUTATION_PROVENANCE_JSON=""
 INSTALLER_SOURCE_CLAIM_JSON="null"
+INSTALLER_DECLARED_SOURCE_JSON="null"
 INSTALLER_RECEIPT_LIFECYCLE_JSON="null"
 SCAN_CONTENT_CACHE_DIR=""
 SCAN_CONTENT_CACHE_HITS_FILE=""
@@ -611,6 +612,7 @@ repository_id_for_source_url() {
 
 installer_source_claim_from_receipt() {
     local entry_name="$1" receipt_snapshot="$2"
+    local confidence="${3:-receipt_bound}"
     local source source_owner source_repository source_url skill_path source_path
     INSTALLER_SOURCE_CLAIM_JSON="null"
 
@@ -659,6 +661,7 @@ installer_source_claim_from_receipt() {
     fi
 
     INSTALLER_SOURCE_CLAIM_JSON=$(jq -n \
+        --arg confidence "$confidence" \
         --arg source_url "https://github.com/${source}.git" \
         --arg repository_id "$source" \
         --arg source_path "$source_path" \
@@ -670,7 +673,7 @@ installer_source_claim_from_receipt() {
           claim_kind:"installer_receipt_claim",
           git_root:"",
           git_branch:"",
-          confidence:"receipt_bound"}')
+          confidence:$confidence}')
 }
 
 # Installer receipt timestamps are declarations supplied by the installer, not
@@ -1076,6 +1079,7 @@ mutation_provenance_for_entry() {
     local unknown='{"kind":"unknown","confidence":"none","evidence":null}'
     MUTATION_PROVENANCE_JSON="$unknown"
     INSTALLER_SOURCE_CLAIM_JSON="null"
+    INSTALLER_DECLARED_SOURCE_JSON="null"
     INSTALLER_RECEIPT_LIFECYCLE_JSON="null"
 
     if [ "$location" != ".agents/skills" ] || [ "$entry_type" != "directory" ]; then
@@ -1102,6 +1106,11 @@ mutation_provenance_for_entry() {
         (.skills[$skill].skillFolderHash | type == "string" and test("^[0-9a-f]{40}$"))
     ' "$receipt_snapshot" >/dev/null 2>&1; then
         local receipt_sha256 expected_tree_sha1 installed_tree_sha1 tree_file_count
+        # Retain a bounded source declaration even when content verification is
+        # skipped. It must not grant the mutation authority of a bound receipt.
+        installer_source_claim_from_receipt "$entry_name" "$receipt_snapshot" installer_declared
+        INSTALLER_DECLARED_SOURCE_JSON="$INSTALLER_SOURCE_CLAIM_JSON"
+        INSTALLER_SOURCE_CLAIM_JSON="null"
         receipt_sha256=$(sr_hash_file_raw "$receipt_snapshot" 2>/dev/null || true)
         expected_tree_sha1=$(jq -r --arg skill "$entry_name" '.skills[$skill].skillFolderHash' "$receipt_snapshot" 2>/dev/null || true)
 
@@ -1261,10 +1270,11 @@ scan_directory() {
             continue
         fi
 
-        local mutation_provenance_json installer_source_claim_json installer_receipt_lifecycle_json
+        local mutation_provenance_json installer_source_claim_json installer_receipt_lifecycle_json installer_declared_source_json
         mutation_provenance_for_entry "$dir_label" "$entry_type" "$entry_name" "$entry_path" "$install_receipt_snapshot"
         mutation_provenance_json="$MUTATION_PROVENANCE_JSON"
         installer_source_claim_json="$INSTALLER_SOURCE_CLAIM_JSON"
+        installer_declared_source_json="$INSTALLER_DECLARED_SOURCE_JSON"
         installer_receipt_lifecycle_json="$INSTALLER_RECEIPT_LIFECYCLE_JSON"
 
         if [ "$entry_type" = "broken_symlink" ]; then
@@ -1344,6 +1354,7 @@ scan_directory() {
                 --arg raw_link_target_base64 "$raw_link_target_base64" \
                 --argjson mutation_provenance "$mutation_provenance_json" \
                 --argjson installer_source_claim "$installer_source_claim_json" \
+                --argjson installer_declared_source "$installer_declared_source_json" \
                 --argjson installer_receipt "$installer_receipt_lifecycle_json" \
                 --arg installer_storage_git_root "$installer_storage_git_root" \
                 --arg installer_storage_git_branch "$installer_storage_git_branch" \
@@ -1367,6 +1378,8 @@ scan_directory() {
                 .raw_link_target = (if $raw_link_target == "" then null else $raw_link_target end) |
                 .raw_link_target_base64 = (if $entry_type == "directory" then null else $raw_link_target_base64 end) |
                 .mutation_provenance = $mutation_provenance |
+                .installer_source_claim = (if $cached.frontmatter.name == $dir_name
+                    then $installer_declared_source else null end) |
                 .installer_receipt = (
                     if $installer_receipt != null
                        and $cached.name == $dir_name
@@ -1444,6 +1457,9 @@ scan_directory() {
         top_version=$(get_frontmatter "$skill_file" "version")
         metadata_version=$(get_metadata_value "$skill_file" "version")
         declared_version="${metadata_version:-$top_version}"
+        if [ "$name" != "$entry_name" ]; then
+            installer_declared_source_json="null"
+        fi
         if [ "$installer_receipt_lifecycle_json" != "null" ]; then
             installer_receipt_lifecycle_json=$(printf '%s' "$installer_receipt_lifecycle_json" | jq -c \
                 --arg dir_name "$entry_name" --arg frontmatter_name "$name" '
@@ -1618,6 +1634,7 @@ scan_directory() {
         entry_json=$(jq -n \
             --arg name "${name:-$entry_name}" \
             --arg frontmatter_name "$name" \
+            --argjson installer_declared_source "$installer_declared_source_json" \
             --arg dir_name "$entry_name" \
             --arg location "$dir_label" \
             --arg entry_path "$entry_path" \
@@ -1701,6 +1718,7 @@ scan_directory() {
                 raw_link_target: (if $raw_link_target == "" then null else $raw_link_target end),
                 raw_link_target_base64: (if $entry_type == "directory" then null else $raw_link_target_base64 end),
                 mutation_provenance: $mutation_provenance,
+                installer_source_claim: $installer_declared_source,
                 installer_receipt: $installer_receipt,
                 source_skill_file: $source_skill_file,
                 canonical_skill_file: $canonical_skill_file,

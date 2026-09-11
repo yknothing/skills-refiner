@@ -313,5 +313,17 @@ JSON 为权威；Markdown 不得成为第二真相源。
 
 ## 17. Verification
 
+2026-09-11 补充：按用户要求增加固定的 `panorama-report.v1` HTML 展示模板，
+与 JSON/Markdown 同代次输出。§13 的 HTML non-goal 仅描述历史 V1 范围；
+当前 HTML 是现有事实快照的呈现层，不新增收集器、网络服务或可变治理操作。
+模板使用随容器收缩的布局、页面滚动与完整静态正文，JavaScript 仅增强筛选。
+
 - 对抗包：`docs/adversarial-product-pk/2026-07-22-skills-panorama/`（含 L2 独立 Challenger：`09-independent-challenger-pass.md`）  
 - 验收：`docs/verification/2026-07-22-skills-panorama-acceptance.md`
+
+
+### 2026-09-11 命名冲突证据边界修正
+
+本修正替代上文将“同名不同内容”“同名链接落到多个真实目标”直接归入命名冲突的规则。目录、源码和软链接是安装拓扑事实；同名内容差异是内容事实。只有同一宿主加载空间内的解析歧义、覆盖或错误选择证据才能确认加载冲突。当前静态 collector 不提供该证据，因此多条同名记录保留为 `collision.status=unknown`、`assessment=inventory_only`、`confirmation=null`，进入「暂无法判定」，而不是 `conflict`。八类名称继续兼容，“命名冲突”保留给有宿主证据的结果。
+
+同一真实目标、相同内容的源码入口和软链接不因某一入口缺少来源元数据而拆成多个身份。仓库 URL 的 `.git` 后缀等表示差异不产生不同来源。安装记录的来源声明独立于内容绑定状态展示；跳过全树校验不能抹去已读取的声明，也不能提升其可信等级。

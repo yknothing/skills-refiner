@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="{{CSP}}">
+  <meta name="skills-refiner-template" content="panorama-report.v1">
+  <title>{{TITLE}}</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #203632;
+      --muted: #5d6e66;
+      --line: #d9e1d9;
+      --paper: #fff;
+      --background: #f5f7f3;
+      --accent: #236b57;
+      --wash: #e9f1e9;
+      --warning: #855313;
+      --warning-wash: #fbf0dc;
+      --radius: 12px;
+      --space: clamp(14px, 3%, 36px);
+    }
+    * { box-sizing: border-box; }
+    html { min-inline-size: 0; scroll-behavior: auto; }
+    body {
+      margin: 0;
+      min-inline-size: 0;
+      color: var(--ink);
+      background: var(--background);
+      font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      overflow-wrap: anywhere;
+    }
+    button, input, select { font: inherit; color: inherit; max-inline-size: 100%; }
+    button, summary { cursor: pointer; }
+    button, select {
+      min-block-size: 42px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--paper);
+      padding: 8px 12px;
+    }
+    button:hover, .entry-link:hover { background: var(--wash); }
+    button:active, .entry-link:active { background: #dbe8dd; }
+    :focus-visible { outline: 3px solid #357dba; outline-offset: 3px; }
+    a { color: var(--accent); }
+    [hidden] { display: none !important; }
+    .report {
+      inline-size: 100%;
+      max-inline-size: 1440px;
+      min-inline-size: 0;
+      margin-inline: auto;
+      padding: 24px var(--space) 56px;
+    }
+    .top, .hero, .detail-heading {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px 24px;
+    }
+    .top { padding-block-end: 18px; border-block-end: 1px solid var(--line); }
+    .brand { font-size: 15px; font-weight: 650; }
+    .eyebrow { font-size: 11px; letter-spacing: .08em; color: var(--muted); }
+    .snapshot-label { font-size: 12px; color: var(--warning); background: var(--warning-wash); padding: 5px 9px; border-radius: 6px; }
+    .hero { margin-block: 26px 22px; }
+    h1 { font-size: clamp(26px, 4vw, 34px); line-height: 1.25; font-weight: 620; letter-spacing: -.025em; margin: 0 0 10px; }
+    h2 { font-size: 20px; line-height: 1.4; font-weight: 620; margin: 0; }
+    h3 { font-size: 15px; margin: 18px 0 8px; }
+    p { margin: 8px 0; }
+    .muted, .stamp { color: var(--muted); }
+    .stamp, .small { font-size: 12px; }
+    .stats, .steps, .runtime-grid, .workspace {
+      display: grid;
+      gap: 16px;
+      align-items: start;
+      min-inline-size: 0;
+    }
+    /* Breakpoints follow the containing panel, including narrow Canvas hosts. */
+    .stats { grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr)); }
+    .steps, .runtime-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); }
+    .workspace { grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr)); gap: 22px; }
+    .stats > *, .steps > *, .workspace > *, .runtime-grid > * { min-inline-size: 0; }
+    .stat, .panel, .runtime-adapter { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); }
+    .stat { padding: 16px 20px; }
+    .stat strong { display: block; font-size: 32px; font-weight: 580; line-height: 1.3; font-variant-numeric: tabular-nums; }
+    .stat span { color: var(--muted); font-size: 13px; }
+    .notice { padding: 12px 16px; margin-block: 20px; border-inline-start: 3px solid var(--accent); border-radius: 0 7px 7px 0; background: var(--wash); font-size: 13px; }
+    .notice.warning { border-color: var(--warning); background: var(--warning-wash); }
+    .steps { margin-block: 22px 28px; }
+    .step { border-block-start: 1px solid var(--line); padding-block-start: 12px; }
+    .step strong { font-size: 13px; }
+    .step p { color: var(--muted); font-size: 12px; margin: 5px 0 0; }
+    .panel { min-inline-size: 0; }
+    .panel-head, .detail-body { padding: 20px; }
+    .panel-head { border-block-end: 1px solid var(--line); }
+    .search { inline-size: 100%; min-inline-size: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; margin-block-start: 14px; }
+    .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-block-start: 12px; }
+    .filters > * { min-inline-size: 0; }
+    .filters button, .filters select { font-size: 12px; }
+    .filters button[aria-pressed="true"] { color: white; background: var(--ink); border-color: var(--ink); }
+    .result { padding: 11px 20px; color: var(--muted); font-size: 12px; border-block-end: 1px solid var(--line); }
+    .inventory { margin: 0; padding: 0; list-style: none; }
+    .entry-link { display: block; padding: 14px 20px; border-block-end: 1px solid var(--line); text-decoration: none; color: var(--ink); }
+    .entry-link[aria-current="true"] { background: var(--wash); box-shadow: inset 3px 0 var(--accent); }
+    .entry-line { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+    .entry-name { font-weight: 620; font-size: 14px; }
+    .entry-context { margin-block-start: 5px; font-size: 12px; color: var(--muted); }
+    .tag { display: inline-block; max-inline-size: 100%; border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; background: #f8faf7; color: var(--muted); font-size: 11px; }
+    .tag.review { background: var(--warning-wash); color: var(--warning); border-color: #e8d4b1; }
+    .entry-detail { min-inline-size: 0; scroll-margin-block-start: 12px; }
+    .entry-detail > summary { padding: 17px 20px; font-size: 15px; font-weight: 620; }
+    .entry-detail + .entry-detail { border-block-start: 1px solid var(--line); }
+    .entry-detail[open] > summary { border-block-end: 1px solid var(--line); }
+    .detail-heading { align-items: start; }
+    .fact { font-size: 13px; padding: 12px 14px; margin-block: 16px; background: #f3f6f0; border-radius: 8px; }
+    .facts { display: grid; grid-template-columns: minmax(0, 6rem) minmax(0, 1fr); gap: 7px 12px; margin: 0; font-size: 13px; }
+    .facts dt { color: var(--muted); }
+    .facts dd { margin: 0; min-inline-size: 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+    pre { padding: 12px; border-radius: 7px; background: var(--background); }
+    .variant { margin-block-start: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; }
+    .variant h3 { font-size: 13px; margin: 0 0 10px; }
+    .installation-list { padding-inline-start: 20px; margin-block: 12px; }
+    .installation-list li { margin-block: 10px; }
+    .evidence { margin-block-start: 14px; border-block-start: 1px solid var(--line); padding-block-start: 10px; }
+    .evidence summary { min-block-size: 38px; font-size: 13px; }
+    .guidance { margin-block-start: 18px; border-block-start: 1px solid var(--line); padding-block-start: 8px; }
+    .guidance ol { padding-inline-start: 20px; font-size: 13px; }
+    .guidance li { margin-block: 7px; }
+    .empty { padding: 20px; color: var(--muted); }
+    .runtime { margin-block-start: 26px; }
+    .runtime-grid { padding: 18px 20px; }
+    .runtime-adapter { padding: 14px; }
+    .runtime-adapter h3 { margin: 0 0 12px; }
+    .footer { margin-block-start: 22px; color: var(--muted); font-size: 12px; }
+    .sr-only { position: absolute; inline-size: 1px; block-size: 1px; clip-path: inset(50%); white-space: nowrap; overflow: hidden; }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main class="report" data-report-root>
+    <header class="top">
+      <div class="brand">skills-refiner <div class="eyebrow">LOCAL SKILL REVIEW</div></div>
+      <div class="snapshot-label">{{SNAPSHOT_LABEL}}</div>
+    </header>
+    <section class="hero">
+      <div><h1>技能概览</h1><p class="muted">查看技能来源、安装状态和检查结果。</p></div>
+      <div class="stamp">{{STAMP}}</div>
+    </section>
+    <section class="stats" aria-label="报告总览">{{STATS}}</section>
+    {{NOTICE}}
+    <details class="evidence"><summary>按目录和链接状态统计</summary>{{GAP_COUNTS}}</details>
+    <section class="steps" aria-label="问题定位、修复与结果验证">
+      <div class="step"><strong>01 · 问题定位</strong><p>确认技能路径和检查范围，核实扫描结果中需要处理的问题。</p></div>
+      <div class="step"><strong>02 · 修复与优化</strong><p>确定修改内容和预期结果，使用对应工具执行。</p></div>
+      <div class="step"><strong>03 · 结果验证</strong><p>按原范围重新检查，确认问题已解决，并检查相关功能是否正常。</p></div>
+    </section>
+    <noscript><p class="notice">JavaScript 未启用，搜索和筛选不可用。完整技能列表和检查结果仍可按名称展开查看。</p></noscript>
+    <section class="workspace">
+      <section class="panel inventory-panel" id="inventory">
+        <div class="panel-head">
+          <h2>技能列表</h2><p class="muted small">选择技能查看来源、路径和检查详情。</p>
+          <div class="interactive-controls" hidden>
+            <label class="sr-only" for="search">搜索 Skill 名称、路径或 Agent</label>
+            <input class="search" id="search" type="search" placeholder="搜索名称、路径或 Agent" autocomplete="off">
+            <div class="filters">
+              <button type="button" id="all" aria-pressed="true">全部技能</button>
+              <button type="button" id="review" aria-pressed="false">需要检查</button>
+              <label class="sr-only" for="gap">按目录和链接状态筛选</label>
+              <select id="gap"><option value="">全部目录和链接状态</option>{{GAP_OPTIONS}}</select>
+              <button type="button" id="reset">清除筛选</button>
+            </div>
+          </div>
+        </div>
+        <div class="result" id="result" aria-live="polite">{{RESULT}}</div>
+        <ul class="inventory" id="entry-list">{{ENTRY_LINKS}}</ul>
+        <p class="empty" id="empty" {{EMPTY_HIDDEN}}>没有符合条件的技能。清除筛选后可查看全部技能。</p>
+      </section>
+      <section class="panel entry-details" aria-label="技能详情与验证步骤">
+        {{ENTRY_DETAILS}}
+        <p class="empty" id="detail-empty" {{DETAIL_EMPTY_HIDDEN}}>暂无技能详情。请检查筛选条件和数据采集结果。</p>
+      </section>
+    </section>
+    {{COLLECTOR_DETAILS}}
+    {{COLLECTION_DETAILS}}
+    <section class="panel runtime">
+      <div class="panel-head"><h2>加载与运行检查结果</h2><p class="muted small">分别检查文件、部署配置、技能发现、内容读取、技能选择和上下文占用。</p></div>
+      <div class="runtime-grid">{{RUNTIME}}</div>
+    </section>
+    <footer class="footer">{{FOOTER}}</footer>
+  </main>
+  <script id="report-data" type="application/json">{{REPORT_JSON}}</script>
+  <script>
+    (() => {
+      'use strict';
+      const byId = id => document.getElementById(id);
+      const rows = Array.from(document.querySelectorAll('[data-entry-link]'));
+      const details = Array.from(document.querySelectorAll('[data-entry-detail]'));
+      const search = byId('search');
+      const gap = byId('gap');
+      let mode = 'all';
+      let selected = rows[0]?.getAttribute('href')?.slice(1) ?? null;
+
+      function select(id, scroll = false) {
+        selected = id;
+        for (const detail of details) {
+          const active = detail.id === id;
+          detail.hidden = !active;
+          detail.open = active;
+        }
+        for (const row of rows) row.setAttribute('aria-current', String(row.getAttribute('href') === `#${id}`));
+        byId('detail-empty').hidden = id !== null;
+        if (scroll && id) {
+          const target = byId(id);
+          target.querySelector('summary').focus({ preventScroll: true });
+          target.scrollIntoView({ block: 'start', behavior: 'auto' });
+        }
+      }
+
+      function filter() {
+        const term = search.value.trim().toLocaleLowerCase();
+        const matches = [];
+        for (const row of rows) {
+          const visible = (mode === 'all' || row.dataset.review === 'true')
+            && (!gap.value || row.dataset.gap === gap.value)
+            && (!term || row.dataset.search.toLocaleLowerCase().includes(term));
+          row.parentElement.hidden = !visible;
+          if (visible) matches.push(row.getAttribute('href').slice(1));
+        }
+        byId('result').textContent = `显示 ${matches.length} / ${rows.length} 条 · ${mode === 'all' ? '全部技能' : '需要检查（扫描结果待核实）'}`;
+        byId('empty').hidden = matches.length > 0;
+        select(matches.includes(selected) ? selected : matches[0] ?? null);
+      }
+
+      for (const id of ['all', 'review']) byId(id).addEventListener('click', () => {
+        mode = id;
+        byId('all').setAttribute('aria-pressed', String(id === 'all'));
+        byId('review').setAttribute('aria-pressed', String(id === 'review'));
+        filter();
+      });
+      byId('reset').addEventListener('click', () => {
+        mode = 'all'; search.value = ''; gap.value = '';
+        byId('all').setAttribute('aria-pressed', 'true');
+        byId('review').setAttribute('aria-pressed', 'false');
+        filter();
+      });
+      search.addEventListener('input', filter);
+      gap.addEventListener('change', filter);
+      byId('entry-list').addEventListener('click', event => {
+        const row = event.target.closest('[data-entry-link]');
+        if (!row) return;
+        event.preventDefault();
+        select(row.getAttribute('href').slice(1), true);
+      });
+      filter();
+      for (const control of document.querySelectorAll('.interactive-controls')) control.hidden = false;
+    })();
+  </script>
+</body>
+</html>

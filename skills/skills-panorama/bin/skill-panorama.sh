@@ -26,7 +26,7 @@ print_help() {
     cat <<'EOF'
 技能全景 (skill-panorama)
 
-只读编排现有收集器，生成已安装 Agent Skills 全景报告。
+只读编排现有收集器，以固定模板生成同代次 JSON、Markdown、HTML 全景报告。
 不删除、不改软链、不改控制清单。
 
 用法:

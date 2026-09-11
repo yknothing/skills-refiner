@@ -189,9 +189,11 @@ assert_eq "incomplete collector exits nonzero after writing evidence" "3" "$CLI_
 
 LATEST_JSON="$SANDBOX/Library/Application Support/skills-refiner/panorama/latest.json"
 LATEST_MD="$SANDBOX/Library/Application Support/skills-refiner/panorama/latest.md"
+LATEST_HTML="$SANDBOX/Library/Application Support/skills-refiner/panorama/latest.html"
 
 assert_true "latest.json exists" test -f "$LATEST_JSON"
 assert_true "latest.md exists" test -f "$LATEST_MD"
+assert_true "latest.html exists" test -f "$LATEST_HTML"
 
 SCHEMA=$("$NODE24" -e "const d=require('fs').readFileSync(process.argv[1],'utf8'); console.log(JSON.parse(d).schema_version)" "$LATEST_JSON")
 assert_eq "schema_version" "skills-refiner.panorama.v2" "$SCHEMA"
@@ -220,7 +222,7 @@ assert_eq "complete → 齐全" "齐全" "$(gap_of complete-skill)"
 assert_eq "source-only → 仅在源目录" "仅在源目录" "$(gap_of source-only-skill)"
 assert_eq "partial → 部分 Agent 已出现" "部分 Agent 已出现" "$(gap_of partial-skill)"
 assert_eq "broken → 链接损坏" "链接损坏" "$(gap_of broken-link-skill)"
-assert_eq "collision → 命名冲突" "命名冲突" "$(gap_of collision-skill)"
+assert_eq "same-name inventory → 暂无法判定" "暂无法判定" "$(gap_of collision-skill)"
 assert_eq "ghost catalog → 清单与现实不符" "清单与现实不符" "$(gap_of ghost-member)"
 
 LIFECYCLE=$($NODE24 -e '
@@ -238,6 +240,14 @@ assert_eq "entry lifecycle projects installer-declared receipt without revision"
 assert_true "markdown has 八类导航" grep -q "部分 Agent 已出现" "$LATEST_MD"
 assert_true "markdown has 字段对照" grep -q "字段对照" "$LATEST_MD"
 assert_true "markdown has per-skill installer-declared lifecycle" grep -q "2099-01-02T03:04:05.000Z" "$LATEST_MD"
+assert_true "HTML uses the fixed report template" grep -q 'panorama-report.v1' "$LATEST_HTML"
+assert_true "HTML preserves lifecycle observations" grep -q '2099-01-02T03:04:05.000Z' "$LATEST_HTML"
+assert_true "HTML embeds the complete authoritative document" "$NODE24" -e '
+const fs=require("fs"),assert=require("assert/strict");
+const html=fs.readFileSync(process.argv[1],"utf8");
+const doc=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+assert.deepEqual(JSON.parse(html.match(/<script id="report-data" type="application\/json">([\s\S]*?)<\/script>/)[1]),doc);
+' "$LATEST_HTML" "$LATEST_JSON"
 if grep -q "rm -rf" "$LATEST_MD"; then
   echo -e "  ${RED}✗${NC} markdown forbids rm -rf"
   FAIL=$((FAIL + 1))
@@ -249,14 +259,23 @@ fi
 # --share 脱敏
 "$PANORAMA_BIN" --yes --agents claude,cursor,codex --hygiene-root "$HYGIENE_ROOT" --share >/dev/null 2>&1
 SHARE_JSON="$SANDBOX/Library/Application Support/skills-refiner/panorama/share.json"
+SHARE_HTML="$SANDBOX/Library/Application Support/skills-refiner/panorama/share.html"
 assert_true "share.json exists" test -f "$SHARE_JSON"
+assert_true "share.html exists" test -f "$SHARE_HTML"
 share_has_sandbox=$("$NODE24" -e "
 const t=require('fs').readFileSync(process.argv[1],'utf8');
 console.log(t.includes(process.argv[2])?'yes':'no');
 " "$SHARE_JSON" "$SANDBOX")
 assert_eq "share redacts sandbox home" "no" "$share_has_sandbox"
+assert_true "share HTML is redacted before rendering" "$NODE24" -e '
+const fs=require("fs"),assert=require("assert/strict");
+const html=fs.readFileSync(process.argv[1],"utf8");
+const doc=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+assert(!html.includes(process.argv[3]));
+assert.deepEqual(JSON.parse(html.match(/<script id="report-data" type="application\/json">([\s\S]*?)<\/script>/)[1]),doc);
+' "$SHARE_HTML" "$SHARE_JSON" "$SANDBOX"
 
-for private_output in "$LATEST_JSON" "$LATEST_MD" "$SHARE_JSON" "$SANDBOX/Library/Application Support/skills-refiner/panorama/share.md"; do
+for private_output in "$LATEST_JSON" "$LATEST_MD" "$LATEST_HTML" "$SHARE_JSON" "$SHARE_HTML" "$SANDBOX/Library/Application Support/skills-refiner/panorama/share.md"; do
   mode=$("$NODE24" -e "console.log((require('fs').statSync(process.argv[1]).mode & 0o777).toString(8))" "$private_output")
   assert_eq "private output mode 0600: $(basename "$private_output")" "600" "$mode"
 done

@@ -100,6 +100,9 @@ export function classifyGap(row, options) {
   if (isCatalogDrift(row, options.catalogMode)) {
     return GAP_CLASSES.CATALOG_DRIFT;
   }
+  if (row.collision?.status === COLLISION_STATUS.unknown) {
+    return GAP_CLASSES.UNKNOWN;
+  }
   if (!row.stored && anyProjection(row.projected)) {
     return GAP_CLASSES.AGENT_ONLY;
   }
@@ -159,51 +162,51 @@ export function decisionCardForGap(gapClass) {
     case GAP_CLASSES.BROKEN_LINK:
       return {
         level: RISK_LEVELS.high,
-        reason: '投影不可用，Agent 可能加载失败',
-        handoff: 'skill-hygiene（评估与可恢复处置，需二次确认）',
+        reason: '技能链接损坏或指向非预期路径，Agent 可能无法加载',
+        handoff: '使用 skill-hygiene 检查链接，执行修复前需再次确认',
       };
     case GAP_CLASSES.NAME_COLLISION:
       return {
         level: RISK_LEVELS.high,
-        reason: '同名异内容可能导致错误技能被加载',
-        handoff: 'skill-hygiene（保留默认，勿自动清退）',
+        reason: '同一宿主的加载范围内存在已确认的同名选择歧义',
+        handoff: '先核对宿主、候选路径和加载证据，再使用 skill-hygiene 评估处理方式',
       };
     case GAP_CLASSES.CATALOG_DRIFT:
       return {
         level: RISK_LEVELS.medium,
-        reason: '控制意图与磁盘现实不一致',
-        handoff: 'skill-hygiene collection status / 人工确认意图',
+        reason: '技能启用配置与实际文件状态不一致',
+        handoff: '使用 skill-hygiene collection status 检查配置，确认哪些技能应当启用',
       };
     case GAP_CLASSES.PARTIAL_PROJECTION:
       return {
         level: RISK_LEVELS.low,
-        reason: '所选且存在的 Agent 中仅部分有投影',
-        handoff: '调整 Agent 覆盖或交给 skill-hygiene 评估是否补投影',
+        reason: '在所选且目录存在的 Agent 中，只有部分技能目录包含此技能',
+        handoff: '确认需要使用此技能的 Agent，再使用 skill-hygiene 评估是否补充安装',
       };
     case GAP_CLASSES.AGENT_ONLY:
       return {
         level: RISK_LEVELS.medium,
-        reason: '投影找不到预期源，可能是孤儿链接或外来副本',
-        handoff: 'skill-hygiene',
+        reason: 'Agent 目录中存在此技能，但未找到对应的源文件，可能是失效链接或独立副本',
+        handoff: '使用 skill-hygiene 检查源文件和链接目标',
       };
     case GAP_CLASSES.SOURCE_ONLY:
       return {
         level: RISK_LEVELS.low,
-        reason: '源里有但未分发到所选 Agent',
-        handoff: '调整 Agent 覆盖或交给 skill-hygiene 评估是否需要投影',
+        reason: '源目录中存在此技能，但所选 Agent 的技能目录中没有对应文件或链接',
+        handoff: '确认需要使用此技能的 Agent，再使用 skill-hygiene 评估是否需要安装',
       };
     case GAP_CLASSES.UNKNOWN:
       return {
         level: RISK_LEVELS.low,
-        reason: '上游收集器字段不足，全景不猜测',
-        handoff: '等待收集器补字段；或 skill-debug 补充观测',
+        reason: '现有证据不足以确认状态；同名文件或不同内容本身不证明加载冲突',
+        handoff: '检查数据采集错误，或使用 skill-debug 收集更多运行信息',
       };
     case GAP_CLASSES.COMPLETE:
     default:
       return {
         level: RISK_LEVELS.none,
-        reason: '拓扑一致，无需处置',
-        handoff: '仅阅览',
+        reason: '所选范围内的源目录、Agent 目录和链接检查一致',
+        handoff: '查看报告，当前目录和链接检查未发现需要处理的问题',
       };
   }
 }

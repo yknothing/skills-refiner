@@ -43,7 +43,7 @@ function printHelp() {
   --yes             非交互：使用已存配置或默认三件套
   --stdout-only     不落盘，摘要到 stdout（JSON+标记）
   --copy-cwd        额外复制最新报告到 cwd（真名路径；分享请用 --share）
-  --share           额外写出脱敏 share.json / share.md
+  --share           额外写出脱敏 share.json / share.md / share.html
   --json            stdout 打印权威 JSON（仍默认写 latest.*，除非 --stdout-only）
   --skip-provenance-tree  转发给 skill-scan（默认开启）
   --no-skip-provenance-tree  关闭上述加速
@@ -266,9 +266,11 @@ export async function runPanoramaCli(argv = process.argv.slice(2)) {
     process.stdout.write(`技能全景已写入:\n`);
     process.stdout.write(`  JSON: ${written.jsonPath}\n`);
     process.stdout.write(`  Markdown: ${written.mdPath}\n`);
+    process.stdout.write(`  HTML: ${written.htmlPath}\n`);
     if (written.shareJsonPath) {
       process.stdout.write(`  可分享(脱敏): ${written.shareJsonPath}\n`);
       process.stdout.write(`  可分享 Markdown: ${written.shareMdPath}\n`);
+      process.stdout.write(`  可分享 HTML: ${written.shareHtmlPath}\n`);
     }
     process.stdout.write(`条目 ${doc.summary.total}；齐全 ${doc.summary.gap_counts['齐全']}；缺口见报告。\n`);
   }

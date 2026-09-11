@@ -238,3 +238,21 @@ bash ~/.agents/skills/skill-hygiene/bin/skill-scan.sh
 # Step 4: Ask AI to interpret and recommend
 Use skill-hygiene to evaluate the scan results and recommend improvements.
 ```
+
+### 20) Read the skill overview and continue an authorized repair
+
+```bash
+SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
+  bash ~/.agents/skills/skills-panorama/bin/skill-panorama.sh --yes
+```
+
+Open the emitted `latest.html` locally. Search for a skill, inspect its actual
+file groups and typed installation paths, then use “需要检查” to find review
+signals and proven load blockers. JSON, Markdown and HTML share one report ID.
+Use `--share` only when a redacted copy is needed.
+
+When continuing a repair, carry the report ID, paths, fingerprints, selected
+Agents and existing authorization into `skill-hygiene`. Preserve installer
+declarations as claims, distinguish source directories from symlink entries,
+and verify the original issue with the same scope after changes. Directory
+checks and host discovery, selection and task execution remain separate facts.

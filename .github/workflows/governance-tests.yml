@@ -86,6 +86,7 @@ jobs:
       - name: Run panorama contracts and CLI
         run: |
           node --test skills/skills-panorama/tests/test-panorama-gaps.mjs
+          node --test skills/skills-panorama/tests/test-panorama-html.mjs
           SKILLS_REFINER_NODE_BIN="$(command -v node)" bash skills/skills-panorama/tests/test-panorama-cli.sh
 
       - name: Run macOS cleanup mutation and adapter tests

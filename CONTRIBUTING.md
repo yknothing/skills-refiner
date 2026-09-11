@@ -114,6 +114,7 @@ node --test skills/skill-hygiene/tests/test-collection-cli.mjs \
 
 # Panorama interpretation and real CLI contracts
 node --test skills/skills-panorama/tests/test-panorama-gaps.mjs
+node --test skills/skills-panorama/tests/test-panorama-html.mjs
 SKILLS_REFINER_NODE_BIN="$(command -v node)" bash skills/skills-panorama/tests/test-panorama-cli.sh
 
 # macOS-only mutation, recovery, and native-helper gates
@@ -130,7 +131,7 @@ tests are release gates, not optional local probes. On Ubuntu, assert the exact
 unsupported JSON/exit `3`/zero-mutation boundary. Windows remains a bounded
 read-only Git Bash gate.
 
-The macOS CI job invokes all 23 current test files. Ubuntu runs the portable
+The macOS CI job invokes all 24 current test files. Ubuntu runs the portable
 collection, source-attestation, runtime CLI and panorama suites. Collection
 transactions, runtime evidence (including record-lock/pointer mutation), and
 runtime profile lifecycle tests run on macOS because they use the native helper

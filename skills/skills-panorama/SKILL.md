@@ -38,18 +38,46 @@ SKILLS_REFINER_NODE_BIN=/absolute/path/to/node24 \
 | 指定 Agent | `--agents claude,cursor,codex` |
 | 零提问 | `--yes` 或非 TTY 或 `--agents` |
 | 仅终端 | `--stdout-only` |
-| 可分享脱敏 | `--share`（写出 `share.json` / `share.md`） |
+| 可分享脱敏 | `--share`（写出 `share.json` / `share.md` / `share.html`） |
 
 权威落盘（本机，覆盖写）：
 
-`~/Library/Application Support/skills-refiner/panorama/latest.json`  
-`~/Library/Application Support/skills-refiner/panorama/latest.md`
+- `~/Library/Application Support/skills-refiner/panorama/latest.json`
+- `~/Library/Application Support/skills-refiner/panorama/latest.md`
+- `~/Library/Application Support/skills-refiner/panorama/latest.html`
 
-JSON 是契约权威；Markdown 给人读。
+JSON 是契约权威；Markdown 和 HTML 给人读，三者携带同一 `generation_id`。
+
+先展示收集完整性、缺口数量与下一步，再展示运行时事实；完整来源和生命周期
+明细放在报告末尾按需展开。不要让全量明细掩盖需要复核的事项。
 
 `latest.*` 与 `share.*` 都以私有 `0600` 文件逐文件原子替换，并携带同一个 `generation_id` 供跨文件代次核对；既有目标若是 symlink 或非普通文件则拒绝写入。`--share` 会递归脱敏 URL、SSH endpoint、query/fragment、当前 HOME 与其它主机绝对路径。
 
 若任一收集器未完整成功，CLI 仍会在事实可解析时生成报告，但写明 `collectors.status: DEGRADED`、保留结构化 blocker，并以退出码 `3` 结束。调用方不得把“报告已生成”误当成“收集完整”。
+
+## 固定页面 / Canvas 模板
+
+生成或更新全景页面时，使用 [templates/report.html](templates/report.html) 与
+[lib/panorama-html.mjs](lib/panorama-html.mjs)，模板标识为 `panorama-report.v1`。
+不要另写一次性页面、复制历史数据充当新诊断，或在每次报告中重新设计配色和结构。
+同一模板可放入网页或支持 HTML 的 Canvas 宿主；不同报告只替换权威数据。
+
+- 固定浅色背景、深绿色文字和强调色、系统字体、间距、焦点状态及信息层级。
+- 页面使用通用技术语言：流程统一为“问题定位 → 修复与优化 → 结果验证”；
+  用“来源与路径”“Agent 技能目录”“报告 ID”说明具体对象，避免“拓扑分诊”
+  “身份变体”“报告代次”等内部术语。原始 JSON 字段与状态值保持原样。
+- 时间统一显示为 `YYYY-MM-DD HH:mm:ss UTC`，不根据本机设置添加城市或地区说明。
+- 安装入口按实际文件和来源分组，明确区分实体目录、软链接、链接目标与上游仓库。
+  多个软链接指向同一目录时，说明它们共享文件；不要重复显示成多份独立安装。
+  上游仓库缺失只表示没有仓库记录。安装历史标明对应路径，不把源目录的安装时间
+  当作软链接创建时间；未声明版本号或没有安装记录时，用一句说明代替重复空字段。
+- 先展示观察时间、范围、完整性和数量，再展示条目、身份/生命周期证据及复诊条件。
+- 默认全部条目；筛选明确显示匹配数/总数，并提供清除筛选。
+- 完整报告先写入 HTML。JavaScript 仅增强搜索、筛选与选择，禁用时仍能按名称展开阅读。
+- 分栏由容器可用宽度决定；长路径换行，正文使用页面滚动，不固定列表高度或裁切溢出内容。
+- 运行时六层事实以可换行的卡片呈现；不使用无法收缩的宽表。
+- 模板改动应检查内容完整性、窄面板/宽窗口、底部可达、键盘操作和无脚本阅读。
+  静态契约通过不等于完成视觉验收；宿主访问受限时明确未验证项。
 
 ## 对人说的六列
 
@@ -60,11 +88,11 @@ JSON 是契约权威；Markdown 给人读。
 | 在哪个 Agent 里出现 | `projected`（按 Agent 分列） |
 | 控制清单是否批准启用 | `catalog_active`（无清单为 `absent`） |
 | 链接是否完好 | `link_health` |
-| 是否撞名/撞内容 | `collision` |
+| 同名记录与加载冲突 | `collision` |
 
 无控制清单时：**不要**把条目判成「清单与现实不符」；仍可归「齐全」。
 
-同名时必须查看 `identity.variants`：每个 variant 独立携带来源身份、内容指纹、canonical target、`catalog_active` 与 `catalog_conformance`。同名同内容但来自不同仓库仍是冲突，默认 `preserve`；不得仅凭内容相同替用户清退。
+同名时必须查看 `identity.variants`：每个 variant 独立携带来源身份、内容指纹、canonical target、`catalog_active` 与 `catalog_conformance`。软链接、源码目录、不同仓库或内容差异都不能单独证明命名冲突。静态扫描保留同名记录，标为 `collision.status=unknown`、`assessment=inventory_only`，默认 `preserve`；只有同一宿主加载空间内的冲突证据才能确认 `conflict`。
 
 运行时事实见顶层 `runtime_truth_matrix`，按 Agent 分开呈现 `filesystem`、`deployment`、`catalog`、`body`、`route`、`context`。六层不得互相代证；目录嵌套本身不证明节省 context。
 
@@ -85,6 +113,11 @@ JSON 是契约权威；Markdown 给人读。
 ## 决策卡（需要选择下一步时）
 
 对与任务相关的缺口类或点名条目给出下列信息；已授权继续评估时，把现状、证据、范围和未验证点交给 `skill-hygiene`，无需让用户再次选「继续」：
+
+交接保留 `generation_id`、观察时间、canonical target/identity variant、内容指纹、
+所选 Agent 和收集参数；写清待确认的失败条件及预期复诊结果。复诊前保存基线，
+避免 `latest.*` 覆盖后只剩新报告。缺口数下降、目标不再出现或命令成功本身不证明修复；
+变更后的同一对象与范围、原失败条件和受影响消费者都需相应证据。
 
 | 字段 | 要求 |
 |---|---|

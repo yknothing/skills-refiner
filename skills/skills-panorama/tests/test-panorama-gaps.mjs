@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { CATALOG_ACTIVE_VALUES, GAP_CLASSES, LINK_HEALTH_VALUES } from '../lib/panorama-constants.mjs';
+import { CATALOG_ACTIVE_VALUES, COLLISION_STATUS, GAP_CLASSES, LINK_HEALTH_VALUES } from '../lib/panorama-constants.mjs';
 import { normalizePanoramaRows, assertNoCollapsedFields } from '../lib/panorama-normalize.mjs';
 import {
   approvedMembersFromCollectionArtifacts,
@@ -32,6 +32,7 @@ import {
   collectSkillScan,
 } from '../lib/panorama-collect.mjs';
 import { agentsFromTopology, parseAgentsFlag } from '../lib/panorama-config.mjs';
+import { renderPanoramaHtml } from '../lib/panorama-html.mjs';
 import { attachGapClasses, classifyGap, isCatalogDrift } from '../lib/panorama-gaps.mjs';
 import {
   redactHomePaths,
@@ -356,6 +357,11 @@ test('金样：人为断链', () => {
   const decorated = attachGapClasses(rows, { catalogMode: catalog_mode });
   assert.equal(decorated[0].link_health.status, LINK_HEALTH_VALUES.broken);
   assert.equal(decorated[0].gap_class, GAP_CLASSES.BROKEN_LINK);
+  const brokenObservation = decorated[0].provenance_lifecycle.variants
+    .flatMap((variant) => variant.observations).find((item) => item.observed_location === '.claude/skills');
+  assert.deepEqual(brokenObservation.installation, {
+    entry_kind: 'broken_symlink', link_target: '/missing/gamma', canonical_target: null, link_health: 'broken',
+  });
 });
 
 test('金样：清单漂移（批准但磁盘没有）', () => {
@@ -594,7 +600,7 @@ test('目录型集合成员按 INDEX 声明路径确认为源侧实物，不误�
   }
 });
 
-test('金样：撞名', () => {
+test('scanner 的同名记录不证明宿主加载冲突', () => {
   const scan = {
     skills: [
       entry({ name: 'epsilon', location: '.agents/skills', entry_kind: 'directory', hash: 'sha256:a' }),
@@ -624,10 +630,11 @@ test('金样：撞名', () => {
     catalog: { present: false, catalog: null },
   });
   const decorated = attachGapClasses(rows, { catalogMode: catalog_mode });
-  assert.equal(decorated[0].gap_class, GAP_CLASSES.NAME_COLLISION);
+  assert.equal(decorated[0].collision.status, COLLISION_STATUS.unknown);
+  assert.equal(decorated[0].gap_class, GAP_CLASSES.UNKNOWN);
 });
 
-test('健康外部链接不冒充断链；异目标异内容单独归命名冲突', () => {
+test('源码与健康外部链接内容不同，只记录差异而不确认命名冲突', () => {
   const scan = {
     skills: [entry({
       name: 'brainstorming', location: '.agents/skills', entry_kind: 'directory',
@@ -647,7 +654,8 @@ test('健康外部链接不冒充断链；异目标异内容单独归命名冲�
   });
   const [row] = attachGapClasses(normalized.rows, { catalogMode: normalized.catalog_mode });
   assert.equal(row.link_health.status, LINK_HEALTH_VALUES.ok);
-  assert.equal(row.collision.status, 'conflict');
+  assert.equal(row.collision.status, 'unknown');
+  assert.equal(row.collision.assessment, 'inventory_only');
   assert.equal(row.collision.default_disposition, 'preserve');
   assert.equal(row.identity.identity_status, 'ambiguous_name');
   assert.equal(row.identity.content_fingerprint, null);
@@ -657,7 +665,7 @@ test('健康外部链接不冒充断链；异目标异内容单独归命名冲�
     row.projected.claude.entity_id,
     row.identity.variants.find((variant) => variant.canonical_target === '/tmp/cache/superpowers/brainstorming').entity_id,
   );
-  assert.equal(row.gap_class, GAP_CLASSES.NAME_COLLISION);
+  assert.equal(row.gap_class, GAP_CLASSES.UNKNOWN);
 });
 
 test('同一 canonical entity 的源目录与软链聚合为一个 qualified variant', () => {
@@ -665,10 +673,12 @@ test('同一 canonical entity 的源目录与软链聚合为一个 qualified var
     skills: [entry({
       name: 'same', location: '.agents/skills', entry_kind: 'directory',
       entry_path: '/tmp/home/.agents/skills/same', canonical_dir: '/tmp/home/.agents/skills/same', hash: 'sha256:one',
+      repository: 'https://github.com/example/source.git',
     })],
     skill_links: [entry({
       name: 'same', location: '.claude/skills', entry_kind: 'symlink',
       entry_path: '/tmp/home/.claude/skills/same', canonical_dir: '/tmp/home/.agents/skills/same', hash: 'sha256:one',
+      link_target: '../../.agents/skills/same',
     })],
     broken_symlinks: [], name_collisions: [],
   };
@@ -677,7 +687,16 @@ test('同一 canonical entity 的源目录与软链聚合为一个 qualified var
   });
   assert.equal(normalized.rows[0].identity.identity_status, 'path_qualified');
   assert.equal(normalized.rows[0].identity.variants.length, 1);
+  assert.equal(normalized.rows[0].collision.status, COLLISION_STATUS.none);
   assert.deepEqual(normalized.rows[0].identity.variants[0].observed_locations, ['.agents/skills', '.claude/skills']);
+  const observations = normalized.rows[0].provenance_lifecycle.variants[0].observations;
+  assert.deepEqual(observations.find((item) => item.observed_location === '.claude/skills').installation, {
+    entry_kind: 'symlink',
+    link_target: '../../.agents/skills/same',
+    canonical_target: '/tmp/home/.agents/skills/same',
+    link_health: 'ok',
+  });
+  assert.equal(observations.find((item) => item.observed_location === '.agents/skills').installation.entry_kind, 'directory');
 });
 
 test('相同上游 revision/path/digest 的物理副本保持一个 source-qualified identity', () => {
@@ -785,7 +804,7 @@ test('每个 identity variant 独立记录 catalog 状态，顶层混合状态�
   assert.notEqual(managedView.entity_id, externalView.entity_id);
 });
 
-test('同名同内容但来自不同仓库仍是需保留的 identity 冲突', () => {
+test('不同目录的同名来源记录保留，但不升级为已确认冲突', () => {
   const normalized = normalizePanoramaRows({
     scan: {
       skills: [
@@ -809,10 +828,26 @@ test('同名同内容但来自不同仓库仍是需保留的 identity 冲突', (
   const row = normalized.rows[0];
   assert.equal(row.identity.identity_status, 'ambiguous_name');
   assert.equal(row.identity.variants.length, 2);
-  assert.equal(row.collision.status, 'conflict');
-  assert.equal(row.collision.classification, 'foreign_same_name');
+  assert.equal(row.collision.status, 'unknown');
+  assert.equal(row.collision.classification, 'different_source_records');
   assert.equal(row.collision.default_disposition, 'preserve');
   assert.deepEqual(row.collision.evidence.distinct_hashes, ['sha256:identical']);
+});
+
+test('同一仓库的 URL 写法不同不会成为不同来源或运行冲突', () => {
+  const normalized = normalizePanoramaRows({
+    scan: {
+      skills: [entry({name:'shared-source',location:'.agents/skills',entry_kind:'directory',
+        canonical_dir:'/source/shared-source',hash:'sha256:old',repository:'https://github.com/obra/superpowers.git'})],
+      skill_links: [entry({name:'shared-source',location:'.claude/skills',entry_kind:'symlink',
+        canonical_dir:'/cache/shared-source',hash:'sha256:new',repository:'https://github.com/obra/superpowers'})],
+      broken_symlinks: [], name_collisions: [],
+    }, agents: AGENTS, approvedNames:new Set(), catalog:{present:false,catalog:null},
+  });
+  const row=normalized.rows[0];
+  assert.equal(row.collision.status, COLLISION_STATUS.unknown);
+  assert.equal(row.collision.classification, 'same_source_content_difference');
+  assert.equal(row.identity.variants.length,2);
 });
 
 test('禁止 installed/ready 塌缩字段', () => {
@@ -1075,7 +1110,7 @@ test('latest/share 以 0600 原子写，并拒绝 symlink 与非普通目标', (
     chmodSync(outputDirectory, 0o755);
     writePanoramaOutputs({ home, doc, share: true });
     assert.equal(statSync(outputDirectory).mode & 0o777, 0o700);
-    for (const path of [written.jsonPath, written.mdPath, written.shareJsonPath, written.shareMdPath]) {
+    for (const path of [written.jsonPath, written.mdPath, written.htmlPath, written.shareJsonPath, written.shareMdPath, written.shareHtmlPath]) {
       assert.equal(statSync(path).mode & 0o777, 0o600, path);
     }
     assert.deepEqual(readdirSync(join(home, 'Library/Application Support/skills-refiner/panorama'))
@@ -1194,4 +1229,65 @@ test('Markdown 含八类与字段对照且无突变命令', () => {
   assert.match(md, /skill-hygiene/);
   assert.match(md, /受管集合状态/);
   assert.match(md, /MEMBER_DRIFT ×2/);
+});
+
+
+test('安装记录来源声明与软链聚合，但不升级为已验证来源', () => {
+  const installed = entry({ name: 'declared', location: '.agents/skills', entry_kind: 'directory',
+    entry_path: '/tmp/home/.agents/skills/declared', canonical_dir: '/tmp/home/.agents/skills/declared', hash: 'sha256:one' });
+  installed.installer_source_claim = { repository_id: 'example/source', source_url: 'https://github.com/example/source.git',
+    source_path: 'skills/declared', source_provider: 'github', resolved_revision: null,
+    claim_kind: 'installer_receipt_claim', confidence: 'installer_declared' };
+  installed.provenance.source_path = 'declared';
+  const projected = entry({ name: 'declared', location: '.claude/skills', entry_kind: 'symlink',
+    entry_path: '/tmp/home/.claude/skills/declared', canonical_dir: installed.canonical_dir, hash: 'sha256:one' });
+  const { rows } = normalizePanoramaRows({ scan: { skills: [installed], skill_links: [projected], broken_symlinks: [], name_collisions: [] },
+    agents: AGENTS, approvedNames: new Set(), catalog: { present: false, catalog: null } });
+  assert.equal(rows[0].identity.variants.length, 1);
+  assert.equal(rows[0].identity.variants[0].qualification, 'path_qualified');
+  assert.equal(rows[0].collision.status, 'none');
+  const observations = rows[0].provenance_lifecycle.variants[0].observations;
+  const source = observations.find((item) => item.observed_location === '.agents/skills');
+  assert.equal(source.source.repository_id, 'example/source');
+  assert.equal(source.source.source_path, 'skills/declared');
+  assert.equal(rows[0].identity.variants[0].source_path, 'skills/declared');
+  assert.equal(source.source.resolved_revision, null);
+  assert.equal(source.source.confidence, 'installer_declared');
+  assert.equal(source.evidence_state.source, 'receipt_declared');
+  assert.equal(source.evidence_scope.source, 'installer_receipt');
+  assert.equal(observations.find((item) => item.observed_location === '.claude/skills').source.repository_id, null);
+});
+
+test('安装来源与存储仓库同时存在时分别保留，存储修订不提升安装声明', () => {
+  const installed = entry({ name: 'declared', location: '.agents/skills', hash: 'sha256:one',
+    entry_kind: 'directory', canonical_dir: '/tmp/home/.agents/skills/declared' });
+  installed.installer_source_claim = { repository_id: 'upstream/actual', source_url: 'https://github.com/upstream/actual.git',
+    source_path: 'skills/declared', source_provider: 'github', resolved_revision: null,
+    claim_kind: 'installer_receipt_claim', confidence: 'installer_declared' };
+  installed.provenance = { repository_id: 'github.com/private-owner/storage', source_url: 'https://github.com/private-owner/storage.git',
+    source_path: 'declared', resolved_revision: 'storage-revision', confidence: 'git_remote_observed' };
+  const link = { ...installed, entry_kind: 'symlink', location: '.codex/skills',
+    entry_path: '/fixture/codex/declared', installer_source_claim: null };
+  const { rows } = normalizePanoramaRows({ scan: { skills: [installed], skill_links: [link], broken_symlinks: [], name_collisions: [] },
+    agents: AGENTS, approvedNames: new Set(), catalog: { present: false, catalog: null } });
+  const variant = rows[0].identity.variants[0];
+  assert.equal(rows[0].identity.variants.length, 1);
+  const observations = rows[0].provenance_lifecycle.variants[0].observations;
+  const observation = observations.find((item) => item.observed_location === '.agents/skills');
+  const projection = observations.find((item) => item.observed_location === '.codex/skills');
+  assert.equal(variant.repository_id, 'upstream/actual');
+  assert.equal(variant.qualification, 'path_qualified');
+  assert.equal(variant.resolved_revision, null);
+  assert.equal(observation.source.repository_id, 'upstream/actual');
+  assert.equal(observation.source.source_path, 'skills/declared');
+  assert.equal(observation.source.resolved_revision, null);
+  assert.equal(observation.evidence_state.source, 'receipt_declared');
+  assert.equal(observation.source.confidence, 'installer_declared');
+  assert.deepEqual(observation.storage_provenance, installed.provenance);
+  assert.equal(projection.source.repository_id, null);
+  assert.deepEqual(projection.storage_provenance, installed.provenance);
+  const doc = buildPanoramaDocument({ rows: attachGapClasses(rows, { agents: AGENTS }), agents: AGENTS });
+  const visible = renderPanoramaHtml(doc).replace(/<script\b[^>]*>[\s\S]*?<\/script>/gu, '').replace(/<pre>[\s\S]*?<\/pre>/gu, '');
+  assert.match(visible, /upstream\/actual/u);
+  assert.doesNotMatch(visible, /private-owner\/storage/u);
 });
