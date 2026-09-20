@@ -396,6 +396,7 @@ rmdir -- "$SESSION_DIR"
 - `skills/skill-hygiene/tests/test-scan.sh` 与 `test-cleanup-*` — scan 与 cleanup gates
 - `skills/skill-debug/SKILL.md` — 三层可观测性
 - `skills/skill-debug/bin/skill-probe.sh` — 发现诊断
+- `skills/skill-debug/bin/pi-skill-catalog.mjs` — Pi 0.86.0 原生用户技能目录只读检查，包含普通 Markdown 与同名版本选择；参见[示例](examples/README.md#21-inspect-pi-startup-skill-discovery)
 - `skills/skill-debug/bin/skill-trace.sh` — 探针注入/移除
 - `skills/skill-debug/bin/skill-dashboard.sh` — 探针观测面板
 - `skills/skill-debug/bin/skills-refiner-doctor.sh` — 只读 probe + 面板 + hygiene 快照
