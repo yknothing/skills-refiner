@@ -95,6 +95,10 @@ bash skills/skill-debug/tests/test-observability-regressions.sh
 bash skills/skill-debug/tests/test-platform-contract.sh
 cmp skills/skill-debug/lib/common.sh skills/skill-hygiene/lib/common.sh
 
+# Native Pi discovery regression (use an existing Pi 0.86.0 installation)
+SKILLS_REFINER_PI_PACKAGE=/absolute/path/to/node_modules/@earendil-works/pi-coding-agent \
+  node --test skills/skill-debug/tests/test-pi-skill-catalog.mjs
+
 # Node 24 cleanup contracts and CLI
 node --test skills/skill-hygiene/tests/test-cleanup-contract.mjs
 node --test skills/skill-hygiene/tests/test-cleanup-core.mjs
@@ -124,6 +128,11 @@ node --test skills/skill-hygiene/tests/test-cleanup-transaction.mjs
   skills/skill-hygiene/native/cleanup-macos-helper.c
 ```
 
+The Pi test requires the actual versioned package; missing configuration fails
+the suite rather than certifying skipped native coverage. CI installs that exact
+test dependency into runner temporary storage with lifecycle scripts disabled.
+It is not a dependency of the installed governance skill.
+
 All tests must use a path-checked sandbox `HOME` and exercise the real SUT. Mock
 only external boundaries; do not mock the cleanup planner, transaction engine,
 or adapter being asserted. macOS fault-injection and installed-layout mutation
@@ -131,8 +140,9 @@ tests are release gates, not optional local probes. On Ubuntu, assert the exact
 unsupported JSON/exit `3`/zero-mutation boundary. Windows remains a bounded
 read-only Git Bash gate.
 
-The macOS CI job invokes all 24 current test files. Ubuntu runs the portable
-collection, source-attestation, runtime CLI and panorama suites. Collection
+The macOS CI job invokes the listed suites, including native Pi discovery.
+Ubuntu also runs native Pi discovery alongside the portable collection,
+source-attestation, runtime CLI and panorama suites. Collection
 transactions, runtime evidence (including record-lock/pointer mutation), and
 runtime profile lifecycle tests run on macOS because they use the native helper
 and macOS filesystem tools. A portable pass does not certify macOS mutation.
