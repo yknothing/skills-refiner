@@ -82,6 +82,38 @@ Prefer native agent signals when they exist. This skill fills the local evidence
 | Codex | Native skill discovery from `.agents/skills`, `~/.agents/skills`, admin/system scopes, symlink following, and `agents/openai.yaml` invocation policy | Report local surfaces and metadata; do not claim runtime activation |
 | OpenAI Agents SDK | App-workflow tracing for SDK runs: generations, tools, handoffs, guardrails, custom spans | Separate SDK signal; not evidence of Codex/IDE skill loading |
 | Cursor | Rules, memories, MCP config, Agent Skills, and agent terminal context | Report local rules/skills/MCP presence; no documented full trace exporter is assumed |
+| Pi 0.86.0 | Native package resolver and skill loader | `pi-skill-catalog.mjs` observes user skill discovery, selected paths, disabled paths, and warnings; project/package/CLI resources and workflow execution are outside this probe |
+
+### Pi user skill discovery
+
+For Pi startup warnings, use the installed runtime instead of assuming that
+only `SKILL.md` files can enter its catalog:
+
+```bash
+node ~/.agents/skills/skill-debug/bin/pi-skill-catalog.mjs \
+  --pi-package /absolute/path/to/node_modules/@earendil-works/pi-coding-agent --json
+```
+
+The entry point is self-contained and version-bound to Pi `0.86.0`; use a Node
+runtime supported by that Pi installation. `--settings /absolute/candidate.json`
+checks a candidate user configuration without writing it. Local resource paths
+retain the real agent directory as their resolution base. Exit `0` means the
+observation completed, including any reported warnings; it does not certify a
+clean catalog or runtime qualification. Exit `3` reports unsupported Pi versions
+or configured packages, which could otherwise trigger installation. Other
+failures exit `2`. No extensions or model calls run.
+
+Pi can discover ordinary Markdown with non-empty descriptions in shared grouping
+directories, and can retain invalid names or overlong descriptions with warnings.
+Compare the observed paths with the intended skill entries. For confirmed
+reference/template exposure, exclude the exact resource subtree in Pi's user
+`settings.json` with `!<absolute-directory>/**`; keep reference files readable.
+For a confirmed host-specific variant, use `-<absolute-loser-SKILL.md>` only after
+checking the winning path and content. Do not assume tilde expansion in override
+patterns, delete either variant, or change a placeholder into a valid skill name.
+Merge into the existing `skills` array, compare candidate and live catalogs, and
+verify every retained identity. Native directory warnings, body access, and task
+outcomes remain separate facts.
 
 ### Accuracy Contract
 

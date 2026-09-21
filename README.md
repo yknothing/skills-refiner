@@ -430,6 +430,7 @@ Managed third-party collection versions are a separate namespace: skills-refiner
 - `skills/skill-hygiene/tests/test-scan.sh` and `test-cleanup-*` — scan and cleanup gates
 - `skills/skill-debug/SKILL.md` — three-layer observability
 - `skills/skill-debug/bin/skill-probe.sh` — discovery diagnostics
+- `skills/skill-debug/bin/pi-skill-catalog.mjs` — read-only Pi 0.86.0 native user catalog, including ordinary Markdown and collision winners; see [example](examples/README.md#21-inspect-pi-startup-skill-discovery)
 - `skills/skill-debug/bin/skill-trace.sh` — activation trace injection/removal
 - `skills/skill-debug/bin/skill-dashboard.sh` — canary observation dashboard
 - `skills/skill-debug/bin/skills-refiner-doctor.sh` — read-only probe + dashboard + hygiene snapshot

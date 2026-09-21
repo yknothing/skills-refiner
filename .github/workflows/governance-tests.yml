@@ -68,6 +68,12 @@ jobs:
       - name: Verify selective installed layout
         run: NODE24_BIN="$(command -v node)" bash skills/skill-debug/tests/test-install-layout.sh
 
+      - name: Verify native Pi skill discovery
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pi-catalog-test" --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.86.0
+          SKILLS_REFINER_PI_PACKAGE="$RUNNER_TEMP/pi-catalog-test/node_modules/@earendil-works/pi-coding-agent" \
+            node --test skills/skill-debug/tests/test-pi-skill-catalog.mjs
+
       - name: Run portable collection and runtime contracts
         run: |
           node --test skills/skill-hygiene/tests/test-collection-contract.mjs \

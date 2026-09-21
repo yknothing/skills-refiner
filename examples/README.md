@@ -256,3 +256,40 @@ Agents and existing authorization into `skill-hygiene`. Preserve installer
 declarations as claims, distinguish source directories from symlink entries,
 and verify the original issue with the same scope after changes. Directory
 checks and host discovery, selection and task execution remain separate facts.
+
+### 21) Inspect Pi startup skill discovery
+
+```bash
+node ~/.agents/skills/skill-debug/bin/pi-skill-catalog.mjs \
+  --pi-package /absolute/path/to/node_modules/@earendil-works/pi-coding-agent --json
+```
+
+This invokes Pi 0.86.0's native resource resolver and skill loader for user auto
+discovery and configured local skill paths. It reports selected canonical paths,
+content hashes, description lengths, disabled paths, and loader diagnostics.
+Project/CLI resources are excluded; configured packages fail explicitly rather
+than initiating installation. No extension, model, or skill workflow executes.
+Exit `0` means the observation succeeded, not that warnings are absent or the
+skills are qualified for task execution. Other versions/packages exit `3`.
+
+If Better Skills reference documents were confirmed as unintended catalog
+entries and the Pi-specific Impeccable variant is the intended winner, merge
+these rules into the existing user `skills` array, replacing `/absolute/home`
+with the actual home path. Preserve all other settings:
+
+```json
+{
+  "skills": [
+    "!/absolute/home/.agents/skills/better-skills/docs/**",
+    "-/absolute/home/.agents/skills/impeccable/SKILL.md"
+  ]
+}
+```
+
+Validate a private candidate file using `--settings /absolute/candidate.json`
+before applying it. Assert that only the intended reference entries disappear,
+all actual members retain their paths/hashes, and Impeccable selects the expected
+Pi path. Repeat against the real settings file after applying. These overrides
+preserve the references and both host variants on disk; they do not mutate a
+managed collection or require editing its source. Restart Pi or reload its
+resources before expecting an existing session to reflect the change.
