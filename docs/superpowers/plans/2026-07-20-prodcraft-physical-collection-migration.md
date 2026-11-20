@@ -2,7 +2,7 @@
 
 > **Execution:** Run inline with the `executing-plans` workflow on the existing `codex/adr-skill-control-plane` branch. Do not mutate the live home until the synthetic-HOME gates pass.
 
-**Goal:** Replace the 46 receipt-owned legacy ProdCraft skills in `/Users/whatsup/.agents/skills` with the reviewed 40-package `pc-*` public surface physically stored under `/Users/whatsup/.agents/skills/prodcraft`, while preserving provenance, drift detection, and exact recoverability.
+**Goal:** Replace the 46 receipt-owned legacy ProdCraft skills in `~/.agents/skills` with the reviewed 40-package `pc-*` public surface physically stored under `~/.agents/skills/prodcraft`, while preserving provenance, drift detection, and exact recoverability.
 
 **Architecture:** Add an isolated `collection` command family beside the existing cleanup command. The planner binds direct filesystem observations and a fixed upstream source tree into a canonical plan hash. The transaction layer materializes an immutable artifact and staged collection outside discovery, publishes independent recovery evidence, moves only identity-matched legacy objects to quarantine, publishes the collection by rename, and records a durable operation journal. Status always re-observes the filesystem; ledger and `INDEX.json` are desired-state/materialized views, not substitutes for physical truth.
 
@@ -32,7 +32,7 @@
 2. Run:
 
    ```bash
-   /Users/whatsup/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --test skills/skill-hygiene/tests/test-collection-contract.mjs
+   ~/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --test skills/skill-hygiene/tests/test-collection-contract.mjs
    ```
 
    Expect failure because the module does not exist.
@@ -150,7 +150,7 @@
 1. Run all Node and shell tests:
 
    ```bash
-   NODE24=/Users/whatsup/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node
+   NODE24=~/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node
    "$NODE24" --test skills/skill-hygiene/tests/test-*.mjs
    bash skills/skill-hygiene/tests/test-scan.sh
    bash skills/skill-hygiene/tests/test-cleanup-cli.sh
@@ -175,16 +175,16 @@
 
 1. Query the authoritative GitHub repository for current `main`.
 2. If `main` differs from the reviewed revision, stop live apply, audit the new candidate, regenerate the plan, and record the decision. Do not call an older revision “latest.”
-3. Generate the live read-only plan from `/Users/whatsup/.agents/.skill-lock.json`, `/Users/whatsup/.agents/skills`, existing Claude/Factory roots, and the fixed source artifact.
+3. Generate the live read-only plan from `~/.agents/.skill-lock.json`, `~/.agents/skills`, existing Claude/Factory roots, and the fixed source artifact.
 4. Review the exact legacy disposition list, unrelated-preservation set, projection matrix, recovery destination, and plan hash.
 5. Apply using the exact plan hash, then run fresh status.
 6. Verify directly:
 
    ```text
-   /Users/whatsup/.agents/skills/prodcraft is a real directory
-   /Users/whatsup/.agents/skills/prodcraft/SKILL.md is absent
+   ~/.agents/skills/prodcraft is a real directory
+   ~/.agents/skills/prodcraft/SKILL.md is absent
    direct pc-* member count is 40
-   /Users/whatsup/.agents/skills/pc-prodcraft is the approved symlink
+   ~/.agents/skills/pc-prodcraft is the approved symlink
    top-level receipt-owned legacy directory count is 0
    INDEX.json, artifact, members, locator, and projections match
    unrelated skills and receipt bytes are unchanged

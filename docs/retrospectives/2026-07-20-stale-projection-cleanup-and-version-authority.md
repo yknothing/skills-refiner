@@ -1,7 +1,7 @@
 # 旧投影漏清理与上游版本权威复盘
 
 - **Date:** 2026-07-20
-- **Scope:** `/Users/whatsup/.agents/skills` 及全部 fresh-discovered `~/.<agent>/skills`
+- **Scope:** `~/.agents/skills` 及全部 fresh-discovered `~/.<agent>/skills`
 - **Evidence:** cleanup review/plan/quarantine records、managed collection artifacts、fresh collection status
 - **Decision:** 漏清理是控制面闭环缺陷，不是单个目录疏忽；版本必须由 immutable upstream artifact 声明
 

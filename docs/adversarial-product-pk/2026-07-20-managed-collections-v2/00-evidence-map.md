@@ -4,7 +4,7 @@
 
 - ADR: `docs/adr/0006-declarative-managed-collections-and-reconciliation-catalog.md`
 - Implementation: `skills/skill-hygiene/lib/{collection-specs,collection-tree,managed-collection-contract,managed-collection}.mjs`
-- Live root: `/Users/whatsup/.agents/skills`
+- Live root: `~/.agents/skills`
 - Review level: L2 Agent-separated advocate, challenger, and fresh-host acceptance
 - Mutation boundary: reviewers were read-only; the primary agent alone applied exact confirmed plans
 

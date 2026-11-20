@@ -547,36 +547,36 @@
       "installed_entries": [
         {
           "name": "skill-debug",
-          "entry": "/Users/whatsup/.agents/skills/skill-debug/SKILL.md",
-          "resolved": "/Users/whatsup/.agents/skills/skill-debug/SKILL.md",
+          "entry": "~/.agents/skills/skill-debug/SKILL.md",
+          "resolved": "~/.agents/skills/skill-debug/SKILL.md",
           "matches_baseline": true,
           "sha256": "b4606dbafcf2105ed20f4a01fb6a6f78fb77c9a4c7de39e00eec8e0c88be3299"
         },
         {
           "name": "skill-hygiene",
-          "entry": "/Users/whatsup/.agents/skills/skill-hygiene/SKILL.md",
-          "resolved": "/Users/whatsup/.agents/skills/skill-hygiene/SKILL.md",
+          "entry": "~/.agents/skills/skill-hygiene/SKILL.md",
+          "resolved": "~/.agents/skills/skill-hygiene/SKILL.md",
           "matches_baseline": true,
           "sha256": "9b70a16689ce0d7b462dac4d44afbc33f157a508e0e658213a57da699090eebf"
         },
         {
           "name": "skills-appreciation",
-          "entry": "/Users/whatsup/.agents/skills/skills-appreciation/SKILL.md",
-          "resolved": "/Users/whatsup/.agents/skills/skills-appreciation/SKILL.md",
+          "entry": "~/.agents/skills/skills-appreciation/SKILL.md",
+          "resolved": "~/.agents/skills/skills-appreciation/SKILL.md",
           "matches_baseline": true,
           "sha256": "2c11cde497c523b68909a342b05e8c2865e8a2b45d90c0a61737c0ff4347ba9a"
         },
         {
           "name": "skills-panorama",
-          "entry": "/Users/whatsup/.agents/skills/skills-panorama/SKILL.md",
-          "resolved": "/Users/whatsup/.agents/skills/skills-panorama/SKILL.md",
+          "entry": "~/.agents/skills/skills-panorama/SKILL.md",
+          "resolved": "~/.agents/skills/skills-panorama/SKILL.md",
           "matches_baseline": true,
           "sha256": "8bcc80c3228ea76c70e480e1f50c19ee2803babfa1a8a908ea8c2135f4d6687d"
         },
         {
           "name": "skills-refiner",
-          "entry": "/Users/whatsup/.agents/skills/skills-refiner/SKILL.md",
-          "resolved": "/Users/whatsup/.agents/skills/skills-refiner/SKILL.md",
+          "entry": "~/.agents/skills/skills-refiner/SKILL.md",
+          "resolved": "~/.agents/skills/skills-refiner/SKILL.md",
           "matches_baseline": true,
           "sha256": "b09b53b370b16e0e4b5fcff52888e7d0465e8da1dfebc04a7e39701b9091ec3a"
         }

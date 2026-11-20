@@ -40,7 +40,7 @@
 - Ruby Psych `3.1.0` 对仓库五份入口执行真实 YAML 解析；检查字段、名称、目录一致性及描述长度，全部通过。description 长度分别为 204、315、250、349、464 字符。
 - 入口的三个本地引用存在且可读取；最终独立包的全部四份文件与当前源文件一致。
 - 本机 `@google/gemini-cli` `0.39.1` 的原生 `loadSkillsFromDir` 已返回仓库五份入口及隔离包的名称、描述和正确正文。这是原生解析及正文读取证据，不是配置后的全局发现、触发、遵循或部署验收。
-- 独立评审实际尝试 `codex debug prompt-input 'List available skills.'`，在 Skill 发现之前被 `/Users/whatsup/.codex/config.toml:20:1` 的 `invalid type: map, expected a boolean` 阻断；没有修改配置。此 Codex CLI 结果不覆盖 Gemini 解析器，也不代表所有宿主都无法加载。
+- 独立评审实际尝试 `codex debug prompt-input 'List available skills.'`，在 Skill 发现之前被 `~/.codex/config.toml:20:1` 的 `invalid type: map, expected a boolean` 阻断；没有修改配置。此 Codex CLI 结果不覆盖 Gemini 解析器，也不代表所有宿主都无法加载。
 - `skill-creator/scripts/quick_validate.py` 在系统 Python 与已有打包 Python 中均因缺少 `yaml` 模块无法启动。未安装新依赖；上述真实 YAML、字段、引用和原生解析检查独立完成，不将替代检查写成该脚本通过。
 
 ## 内容绑定与证据
