@@ -2,7 +2,7 @@
 
 ## Snapshot and authority
 
-- Repository: `/Users/whatsup/workspace/2026/skills-refiner`
+- Repository: `~/workspace/2026/skills-refiner`
 - Source revision: `b7ae763af59fba031810d954b2fec5d6207fae29`
 - Review target: proposed local installed-skill disposition flow, not current implementation
 - Canonical current-state sources: repository code and docs at the revision above

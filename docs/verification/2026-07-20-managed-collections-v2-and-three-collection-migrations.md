@@ -1,7 +1,7 @@
 # Managed Collections V2 与三组全局 Skills 迁移验收
 
 - **Date:** 2026-07-20
-- **Scope:** repository implementation + `/Users/whatsup/.agents/skills` live filesystem
+- **Scope:** repository implementation + `~/.agents/skills` live filesystem
 - **Controller:** repository launcher on Node `v24.4.1`
 - **Decision:** Filesystem acceptance PASS；runtime/context claims 以本文件的独立边界为准
 - **Review level:** L2 Agent-separated，非外部独立审计

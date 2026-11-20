@@ -7,7 +7,7 @@
 - **Package:** `docs/adversarial-product-pk/2026-07-19-versioned-skill-control-plane/`
 - **Declared review level:** L2 agent-separated, shared evidence packet
 - **Observed verification window:** 2026-07-19T15:42:14Z–2026-07-19T15:43:35Z
-- **Working directory:** `/Users/whatsup/workspace/2026/skills-refiner`
+- **Working directory:** `~/workspace/2026/skills-refiner`
 
 Acceptance certifies this document package only. It does not certify implementation, migration, source stability, Agent runtime behavior or context savings.
 

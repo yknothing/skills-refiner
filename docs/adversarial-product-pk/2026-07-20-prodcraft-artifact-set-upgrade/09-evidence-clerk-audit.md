@@ -200,7 +200,7 @@ pc-requirements-engineering
 
 ## Required replay commands
 
-Run from `/Users/whatsup/workspace/2026/skills-refiner`. These commands are read-only. The pinned snapshot path is part of this evidence boundary.
+Run from `~/workspace/2026/skills-refiner`. These commands are read-only. The pinned snapshot path is part of this evidence boundary.
 
 ### Repository and receipt snapshot
 
@@ -211,16 +211,16 @@ git rev-parse origin/main
 git rev-list --left-right --count origin/main...HEAD
 git status --short --branch
 
-shasum -a 256 /Users/whatsup/.agents/.skill-lock.json
-jq '{version, skill_count:(.skills|length)}' /Users/whatsup/.agents/.skill-lock.json
-jq '[.skills | to_entries[] | select(.value.source == "yknothing/prodcraft")] | {count:length, with_resolved_revision:(map(select(.value.resolvedRevision != null))|length)}' /Users/whatsup/.agents/.skill-lock.json
+shasum -a 256 ~/.agents/.skill-lock.json
+jq '{version, skill_count:(.skills|length)}' ~/.agents/.skill-lock.json
+jq '[.skills | to_entries[] | select(.value.source == "yknothing/prodcraft")] | {count:length, with_resolved_revision:(map(select(.value.resolvedRevision != null))|length)}' ~/.agents/.skill-lock.json
 ```
 
 ### Exact set diff
 
 ```zsh
 UP=/private/tmp/prodcraft-upstream-audit-20260720-fd05978/prodcraft-fd05978dbbbf5a064205a695af47c8a550f1b224
-LOCK=/Users/whatsup/.agents/.skill-lock.json
+LOCK=~/.agents/.skill-lock.json
 REG="$UP/schemas/distribution/public-skill-registry.json"
 
 comm -12 \
@@ -260,11 +260,11 @@ rg -n 'prodcraft-runtime.json|canonical_repo_root|sibling skill packages|Do not 
   "$UP/docs/distribution/npx-skills-compat.md" \
   "$UP/scripts/install_prodcraft_global_skill.py"
 
-PYTHONDONTWRITEBYTECODE=1 /Users/whatsup/miniconda3/bin/python3 \
+PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/bin/python3 \
   "$UP/scripts/validate_prodcraft.py" --check curated-surface
 
 cd "$UP"
-PYTHONDONTWRITEBYTECODE=1 /Users/whatsup/miniconda3/bin/python3 -m unittest \
+PYTHONDONTWRITEBYTECODE=1 ~/miniconda3/bin/python3 -m unittest \
   tests.test_prodcraft_gateway_locator_contract \
   tests.test_install_prodcraft_global_skill
 ```

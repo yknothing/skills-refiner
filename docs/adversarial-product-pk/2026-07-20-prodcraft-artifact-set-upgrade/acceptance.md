@@ -8,7 +8,7 @@
 - **Package:** `docs/adversarial-product-pk/2026-07-20-prodcraft-artifact-set-upgrade/`
 - **Declared review level:** L2 agent-separated, shared evidence packet
 - **Observed verification window:** 2026-07-19T18:15:42Z–2026-07-19T18:22:58Z
-- **Working directory:** `/Users/whatsup/workspace/2026/skills-refiner`
+- **Working directory:** `~/workspace/2026/skills-refiner`
 
 Acceptance certifies package completeness and the truthfulness of a first architecture draft. It does not certify canonical promotion, implementation, migration, source stability, Agent runtime behavior, recovery or context savings.
 

@@ -4,7 +4,7 @@ set -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCHER="$SCRIPT_DIR/../bin/skills-refiner"
 NODE24_BIN="${NODE24_BIN:-/tmp/skills-refiner-node24/bin/node}"
-NODE22_BIN="${NODE22_BIN:-/Users/whatsup/.nvm/versions/node/v22.19.0/bin/node}"
+NODE22_BIN="${NODE22_BIN:-$HOME/.nvm/versions/node/v22.19.0/bin/node}"
 PASS=0
 FAIL=0
 

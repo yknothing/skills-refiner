@@ -1,7 +1,7 @@
 # 全局 Agent Skills 治理与 skills-refiner 实机验收
 
 - **Date:** 2026-08-27
-- **Scope:** repository `main@4a6a034ee295811a9b614dfa8fc15deb77a15ac9` + `/Users/whatsup/.agents/skills` + 22 个实际 Agent roots
+- **Scope:** repository `main@4a6a034ee295811a9b614dfa8fc15deb77a15ac9` + `~/.agents/skills` + 22 个实际 Agent roots
 - **Decision:** **accept-with-limitations**
 - **Review level:** 实机证据验收；复用既有 ADR/L2 设计评审结论，本轮不冒充新的外部独立审计
 
@@ -21,7 +21,7 @@
 | 层 | 角色 | 本轮证据 |
 |---|---|---|
 | 上游 Git revision / release field | 内容权威与版本权威 | exact 40-character revision；版本只从上游声明字段提取 |
-| `/Users/whatsup/.agents/skills` | 当前物理安装事实 | no-follow 扫描、内容摘要、集合 INDEX 与目录后置条件 |
+| `~/.agents/skills` | 当前物理安装事实 | no-follow 扫描、内容摘要、集合 INDEX 与目录后置条件 |
 | `.skill-lock.json` | 外部安装器历史收据 | 收据必须与当前 tree hash 绑定后才作为 direct provenance |
 | `skills-panorama` | 可重建的治理视图 | 每次从当前磁盘、收据、Agent roots 和集合状态重新生成 |
 
@@ -34,7 +34,7 @@
 | 指标 | Result |
 |---|---:|
 | 实际 Agent roots | 22 |
-| `/Users/whatsup/.agents/skills` entries | 71（70 directory + 1 symlink） |
+| `~/.agents/skills` entries | 71（70 directory + 1 symlink） |
 | 唯一 Skills | 148 |
 | Agent projections | 537 |
 | broken symlinks | 0 |
@@ -103,8 +103,8 @@ bs-ppt-master
 - operation: `better-skills-eed368bd7ae9`
 - plan: `skills-refiner.collection.plan.v4`
 - plan hash: `sha256:eed368bd7ae9041184a07e9079c80f23656aa653c802a0cd15f65a06da16fa89`
-- recovery: `/Users/whatsup/Library/Application Support/skills-refiner/recovery/operations/better-skills-eed368bd7ae9`
-- quarantine: `/Users/whatsup/.agents/skills-quarantine/collections/better-skills-eed368bd7ae9`
+- recovery: `~/Library/Application Support/skills-refiner/recovery/operations/better-skills-eed368bd7ae9`
+- quarantine: `~/.agents/skills-quarantine/collections/better-skills-eed368bd7ae9`
 
 旧混合集合没有被不可逆删除。事务只收养 exact candidate-owned member 或 allowlisted metadata；未知额外文件 fail closed。上游从 `skills/<member>` 布局物化为集合平铺布局时，仅对已声明 packaging inputs 中、可闭包解析的本地 Markdown 引用做确定性重定位；不做通用文本修补。
 
@@ -183,8 +183,8 @@ evidence.kind                  = content_bound_installer_receipt
 ## 8. 正式治理产物
 
 ```text
-/Users/whatsup/Library/Application Support/skills-refiner/panorama/latest.json
-/Users/whatsup/Library/Application Support/skills-refiner/panorama/latest.md
+~/Library/Application Support/skills-refiner/panorama/latest.json
+~/Library/Application Support/skills-refiner/panorama/latest.md
 ```
 
 生成时间：`2026-08-27T08:14:34Z`。证据摘要：

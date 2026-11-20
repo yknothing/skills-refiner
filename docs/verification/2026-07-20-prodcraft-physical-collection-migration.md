@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-20
 - **Decision scope:** local filesystem deployment and recoverability
-- **Live root:** `/Users/whatsup/.agents/skills`
+- **Live root:** `~/.agents/skills`
 - **Upstream:** `yknothing/prodcraft@fd05978dbbbf5a064205a695af47c8a550f1b224`
 - **Final plan SHA-256:** `aafeaa9ee7fb0a958847f88efd81a7f92189572f2f21e6e4baf585fb191cdb31`
 - **Final plan hash:** `sha256:de2875ed96300db11c1ce44f66784a44faadf85cbf5b15de28d06753c4961418`
@@ -14,7 +14,7 @@
 The requested physical migration is complete. The active deployment is now:
 
 ```text
-/Users/whatsup/.agents/skills/
+~/.agents/skills/
 ├── prodcraft/                         # real collection directory; no SKILL.md
 │   ├── INDEX.json
 │   ├── pc-prodcraft/
